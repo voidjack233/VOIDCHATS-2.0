@@ -9,6 +9,7 @@ import {RequestsScreen} from '../../requests';
 import {SettingsScreen} from '../../settings';
 import {useTheme} from '../../theme';
 import {BottomTabBar, type MainTab} from './BottomTabBar';
+import {StartupNavigator} from './StartupNavigator';
 
 type Detail =
   | {name: 'chat'; conversation: Conversation}
@@ -17,6 +18,27 @@ type Detail =
 
 export function AppNavigator(): React.JSX.Element {
   const theme = useTheme();
+  const [mode, setMode] = useState<'startup' | 'preview'>('startup');
+
+  return (
+    <SafeAreaView
+      style={[styles.container, {backgroundColor: theme.colors.background}]}>
+      {mode === 'startup' ? (
+        <StartupNavigator
+          onPreview={() => {
+            if (__DEV__) {
+              setMode('preview');
+            }
+          }}
+        />
+      ) : (
+        <MessengerNavigator />
+      )}
+    </SafeAreaView>
+  );
+}
+
+function MessengerNavigator(): React.JSX.Element {
   const [tab, setTab] = useState<MainTab>('conversations');
   const [detail, setDetail] = useState<Detail>(null);
 
@@ -63,11 +85,10 @@ export function AppNavigator(): React.JSX.Element {
   }
 
   return (
-    <SafeAreaView
-      style={[styles.container, {backgroundColor: theme.colors.background}]}>
+    <>
       {content}
       {!detail && <BottomTabBar selected={tab} onSelect={showTab} />}
-    </SafeAreaView>
+    </>
   );
 }
 

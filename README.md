@@ -1,6 +1,6 @@
 # VOID-E2EE 2.0
 
-Native React Native and TypeScript UI foundation for VOID. The app currently opens a dark messenger shell with empty states until account and messaging services are connected.
+Native React Native and TypeScript UI foundation for VOID. The app opens a first-launch startup flow and stops at the account-initialization boundary. The messenger shell uses empty states until account and messaging services are connected.
 
 ## Run
 
@@ -17,6 +17,7 @@ Use `npm run typecheck` for TypeScript validation and `npm run lint` for linting
 ```text
 src/
   app/             app bootstrap, providers, navigation composition
+  startup/         welcome, identity guidance, acknowledgments, initialization boundary
   onboarding/      future entry flow UI
   conversations/   conversation list UI and reusable display model
   chat/            conversation detail UI
@@ -28,7 +29,9 @@ src/
   theme/           semantic dark theme and typography/spacing tokens
 ```
 
-The frontend displays empty states until account and messaging services are connected. Message composition and VOID-ID lookup remain disabled. No networking, message delivery, identity verification, or E2EE behavior is implemented in the frontend foundation.
+Startup progresses through Welcome, How VOID Works, Protect Your Identity, Terms of Service, and a pending initialization screen. Security acknowledgment and acceptance of the development Terms copy are required to continue. State stays in memory; relaunching starts at Welcome. The initialization screen offers a development-only **Preview VOID** action that opens the messenger without creating an account.
+
+The frontend displays empty states until account and messaging services are connected. Message composition and VOID-ID lookup remain disabled. Startup does not generate VOID-IDs, cryptographic keys, or account data, and does not call the backend.
 
 ## Backend
 
