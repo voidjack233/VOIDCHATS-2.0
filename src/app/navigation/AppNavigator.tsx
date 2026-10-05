@@ -35,10 +35,6 @@ export function AppNavigator(): React.JSX.Element {
     return () => subscription.remove();
   }, [detail, tab]);
 
-  const openConversation = (conversation: Conversation) => {
-    setDetail({name: 'chat', conversation});
-  };
-
   const showTab = (nextTab: MainTab) => {
     setDetail(null);
     setTab(nextTab);
@@ -52,15 +48,14 @@ export function AppNavigator(): React.JSX.Element {
   } else if (detail?.name === 'settings') {
     content = <SettingsScreen onBack={() => setDetail(null)} />;
   } else if (tab === 'requests') {
-    content = <RequestsScreen onOpenConversation={openConversation} />;
+    content = <RequestsScreen />;
   } else if (tab === 'contacts') {
-    content = <ContactsScreen onOpenConversation={openConversation} />;
+    content = <ContactsScreen />;
   } else if (tab === 'profile') {
     content = <ProfileScreen onOpenSettings={() => setDetail({name: 'settings'})} />;
   } else {
     content = (
       <ConversationsScreen
-        onOpenConversation={openConversation}
         onOpenRequests={() => showTab('requests')}
         onOpenContacts={() => showTab('contacts')}
       />
