@@ -1,4 +1,7 @@
 {
-  "name": "VoidChats",
-  "displayName": "VOID"
+  "expo": {
+    "name": "VoidChats",
+    "slug": "voidchats",
+    "version": "1.0.0"
+  }
 }
