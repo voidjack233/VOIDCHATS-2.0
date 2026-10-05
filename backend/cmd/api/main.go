@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/account"
 	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/config"
 	httptransport "github.com/voidjack233/VOIDCHATS-2.0/backend/internal/transport/http"
 )
@@ -33,7 +34,8 @@ func run(ctx context.Context, logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := httptransport.NewServer(cfg.HTTPAddr)
+	accounts := account.NewService(account.NewMemoryRepository())
+	server := httptransport.NewServer(cfg.HTTPAddr, accounts)
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.HTTPAddr, err)

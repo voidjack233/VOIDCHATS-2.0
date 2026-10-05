@@ -32,4 +32,4 @@ The frontend displays empty states until account and messaging services are conn
 
 ## Backend
 
-The Go backend foundation provides a health endpoint and cryptographically random VOID-IDs. See [backend/README.md](backend/README.md) for setup, checks, the provisional ID format, and identity boundaries.
+The Go backend provides a health endpoint and an in-memory account creation/retrieval flow using client-generated VOID-IDs and identity public keys. See [backend/README.md](backend/README.md) for setup, API examples, checks, and identity boundaries.

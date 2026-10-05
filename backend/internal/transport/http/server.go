@@ -4,11 +4,19 @@ package httptransport
 import (
 	"net/http"
 	"time"
+
+	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/account"
 )
 
-func NewServer(addr string) *http.Server {
+func NewServer(addr string, accounts *account.Service) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", health)
+	handler := accountHandler{accounts: accounts}
+	mux.HandleFunc("/v1/accounts", handler.create)
+	mux.HandleFunc("/v1/accounts/{void_id}", handler.get)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "route not found")
+	})
 
 	return &http.Server{
 		Addr:              addr,
@@ -23,8 +31,7 @@ func NewServer(addr string) *http.Server {
 
 func health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
