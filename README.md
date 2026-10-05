@@ -29,3 +29,7 @@ src/
 ```
 
 The frontend displays empty states until account and messaging services are connected. Message composition and VOID-ID lookup remain disabled. No networking, message delivery, identity verification, or E2EE behavior is implemented in the frontend foundation.
+
+## Backend
+
+The Go backend foundation provides a health endpoint and cryptographically random VOID-IDs. See [backend/README.md](backend/README.md) for setup, checks, the provisional ID format, and identity boundaries.
