@@ -14,6 +14,7 @@ import (
 
 	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/account"
 	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/config"
+	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/database"
 	httptransport "github.com/voidjack233/VOIDCHATS-2.0/backend/internal/transport/http"
 )
 
@@ -34,8 +35,18 @@ func run(ctx context.Context, logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
-	accounts := account.NewService(account.NewMemoryRepository())
-	server := httptransport.NewServer(cfg.HTTPAddr, accounts)
+	pool, err := database.Open(ctx, cfg.Database)
+	if err != nil {
+		return err
+	}
+	// HTTP shutdown finishes before connections are closed.
+	defer pool.Close()
+	if err := database.CheckSchema(ctx, pool); err != nil {
+		return err
+	}
+	logger.Printf("API database connected; environment=%s", cfg.Environment)
+	accounts := account.NewService(account.NewPostgresRepository(pool))
+	server := httptransport.NewServer(cfg.HTTPAddr, accounts, pool.Ping)
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.HTTPAddr, err)

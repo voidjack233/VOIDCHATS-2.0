@@ -7,10 +7,45 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestRunFailsWhenDatabaseUnavailableWithoutMemoryFallback(t *testing.T) {
+	dbListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPort := dbListener.Addr().(*net.TCPAddr).Port
+	if err := dbListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Occupying the HTTP port makes any accidental fallback fail differently.
+	httpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer httpListener.Close()
+	for name, value := range map[string]string{
+		"PGHOST": "127.0.0.1", "PGPORT": strconv.Itoa(dbPort), "PGUSER": "test", "PGDATABASE": "test",
+		"PGPASSWORD": "test-only-password", "PGSSLMODE": "disable", "PGSSLROOTCERT": "",
+		"VOID_HTTP_ADDR": httpListener.Addr().String(), "VOID_ENV": "test",
+	} {
+		t.Setenv(name, value)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = run(ctx, log.New(io.Discard, "", 0))
+	if err == nil || !strings.HasPrefix(err.Error(), "database unavailable") {
+		t.Fatalf("unavailable database did not stop startup before HTTP: %v", err)
+	}
+	if strings.Contains(err.Error(), "test-only-password") || strings.Contains(err.Error(), "postgres://") {
+		t.Fatal("startup failure exposed connection secrets")
+	}
+}
 
 func TestServeWaitsForInflightRequestDuringShutdown(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

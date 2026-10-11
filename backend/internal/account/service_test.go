@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,7 +15,7 @@ func TestServiceCreateAndRetrievePreservesClientIdentity(t *testing.T) {
 	const voidID = " client-generated-id "
 	const displayName = " Jack 台灣 "
 	const publicKey = " encoded-public-key "
-	before := time.Now().UTC()
+	before := time.Now().UTC().Truncate(time.Microsecond)
 	created, err := service.Create(context.Background(), voidID, displayName, publicKey)
 	after := time.Now().UTC()
 	if err != nil {
@@ -28,6 +29,9 @@ func TestServiceCreateAndRetrievePreservesClientIdentity(t *testing.T) {
 	}
 	if created.CreatedAt.Location() != time.UTC {
 		t.Fatalf("CreatedAt location = %v, want UTC", created.CreatedAt.Location())
+	}
+	if created.CreatedAt.Nanosecond()%1000 != 0 {
+		t.Fatal("CreatedAt must use PostgreSQL-compatible microsecond precision")
 	}
 	stored, err := service.GetByVOIDID(context.Background(), voidID)
 	if err != nil || stored != created {
@@ -94,6 +98,53 @@ func TestServiceLookupValidationAndNotFound(t *testing.T) {
 	}
 	if _, err := NewService(NewMemoryRepository()).GetByVOIDID(context.Background(), "missing-id"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing GetByVOIDID() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceRejectsPostgresIncompatibleTextBeforeStorage(t *testing.T) {
+	tests := []struct {
+		name        string
+		id          string
+		displayName string
+		publicKey   string
+	}{
+		{"NUL in ID", "client\x00id", "Jack", "public-key"},
+		{"NUL in display name", "client-id", "Ja\x00ck", "public-key"},
+		{"NUL in public key", "client-id", "Jack", "public\x00key"},
+		{"invalid UTF-8 in ID", "client\xffid", "Jack", "public-key"},
+		{"invalid UTF-8 in display name", "client-id", "Ja\xffck", "public-key"},
+		{"invalid UTF-8 in public key", "client-id", "Jack", "public\xffkey"},
+		{"513-byte ID", strings.Repeat("a", 513), "Jack", "public-key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repository := &stubRepository{}
+			service := NewService(repository)
+			if created, err := service.Create(context.Background(), tt.id, tt.displayName, tt.publicKey); !errors.Is(err, ErrInvalidAccount) || created != (Account{}) {
+				t.Fatalf("Create() = %+v, %v; want zero Account, ErrInvalidAccount", created, err)
+			}
+			if repository.createCalls != 0 {
+				t.Fatal("incompatible input reached repository")
+			}
+		})
+	}
+	for _, id := range []string{"client\xffid", "client\x00id", strings.Repeat("a", 513)} {
+		repository := &stubRepository{}
+		if _, err := NewService(repository).GetByVOIDID(context.Background(), id); !errors.Is(err, ErrInvalidAccount) {
+			t.Fatalf("incompatible lookup = %v, want ErrInvalidAccount", err)
+		}
+		if repository.getCalls != 0 {
+			t.Fatal("incompatible lookup reached repository")
+		}
+	}
+	service := NewService(NewMemoryRepository())
+	id := strings.Repeat("界", 170) + "ab"
+	created, err := service.Create(context.Background(), id, "Jack", "public-key")
+	if err != nil || created.VOIDID != id {
+		t.Fatalf("512-byte Create() changed or rejected the ID: %+v, %v", created, err)
+	}
+	if stored, err := service.GetByVOIDID(context.Background(), id); err != nil || stored.VOIDID != id {
+		t.Fatalf("512-byte GetByVOIDID() = %+v, %v", stored, err)
 	}
 }
 

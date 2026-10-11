@@ -24,6 +24,7 @@ src/
   conversations/   conversation list UI and reusable display model
   chat/            conversation detail UI
   crypto/          typed native OpenMLS interface, independent of screens
+  backend/         typed backend origins and development-only health diagnostic
   requests/        message requests UI
   contacts/        contacts and VOID-ID discovery UI
   profile/         profile UI
@@ -46,4 +47,6 @@ See [verification results and remaining device checks](docs/openmls-verification
 
 ## Backend
 
-The Go backend provides a health endpoint and an in-memory account creation/retrieval flow using client-generated VOID-IDs and identity public keys. See [backend/README.md](backend/README.md) for setup, API examples, checks, and identity boundaries.
+The Go backend persists public account data in PostgreSQL and provides health, readiness, and account creation/retrieval endpoints. Clients supply their VOID-ID and identity public key; native MLS identity state remains on the device. The Android debug app has a Settings diagnostic that checks backend health without initializing an account.
+
+Follow [the development infrastructure guide](docs/DEVELOPMENT.md) for Podman startup, local credentials, migrations, persistence checks, physical-phone LAN access, and Cloudflare Tunnel boundaries. PostgreSQL publishes only on host loopback port 15432; Android cleartext support is debug-only and release origins require HTTPS. See [backend/README.md](backend/README.md) for the API contract and [development verification results](docs/development-verification.md) for completed checks and remaining device/external verification. Application authentication and account ownership proof remain future work.

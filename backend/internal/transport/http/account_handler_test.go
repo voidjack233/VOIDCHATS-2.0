@@ -16,7 +16,7 @@ import (
 const validAccountJSON = `{"void_id":"client-generated-id","display_name":"Jack","identity_public_key":"encoded-public-key"}`
 
 func TestAccountCreateGetAndDuplicate(t *testing.T) {
-	handler := NewServer("", account.NewService(account.NewMemoryRepository())).Handler
+	handler := NewServer("", account.NewService(account.NewMemoryRepository()), nil).Handler
 	response := performRequest(handler, http.MethodPost, "/v1/accounts", validAccountJSON)
 	created := decodeAccount(t, response, http.StatusCreated)
 	if created.VOIDID != "client-generated-id" || created.DisplayName != "Jack" || created.IdentityPublicKey != "encoded-public-key" || created.CreatedAt.IsZero() {
@@ -38,13 +38,21 @@ func TestAccountCreateGetAndDuplicate(t *testing.T) {
 }
 
 func TestAccountNotFound(t *testing.T) {
-	handler := NewServer("", account.NewService(account.NewMemoryRepository())).Handler
+	handler := NewServer("", account.NewService(account.NewMemoryRepository()), nil).Handler
 	response := performRequest(handler, http.MethodGet, "/v1/accounts/missing", "")
 	assertJSONError(t, response, http.StatusNotFound)
 }
 
+func TestAccountRejectsInvalidUTF8Lookup(t *testing.T) {
+	// URL percent decoding can produce invalid UTF-8 even when the URL itself
+	// contains only ASCII. Reject it before reaching the database repository.
+	handler := NewServer("", account.NewService(failingRepository{}), nil).Handler
+	response := performRequest(handler, http.MethodGet, "/v1/accounts/%FF", "")
+	assertJSONError(t, response, http.StatusBadRequest)
+}
+
 func TestAccountPreservesOpaqueClientIdentity(t *testing.T) {
-	handler := NewServer("", account.NewService(account.NewMemoryRepository())).Handler
+	handler := NewServer("", account.NewService(account.NewMemoryRepository()), nil).Handler
 	request := createAccountRequest{
 		VOIDID:            "Client:MiXeD/opaque id",
 		DisplayName:       " Jack ",
@@ -84,10 +92,14 @@ func TestAccountRejectsInvalidJSONBeforeStorage(t *testing.T) {
 		{name: "number", body: `42`},
 		{name: "wrong field type", body: `{"void_id":42,"display_name":"Jack","identity_public_key":"public"}`},
 		{name: "invalid UTF-8 public key", body: strings.Replace(validAccountJSON, "encoded-public-key", "public-"+string([]byte{0xff})+"-key", 1)},
+		{name: "NUL ID", body: strings.Replace(validAccountJSON, "client-generated-id", `client\u0000id`, 1)},
+		{name: "NUL display name", body: strings.Replace(validAccountJSON, "Jack", `Jack\u0000`, 1)},
+		{name: "NUL public key", body: strings.Replace(validAccountJSON, "encoded-public-key", `public\u0000key`, 1)},
+		{name: "oversized ID", body: strings.Replace(validAccountJSON, "client-generated-id", strings.Repeat("x", 513), 1)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service := account.NewService(account.NewMemoryRepository())
-			handler := NewServer("", service).Handler
+			handler := NewServer("", service, nil).Handler
 			response := performRequest(handler, http.MethodPost, "/v1/accounts", test.body)
 			assertJSONError(t, response, http.StatusBadRequest)
 			if _, err := service.GetByVOIDID(context.Background(), "client-generated-id"); !errors.Is(err, account.ErrNotFound) {
@@ -119,7 +131,7 @@ func TestAccountRequiresEveryField(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				handler := NewServer("", account.NewService(account.NewMemoryRepository())).Handler
+				handler := NewServer("", account.NewService(account.NewMemoryRepository()), nil).Handler
 				response := performRequest(handler, http.MethodPost, "/v1/accounts", string(body))
 				assertJSONError(t, response, http.StatusBadRequest)
 			})
@@ -129,7 +141,7 @@ func TestAccountRequiresEveryField(t *testing.T) {
 
 func TestAccountBodyLimit(t *testing.T) {
 	service := account.NewService(account.NewMemoryRepository())
-	handler := NewServer("", service).Handler
+	handler := NewServer("", service, nil).Handler
 	for _, body := range []string{
 		`{"void_id":"client-generated-id","display_name":"` + strings.Repeat("x", maxAccountBodyBytes) + `","identity_public_key":"public"}`,
 		validAccountJSON + strings.Repeat(" ", maxAccountBodyBytes),
@@ -155,7 +167,7 @@ func TestAccountMethods(t *testing.T) {
 				continue
 			}
 			t.Run(method+route.path, func(t *testing.T) {
-				handler := NewServer("", account.NewService(account.NewMemoryRepository())).Handler
+				handler := NewServer("", account.NewService(account.NewMemoryRepository()), nil).Handler
 				response := performRequest(handler, method, route.path, "")
 				assertJSONError(t, response, http.StatusMethodNotAllowed)
 				if got := response.Header().Get("Allow"); got != route.allowed {
@@ -168,7 +180,7 @@ func TestAccountMethods(t *testing.T) {
 
 func TestAccountRepositoryErrorsArePrivate(t *testing.T) {
 	service := account.NewService(failingRepository{})
-	handler := NewServer("", service).Handler
+	handler := NewServer("", service, nil).Handler
 	for _, request := range []struct {
 		method string
 		path   string

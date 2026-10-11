@@ -1,0 +1,27 @@
+name: void-development
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18.6-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8ee2b08eb1a24a647c
+    container_name: void-dev-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-void_dev}
+      POSTGRES_DB: ${PGDATABASE:-void_dev}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in the ignored root .env}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    ports:
+      - "127.0.0.1:${PGPORT:-15432}:5432"
+    volumes:
+      # PostgreSQL 18+ uses a versioned PGDATA beneath this parent directory.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  postgres-data:
+    name: void-dev-postgres-data

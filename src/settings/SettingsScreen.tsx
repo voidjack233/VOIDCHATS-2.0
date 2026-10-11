@@ -3,6 +3,11 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 import { useTheme } from '../theme';
 import { AppText, Divider, IconButton, Screen } from '../ui';
 
+// Release bundles do not load the selector or connectivity diagnostic.
+const DevelopmentBackendDiagnostic = __DEV__
+  ? (require('../backend/BackendDiagnostic') as typeof import('../backend/BackendDiagnostic')).BackendDiagnostic
+  : null;
+
 export interface SettingsScreenProps {
   onBack: () => void;
 }
@@ -63,6 +68,7 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
         <AppText variant="caption" color="textMuted" style={{ marginTop: theme.spacing.xl }}>
           More preferences are coming soon.
         </AppText>
+        {DevelopmentBackendDiagnostic ? <DevelopmentBackendDiagnostic /> : null}
       </ScrollView>
     </Screen>
   );

@@ -60,7 +60,7 @@ func (handler accountHandler) create(w http.ResponseWriter, r *http.Request) {
 	created, err := handler.accounts.Create(r.Context(), request.VOIDID, request.DisplayName, request.IdentityPublicKey)
 	switch {
 	case errors.Is(err, account.ErrInvalidAccount):
-		writeError(w, http.StatusBadRequest, "void_id, display_name, and identity_public_key are required")
+		writeError(w, http.StatusBadRequest, "required fields must be valid nonblank strings")
 	case errors.Is(err, account.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, "void_id already exists")
 	case err != nil:

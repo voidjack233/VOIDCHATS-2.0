@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/voidid"
 )
@@ -24,8 +25,8 @@ func NewService(repository Repository) *Service {
 }
 
 // Create registers the public identity submitted by the client. Validation
-// currently requires nonblank fields without selecting an ID format or public
-// key encoding. Submitted strings are preserved exactly as provided.
+// requires nonblank PostgreSQL-compatible text without selecting an ID format
+// or public key encoding. Submitted strings are preserved exactly as provided.
 func (s *Service) Create(ctx context.Context, voidID, displayName, identityPublicKey string) (Account, error) {
 	if err := ctx.Err(); err != nil {
 		return Account{}, err
@@ -33,18 +34,18 @@ func (s *Service) Create(ctx context.Context, voidID, displayName, identityPubli
 	if err := voidid.ValidateSubmitted(voidID); err != nil {
 		return Account{}, fmt.Errorf("%w: void_id is invalid", ErrInvalidAccount)
 	}
-	if strings.TrimSpace(displayName) == "" {
-		return Account{}, fmt.Errorf("%w: display_name is required", ErrInvalidAccount)
+	if strings.TrimSpace(displayName) == "" || !utf8.ValidString(displayName) || strings.ContainsRune(displayName, '\x00') {
+		return Account{}, fmt.Errorf("%w: display_name is invalid", ErrInvalidAccount)
 	}
-	if strings.TrimSpace(identityPublicKey) == "" {
-		return Account{}, fmt.Errorf("%w: identity_public_key is required", ErrInvalidAccount)
+	if strings.TrimSpace(identityPublicKey) == "" || !utf8.ValidString(identityPublicKey) || strings.ContainsRune(identityPublicKey, '\x00') {
+		return Account{}, fmt.Errorf("%w: identity_public_key is invalid", ErrInvalidAccount)
 	}
 
 	account := Account{
 		VOIDID:            voidID,
 		DisplayName:       displayName,
 		IdentityPublicKey: identityPublicKey,
-		CreatedAt:         time.Now().UTC(),
+		CreatedAt:         time.Now().UTC().Truncate(time.Microsecond),
 	}
 	if err := s.repository.Create(ctx, account); err != nil {
 		return Account{}, err

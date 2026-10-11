@@ -2,15 +2,17 @@
 package httptransport
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/voidjack233/VOIDCHATS-2.0/backend/internal/account"
 )
 
-func NewServer(addr string, accounts *account.Service) *http.Server {
+func NewServer(addr string, accounts *account.Service, checkReady func(context.Context) error) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", health)
+	mux.HandleFunc("/ready", readiness(checkReady))
 	handler := accountHandler{accounts: accounts}
 	mux.HandleFunc("/v1/accounts", handler.create)
 	mux.HandleFunc("/v1/accounts/{void_id}", handler.get)
@@ -26,6 +28,24 @@ func NewServer(addr string, accounts *account.Service) *http.Server {
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func readiness(check func(context.Context) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		status, value := http.StatusOK, "ready"
+		if check == nil || check(ctx) != nil {
+			status, value = http.StatusServiceUnavailable, "not_ready"
+		}
+		writeJSON(w, status, struct {
+			Status string `json:"status"`
+		}{Status: value})
 	}
 }
 
