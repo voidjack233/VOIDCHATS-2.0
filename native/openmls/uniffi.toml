@@ -1,0 +1,7 @@
+[bindings.kotlin]
+package_name = "com.voidchats.openmls"
+cdylib_name = "void_openmls"
+
+[bindings.swift]
+module_name = "VoidOpenMls"
+ffi_module_name = "VoidOpenMlsFFI"

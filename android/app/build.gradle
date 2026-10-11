@@ -7,6 +7,8 @@ apply plugin: "com.facebook.react"
  * By default you don't need to apply any configuration, just uncomment the lines you need.
  */
 react {
+    entryFile = file("../../native-entry.js")
+    bundleConfig = file("../../metro.native.config.js")
     /* Folders */
     //   The root of your project, i.e. where "package.json" lives. Default is '../..'
     // root = file("../../")
@@ -78,6 +80,12 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "com.voidchats"
+    sourceSets {
+        main {
+            java.srcDir layout.buildDirectory.dir("generated/openmls/kotlin")
+            jniLibs.srcDir layout.buildDirectory.dir("generated/openmls/jniLibs")
+        }
+    }
     defaultConfig {
         applicationId "com.voidchats"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -107,7 +115,29 @@ android {
     }
 }
 
+def buildOpenMls = tasks.register("buildOpenMls", Exec) {
+    description = "Build the pinned OpenMLS Rust library and generate its Kotlin bindings"
+    workingDir rootProject.projectDir.parentFile
+    commandLine "node", "scripts/build-openmls-android.mjs", providers.gradleProperty("reactNativeArchitectures").getOrElse("arm64-v8a")
+    inputs.dir("../../native/openmls/src")
+    inputs.files("../../native/openmls/Cargo.toml", "../../native/openmls/Cargo.lock", "../../native/openmls/uniffi.toml", "../../native/openmls/rust-toolchain.toml", "../../scripts/build-openmls-android.mjs", "../../scripts/openmls-host-flags.mjs")
+    inputs.property("architectures", providers.gradleProperty("reactNativeArchitectures").getOrElse("arm64-v8a"))
+    outputs.dir layout.buildDirectory.dir("generated/openmls")
+}
+
+tasks.named("preBuild").configure { dependsOn buildOpenMls }
+
+tasks.withType(Test).configureEach {
+    // Host JVM tests load the host Rust library, never an Android .so.
+    systemProperty "jna.library.path", file("../../native/openmls/target/debug").absolutePath
+}
+
 dependencies {
+    // UniFFI's supported Kotlin binding backend uses JNA; keep its native AAR pinned.
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
+    testImplementation("junit:junit:4.13.2")
+    // The Android AAR has Android native binaries; the host test needs JNA's host binaries.
+    testRuntimeOnly("net.java.dev.jna:jna:5.19.1@jar")
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 

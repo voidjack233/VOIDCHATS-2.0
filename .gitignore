@@ -41,6 +41,11 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
+# Local credentials
+.env
+.env.*
+!.env.example
+
 # fastlane
 #
 # It is recommended to not store the screenshots in the git repo. Instead, use fastlane to re-generate the
@@ -68,6 +73,9 @@ yarn-error.log
 
 # testing
 /coverage
+
+# Native Rust build outputs (Cargo.lock is committed)
+**/target/
 
 # Yarn
 .yarn/*

@@ -4,16 +4,20 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "react-native start",
-    "android": "react-native run-android",
+    "start": "react-native start --config metro.native.config.js",
+    "android": "react-native run-android --no-packager",
+    "android:build": "node scripts/android-build.mjs",
+    "native:android": "node scripts/build-openmls-android.mjs",
+    "crypto:test": "node scripts/test-openmls.mjs",
+    "crypto:bridgecheck": "node scripts/check-openmls-bindings.mjs",
     "ios": "react-native run-ios",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src index.js babel.config.js metro.config.js .eslintrc.js --ext .js,.ts,.tsx"
+    "lint": "eslint src index.js native-entry.js react-native.config.js babel.config.js metro.config.js metro.native.config.js .eslintrc.js --ext .js,.ts,.tsx"
   },
   "dependencies": {
     "expo": "~57.0.17",
     "react": "^19.2.3",
-    "react-native": "^0.86.3",
+    "react-native": "0.86.3",
     "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
@@ -23,10 +27,10 @@
     "@react-native-community/cli": "20.2.0",
     "@react-native-community/cli-platform-android": "20.2.0",
     "@react-native-community/cli-platform-ios": "20.2.0",
-    "@react-native/babel-preset": "0.87.1",
-    "@react-native/eslint-config": "0.87.1",
-    "@react-native/metro-config": "0.87.1",
-    "@react-native/typescript-config": "0.87.1",
+    "@react-native/babel-preset": "0.86.3",
+    "@react-native/eslint-config": "0.86.3",
+    "@react-native/metro-config": "0.86.3",
+    "@react-native/typescript-config": "0.86.3",
     "@types/react": "~19.2.4",
     "eslint": "^8.19.0",
     "typescript": "~6.0.3"
