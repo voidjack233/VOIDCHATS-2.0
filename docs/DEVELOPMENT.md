@@ -262,4 +262,3 @@ The current mobile diagnostic sends no credentials and does not implement an Acc
 Stop the API, diagnostic, and tunnels with Ctrl+C. Use `.\scripts\dev.ps1 stop` or `bash scripts/dev.sh stop` for PostgreSQL. The named volume remains intact; `up` starts the same database again. Stop the Podman machine only after checking that it does not host other work.
 
 Do not use `down --volumes`, volume pruning, or machine removal for ordinary shutdown. Record separately whether a check ran on the host, a physical phone, or through an authenticated external path. A host LAN check, a configuration validation, and a live external/device check establish different things; use the [verification report](development-verification.md) for the checks actually completed.
-
