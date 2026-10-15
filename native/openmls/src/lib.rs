@@ -1,9 +1,12 @@
-//! Native-only MLS engine. Secret storage is never part of the FFI interface.
+//! Native-only MLS engine. Secret state crosses only the trusted native storage
+//! callback boundary; it is never an application/JavaScript export.
 mod engine;
 mod persistence;
 mod self_test;
+mod storage;
 
 pub use engine::MlsEngine;
+pub use storage::{MlsStorage, StoredMlsState};
 
 pub const OPENMLS_VERSION: &str = "0.9.1";
 pub const CIPHERSUITE_NAME: &str = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519";
@@ -24,6 +27,8 @@ pub enum MlsError {
     InvalidState,
     #[error("Native storage failed")]
     StorageFailure,
+    #[error("Existing native MLS state is missing")]
+    MissingState,
     #[error("Cryptographic operation failed")]
     CryptoFailure,
     #[error("Invalid or consumed snapshot")]

@@ -18,7 +18,7 @@ export interface MlsEngineInfo {
   openmlsVersion: string;
   ciphersuite: string;
   protocolVersion: string;
-  durablePersistence: false;
+  durablePersistence: boolean;
 }
 
 export interface MlsClientInfo {
@@ -46,6 +46,23 @@ export interface MlsDecryptedMessage {
   epoch: string;
 }
 
+export interface MlsDecryptionCursor {
+  createdAt: number;
+  id: string;
+}
+
+/** Authenticated application data committed with its receiving ratchet. */
+export interface MlsStoredDecryption extends MlsDecryptedMessage {
+  eventId: string;
+  groupIdBase64: MlsBase64;
+  createdAt: number;
+}
+
+export interface MlsStoredDecryptionPage {
+  items: MlsStoredDecryption[];
+  nextCursor: MlsDecryptionCursor | null;
+}
+
 export interface MlsSelfTestReport {
   openmlsVersion: string;
   aliceToBob: boolean;
@@ -61,6 +78,10 @@ export interface MlsSelfTestReport {
  */
 export interface OpenMls {
   initialize(): Promise<MlsEngineInfo>;
+  /** Public client metadata restored from native storage; no secret snapshots. */
+  listClients(): Promise<MlsClientInfo[]>;
+  /** Read committed application data after a crash without decrypting again. */
+  readStoredDecryptions(before?: MlsDecryptionCursor | null, limit?: number): Promise<MlsStoredDecryptionPage>;
   createClient(credentialIdentityBase64: MlsBase64): Promise<MlsClientInfo>;
   generateKeyPackage(clientHandle: MlsClientHandle): Promise<MlsBase64>;
   createGroup(
@@ -115,6 +136,7 @@ export type OpenMlsBridgeErrorCode =
   | 'UNSUPPORTED_PLATFORM'
   | 'NATIVE_MODULE_UNAVAILABLE'
   | 'NATIVE_MODULE_INCOMPATIBLE'
+  | 'INVALID_INPUT'
   | 'DEVELOPMENT_ONLY';
 
 export type OpenMlsAvailability =

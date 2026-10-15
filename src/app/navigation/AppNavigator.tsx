@@ -8,17 +8,26 @@ import {ProfileScreen} from '../../profile';
 import {RequestsScreen} from '../../requests';
 import {SettingsScreen} from '../../settings';
 import {useTheme} from '../../theme';
+import {useStorage} from '../../storage';
 import {BottomTabBar, type MainTab} from './BottomTabBar';
 import {StartupNavigator} from './StartupNavigator';
 
 type Detail =
-  | {name: 'chat'; conversation: Conversation}
+  | {name: 'chat'; conversation: Conversation; localDeviceId: string}
   | {name: 'settings'}
   | null;
 
 export function AppNavigator(): React.JSX.Element {
   const theme = useTheme();
+  const storage = useStorage();
   const [mode, setMode] = useState<'startup' | 'preview'>('startup');
+
+  useEffect(() => {
+    // Restoring a local development identity does not register a VOID account.
+    if (__DEV__ && storage.status === 'ready' && storage.identity) {
+      setMode('preview');
+    }
+  }, [storage.status, storage.identity]);
 
   return (
     <SafeAreaView
@@ -39,8 +48,16 @@ export function AppNavigator(): React.JSX.Element {
 }
 
 function MessengerNavigator(): React.JSX.Element {
+  const storage = useStorage();
   const [tab, setTab] = useState<MainTab>('conversations');
   const [detail, setDetail] = useState<Detail>(null);
+
+  const localDeviceId = storage.status === 'ready' ? storage.identity?.localDeviceId : undefined;
+  useEffect(() => {
+    if (detail?.name === 'chat' && detail.localDeviceId !== localDeviceId) {
+      setDetail(null);
+    }
+  }, [detail, localDeviceId]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -63,7 +80,7 @@ function MessengerNavigator(): React.JSX.Element {
   };
 
   let content: React.JSX.Element;
-  if (detail?.name === 'chat') {
+  if (detail?.name === 'chat' && localDeviceId && detail.localDeviceId === localDeviceId) {
     content = (
       <ChatScreen conversation={detail.conversation} onBack={() => setDetail(null)} />
     );
@@ -80,6 +97,9 @@ function MessengerNavigator(): React.JSX.Element {
       <ConversationsScreen
         onOpenRequests={() => showTab('requests')}
         onOpenContacts={() => showTab('contacts')}
+        onOpenConversation={conversation => {
+          if (localDeviceId) { setDetail({name: 'chat', conversation, localDeviceId}); }
+        }}
       />
     );
   }

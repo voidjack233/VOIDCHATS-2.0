@@ -25,6 +25,11 @@ thiserror = "=2.0.21"
 uniffi = "=0.32.2"
 zeroize = "=1.9.1"
 
+[dev-dependencies]
+# Host-only protected restart fixtures. Production storage uses native SQLCipher.
+aes-gcm = "=0.10.3"
+tempfile = "=3.27.0"
+
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"

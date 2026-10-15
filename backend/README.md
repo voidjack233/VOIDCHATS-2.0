@@ -4,6 +4,8 @@ The Go API uses standard-library HTTP and the maintained pgx PostgreSQL driver. 
 
 ## Run locally
 
+For the installed Windows PostgreSQL service on port 5432, follow [the native PostgreSQL and manual API guide](../docs/NATIVE-POSTGRES.md), then start Go from the repository root with `.\scripts\run-backend.ps1`. The launcher loads the backend connection configuration and runs Go in the foreground. This setup uses `void_dev_native`, the `void_native_dev` application role, and ignored `.env.native` credentials; it includes pgAdmin inspection and needs no Podman. The commands below describe the optional container setup.
+
 Install 64-bit [Go 1.26 or newer](https://go.dev/dl/), Node.js, and Podman. From the repository root, create the ignored local environment once, preserving any existing password, then run:
 
 ```powershell
@@ -16,7 +18,7 @@ Install 64-bit [Go 1.26 or newer](https://go.dev/dl/), Node.js, and Podman. From
 
 On a Bash host, use the corresponding `bash scripts/dev.sh` actions. The API runs in the foreground; Ctrl+C shuts it down. Follow [the development guide](../docs/DEVELOPMENT.md) for credential generation, host setup, WSL compatibility, persistence checks, physical Android LAN access, and protected tunnels. [The verification report](../docs/development-verification.md) records actual checks and limitations.
 
-The helper environment selects PostgreSQL at `127.0.0.1:15432`, container `void-dev-database`, and persistent volume `void-dev-postgres-data`. An existing native PostgreSQL server on 5432 remains independent. Direct Go commands do not load `.env`; load the intended environment before running them.
+The Podman helper environment selects PostgreSQL at `127.0.0.1:15432`, container `void-dev-database`, and persistent volume `void-dev-postgres-data`. An existing native PostgreSQL server on 5432 remains independent. Direct Go commands do not load `.env`; load the intended environment before running them.
 
 ## Configuration and lifecycle
 
@@ -25,7 +27,7 @@ The helper environment selects PostgreSQL at `127.0.0.1:15432`, container `void-
 | `VOID_HTTP_ADDR` | Optional full host:port override |
 | `VOID_HTTP_HOST`, `VOID_HTTP_PORT` | Default `127.0.0.1`, `8080` when no full override |
 | `VOID_ENV` | `development` by default; accepts `development`, `test`, or `production` |
-| `PGHOST`, `PGPORT` | Direct Go defaults `127.0.0.1`, `5432`; development helpers select `15432` |
+| `PGHOST`, `PGPORT` | Direct Go defaults `127.0.0.1`, `5432`; `dev.ps1`/`dev.sh` select `15432` |
 | `PGUSER`, `PGDATABASE` | Default `void_dev` |
 | `PGPASSWORD` | Required server credential; never sent to the mobile app |
 | `PGSSLMODE` | `disable` only for loopback; `verify-full` required for remote hosts |

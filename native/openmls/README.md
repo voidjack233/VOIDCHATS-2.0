@@ -5,13 +5,13 @@ This independent Rust module uses official OpenMLS **0.9.1**, RustCrypto provide
 ## Structure
 
 - `src/engine.rs`: isolated providers, credentials/signing keys, KeyPackages, groups, Welcome, messages, commits, lifecycle and limits.
-- `src/persistence.rs`: complete provider-storage JSON serialization and group restoration inside Rust.
-- `src/self_test.rs`, `src/tests.rs`: independent Alice/Bob fixtures and rejection/state/restoration tests.
+- `src/persistence.rs`, `src/storage.rs`: complete versioned engine/provider serialization, restoration and the trusted native storage callback.
+- `src/self_test.rs`, `src/tests.rs`, `src/durable_tests.rs`: independent Alice/Bob fixtures, rejection/state/restoration tests and actual child-process restart/failure tests.
 - `uniffi.toml`: generated Kotlin configuration and future Swift configuration. iOS is not implemented or verified.
 - `../../src/crypto`: typed Promise interface, public binary artifacts transported as canonical base64, opaque client/snapshot handles, u64 epochs transported as decimal strings.
 - `../../android/app/src/main/java/com/voidchats/crypto`: React Native adapter to generated UniFFI Kotlin, with serialized work off the JS thread.
 
-No frontend screen initializes this engine. Credentials are caller-supplied bytes; BasicCredentials authenticate possession of a signing key and do not verify a VOID account. Future registration must bind these public keys to account identity. A public VOID-ID is never key material.
+Normal startup opens existing protected state without creating an identity. Explicit debug-only local storage setup in Settings creates the first local device identity; it does not register an account. Credentials are caller-supplied bytes; BasicCredentials authenticate possession of a signing key and do not verify a VOID account. Future registration must bind these public keys to account identity. A public VOID-ID is never key material.
 
 ## Local validation
 
@@ -28,7 +28,7 @@ npm run lint
 
 `crypto:test` runs locked Rust tests first. `crypto:bridgecheck` builds a host Rust library and runs actual generated Kotlin/JNA operations through Android host unit tests. It requires the Android build tools and tests the FFI ABI separately from a physical phone. Gradle generates matching bindings and builds the Android `.so` into ignored build directories. The default ABI is `arm64-v8a`; other installed targets can be selected with `npm run native:android -- arm64-v8a,armeabi-v7a,x86_64` and the matching Gradle `reactNativeArchitectures` property.
 
-The debug APK is a custom React Native development build. Expo Go remains available for UI preview, but cannot load this native engine. Start Metro with `npm start`; connect a physical phone with USB debugging, verify `adb devices`, run `adb reverse tcp:8081 tcp:8081`, then `npm run android` to install using that Metro server. No emulator is required. In React Native DevTools, run `await globalThis.voidMlsSelfTest()` to exercise the actual React Native Promise adapter and obtain the five boolean checks. This lazy hook and the native self-test are available only in development builds. No diagnostic users are inserted into the UI and normal startup does not initialize MLS.
+The debug APK is a custom React Native development build. Expo Go remains available for UI preview, but cannot load this native engine. Start Metro with `npm start`; connect an Android device or emulator, verify `adb devices`, run `adb reverse tcp:8081 tcp:8081`, then `npm run android` to install using that Metro server. In React Native DevTools, run `await globalThis.voidMlsSelfTest()` to exercise the actual React Native Promise adapter and obtain the five boolean checks. This lazy hook and the isolated native self-test are available only in development builds. No diagnostic users are inserted into the application database or UI.
 
 ## State and persistence boundary
 
@@ -38,8 +38,8 @@ Message processing can advance receive-ratchet state even when ciphertext authen
 
 `suspendClient` serializes all private provider records and group IDs **inside Rust**, destroys the active client, and returns a random snapshot handle. `restoreClient` consumes that handle once, creates a new provider, restores the signing key and groups, and returns only public identity information. `discardSnapshot` and `releaseClient` release their native state. Serialized buffers and storage copies are wiped on release where the involved types permit it; no complete process-memory erasure guarantee is made.
 
-Snapshots are **memory only** and disappear when the native module/process ends. Tests cover fresh engine/provider restoration from internal serialized bytes, including KeyPackage private material, pending commits and replay state. There is no filesystem persistence, secure keystore implementation, process-restart persistence, or secret-state export to JavaScript. `durablePersistence` is `false`.
+`MlsEngine::new()` retains the isolated memory-engine behavior for diagnostics. `MlsEngine::open(storage, initialize_if_missing)` uses a native storage callback to restore the complete versioned engine checkpoint, stable client handles, provider records, group state, signing identities, pending commits and replay/ratchet state. It checkpoints every mutation, including protocol errors, with compare-and-swap revision advancement. The Android callback writes inside the protected SQLCipher transaction; native code commits before returning any cryptographic result to JavaScript. Secret checkpoint bytes pass only between Rust and trusted native storage, never through the React Native module.
 
-Before production, implement authenticated encrypted native storage using platform-backed key protection, atomic transactions with MLS mutations, versioned migration, and rollback/replay protection. Never put private keys or MLS snapshots in plaintext AsyncStorage or send them to the backend. Identity verification, native bridge/device validation, lifecycle handling, and transport commit ordering require further work. This wrapper/application is not covered by the dependency's audit.
+Missing/incompatible/corrupt checkpoint data and storage failures fail closed. Cached receiving ratchets are flushed through OpenMLS's supported unchanged-policy setter before checkpointing because rejection paths can mutate secrets before the ordinary provider write. Host tests use authenticated encrypted fixtures and real child-process restarts; Android tests separately verify SQLCipher/Keystore and native transaction boundaries. See [local storage architecture](../../docs/local-storage.md) for the actual protection mechanism and remaining limits. Revision checks do not detect external rollback of a complete older encrypted store. Hardware security, account ownership binding, transport-ID ingestion/retention and production signing require further work. This wrapper/application is not covered by the dependency's audit.
 
-See [verification results](../../docs/openmls-verification.md) for completed checks and remaining phone validation.
+See [local storage verification](../../docs/local-storage.md#build-and-checks) for current persistence checks and [the earlier integration report](../../docs/openmls-verification.md) for the original bridge validation.

@@ -14,19 +14,23 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     AddMemberResult, CIPHERSUITE_NAME, ClientInfo, DecryptedMessage, EngineInfo, GroupInfo,
-    MlsError, OPENMLS_VERSION, SelfTestReport, persistence,
+    MlsError, MlsStorage, OPENMLS_VERSION, SelfTestReport, persistence,
 };
 
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "durable_tests.rs"]
+mod durable_tests;
+
 pub(crate) const SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 pub(crate) const MAX_WIRE: usize = 1024 * 1024;
-const MAX_CLIENTS: usize = 64;
-const MAX_GROUPS: usize = 32;
-const MAX_MEMBERS: usize = 128;
-const MAX_KEY_PACKAGES: u32 = 64;
+pub(crate) const MAX_CLIENTS: usize = 64;
+pub(crate) const MAX_GROUPS: usize = 32;
+pub(crate) const MAX_MEMBERS: usize = 128;
+pub(crate) const MAX_KEY_PACKAGES: u32 = 64;
 
 pub(crate) struct ClientState {
     pub(crate) provider: OpenMlsRustCrypto,
@@ -34,6 +38,15 @@ pub(crate) struct ClientState {
     pub(crate) identity: Vec<u8>,
     pub(crate) groups: HashMap<Vec<u8>, MlsGroup>,
     pub(crate) key_package_count: u32,
+}
+
+// A successful MLS decrypt is held inside Rust until its checkpoint succeeds.
+// Failed storage drops and wipes the plaintext instead of returning it.
+struct PendingDecryptedMessage {
+    plaintext: Zeroizing<Vec<u8>>,
+    sender_identity: Vec<u8>,
+    sender_signature_public_key: Vec<u8>,
+    epoch: u64,
 }
 
 impl ClientState {
@@ -87,15 +100,18 @@ impl Drop for ClientState {
 }
 
 #[derive(Default)]
-struct EngineState {
-    clients: HashMap<String, ClientState>,
-    snapshots: HashMap<String, Zeroizing<Vec<u8>>>,
+pub(crate) struct EngineState {
+    pub(crate) clients: HashMap<String, ClientState>,
+    pub(crate) snapshots: HashMap<String, Zeroizing<Vec<u8>>>,
+    pub(crate) revision: u64,
+    pub(crate) poisoned: bool,
 }
 
 /// One mutex serializes all mutations, including ratchet advancement and snapshots.
 #[derive(uniffi::Object)]
 pub struct MlsEngine {
     state: Mutex<EngineState>,
+    storage: Option<Arc<dyn MlsStorage>>,
 }
 
 fn input(bytes: &[u8], max: usize) -> Result<(), MlsError> {
@@ -154,11 +170,103 @@ impl MlsEngine {
         client_handle: &str,
         f: impl FnOnce(&mut ClientState) -> Result<T, MlsError>,
     ) -> Result<T, MlsError> {
+        self.mutate(|state| {
+            f(state
+                .clients
+                .get_mut(client_handle)
+                .ok_or(MlsError::UnknownClient)?)
+        })
+    }
+
+    fn poison_locked(&self, state: &mut EngineState) {
+        state.poisoned = true;
+        state.clients.clear();
+        state.snapshots.clear();
+    }
+
+    fn ensure_current(&self, state: &mut EngineState) -> Result<(), MlsError> {
+        if state.poisoned {
+            return Err(MlsError::InvalidState);
+        }
+        if let Some(storage) = &self.storage
+            && !matches!(storage.state_revision(), Ok(revision) if revision == state.revision)
+        {
+            self.poison_locked(state);
+            return Err(MlsError::StorageFailure);
+        }
+        Ok(())
+    }
+
+    fn checkpoint(&self, state: &mut EngineState) -> Result<(), MlsError> {
+        let Some(storage) = &self.storage else {
+            return Ok(());
+        };
+        // SQLite revisions are signed 64-bit integers. Refuse wraparound or a
+        // value the platform cannot represent rather than reusing a revision.
+        let next = state
+            .revision
+            .checked_add(1)
+            .filter(|revision| *revision <= i64::MAX as u64);
+        let outcome = (|| {
+            let next = next.ok_or(MlsError::StorageFailure)?;
+            let snapshot = persistence::serialize_engine(state, next)?;
+            let saved = storage.save_state(state.revision, snapshot.to_vec())?;
+            if saved != next {
+                return Err(MlsError::StorageFailure);
+            }
+            state.revision = saved;
+            Ok(())
+        })();
+        if outcome.is_err() {
+            self.poison_locked(state);
+            return Err(MlsError::StorageFailure);
+        }
+        Ok(())
+    }
+
+    fn mutate<T>(
+        &self,
+        f: impl FnOnce(&mut EngineState) -> Result<T, MlsError>,
+    ) -> Result<T, MlsError> {
         let mut state = self.lock()?;
-        f(state
-            .clients
-            .get_mut(client_handle)
-            .ok_or(MlsError::UnknownClient)?)
+        self.ensure_current(&mut state)?;
+        let result = f(&mut state);
+        // A decryption error can occur before OpenMLS writes its modified
+        // cached secret tree. This unchanged-policy setter explicitly persists
+        // the current message secrets through the supported production API.
+        for client in state.clients.values_mut() {
+            for group in client.groups.values_mut() {
+                let policy = group.past_epoch_deletion_policy().clone();
+                if group
+                    .set_past_epoch_deletion_policy(&client.provider, policy)
+                    .is_err()
+                {
+                    self.poison_locked(&mut state);
+                    return Err(MlsError::StorageFailure);
+                }
+            }
+        }
+        // Persist errors too: processing an unauthenticated message can still
+        // consume a receiving generation or KeyPackage provider record.
+        self.checkpoint(&mut state)?;
+        result
+    }
+
+    fn read<T>(&self, f: impl FnOnce(&EngineState) -> Result<T, MlsError>) -> Result<T, MlsError> {
+        let mut state = self.lock()?;
+        self.ensure_current(&mut state)?;
+        f(&state)
+    }
+
+    fn fresh_handle(state: &EngineState) -> Result<String, MlsError> {
+        for _ in 0..32 {
+            let candidate = handle()?;
+            if !state.clients.contains_key(&candidate) && !state.snapshots.contains_key(&candidate)
+            {
+                return Ok(candidate);
+            }
+        }
+        Err(MlsError::CryptoFailure)
     }
 }
 
@@ -168,7 +276,40 @@ impl MlsEngine {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(EngineState::default()),
+            storage: None,
         })
+    }
+
+    /// Opens an authenticated native store. The initialization flag is allowed
+    /// only for an explicitly new local store; existing missing state fails.
+    /// Opening never creates a signing identity or a registered account.
+    #[uniffi::constructor]
+    pub fn open(
+        storage: Arc<dyn MlsStorage>,
+        initialize_if_missing: bool,
+    ) -> Result<Arc<Self>, MlsError> {
+        let loaded = storage.load_state().map_err(|_| MlsError::StorageFailure)?;
+        let (state, initialize) = match loaded {
+            Some(loaded) => {
+                let bytes = Zeroizing::new(loaded.snapshot);
+                (persistence::restore_engine(&bytes, loaded.revision)?, false)
+            }
+            None if initialize_if_missing => (EngineState::default(), true),
+            None => return Err(MlsError::MissingState),
+        };
+        let engine = Arc::new(Self {
+            state: Mutex::new(state),
+            storage: Some(storage),
+        });
+        {
+            let mut state = engine.lock()?;
+            if initialize {
+                engine.checkpoint(&mut state)?;
+            } else {
+                engine.ensure_current(&mut state)?;
+            }
+        }
+        Ok(engine)
     }
 
     pub fn engine_info(&self) -> EngineInfo {
@@ -176,21 +317,48 @@ impl MlsEngine {
             openmls_version: OPENMLS_VERSION.into(),
             ciphersuite: CIPHERSUITE_NAME.into(),
             protocol_version: "RFC 9420 / MLS 1.0".into(),
-            durable_persistence: false,
+            durable_persistence: self.storage.is_some(),
         }
+    }
+
+    /// Public restoration metadata only. Client handles stay stable on restart.
+    pub fn list_clients(&self) -> Result<Vec<ClientInfo>, MlsError> {
+        self.read(|state| {
+            let mut handles: Vec<_> = state.clients.keys().cloned().collect();
+            handles.sort();
+            Ok(handles
+                .into_iter()
+                .map(|handle| state.clients[&handle].info(handle))
+                .collect())
+        })
+    }
+
+    /// Fail closed after a native transaction cannot commit. No checkpoint or
+    /// older in-memory state is used after closing this engine.
+    pub fn close_engine(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.poison_locked(&mut state);
+    }
+
+    pub fn poison(&self) {
+        self.close_engine();
     }
 
     pub fn create_client(&self, credential_identity: Vec<u8>) -> Result<ClientInfo, MlsError> {
         input(&credential_identity, 1024)?;
-        let mut state = self.lock()?;
-        if state.clients.len() + state.snapshots.len() >= MAX_CLIENTS {
-            return Err(MlsError::ResourceLimit);
-        }
-        let client = ClientState::new(credential_identity)?;
-        let handle = handle()?;
-        let info = client.info(handle.clone());
-        state.clients.insert(handle, client);
-        Ok(info)
+        self.mutate(|state| {
+            if state.clients.len() + state.snapshots.len() >= MAX_CLIENTS {
+                return Err(MlsError::ResourceLimit);
+            }
+            let client = ClientState::new(credential_identity)?;
+            let handle = Self::fresh_handle(state)?;
+            let info = client.info(handle.clone());
+            state.clients.insert(handle, client);
+            Ok(info)
+        })
     }
 
     pub fn generate_key_package(&self, client_handle: String) -> Result<Vec<u8>, MlsError> {
@@ -338,6 +506,7 @@ impl MlsEngine {
         if plaintext.len() > 64 * 1024 {
             return Err(MlsError::InvalidInput);
         }
+        let plaintext = Zeroizing::new(plaintext);
         self.with_client(&client_handle, |client| {
             let group = client
                 .groups
@@ -366,7 +535,7 @@ impl MlsEngine {
         if protocol.content_type() != ContentType::Application {
             return Err(MlsError::InvalidMessage);
         }
-        self.with_client(&client_handle, |client| {
+        let mut decrypted = self.with_client(&client_handle, |client| {
             let group = client
                 .groups
                 .get_mut(&group_id)
@@ -393,12 +562,18 @@ impl MlsEngine {
             else {
                 return Err(MlsError::InvalidMessage);
             };
-            Ok(DecryptedMessage {
-                plaintext: content.into_bytes(),
+            Ok(PendingDecryptedMessage {
+                plaintext: Zeroizing::new(content.into_bytes()),
                 sender_identity,
                 sender_signature_public_key: member.signature_key,
                 epoch,
             })
+        })?;
+        Ok(DecryptedMessage {
+            plaintext: std::mem::take(&mut *decrypted.plaintext),
+            sender_identity: decrypted.sender_identity,
+            sender_signature_public_key: decrypted.sender_signature_public_key,
+            epoch: decrypted.epoch,
         })
     }
 
@@ -470,7 +645,11 @@ impl MlsEngine {
         client_handle: String,
         group_id: Vec<u8>,
     ) -> Result<GroupInfo, MlsError> {
-        self.with_client(&client_handle, |client| {
+        self.read(|state| {
+            let client = state
+                .clients
+                .get(&client_handle)
+                .ok_or(MlsError::UnknownClient)?;
             Ok(group_info(
                 client.groups.get(&group_id).ok_or(MlsError::UnknownGroup)?,
             ))
@@ -479,45 +658,51 @@ impl MlsEngine {
 
     /// Transfers the only live state to a single-use native memory snapshot.
     pub fn suspend_client(&self, client_handle: String) -> Result<String, MlsError> {
-        let mut state = self.lock()?;
-        let client = state
-            .clients
-            .get(&client_handle)
-            .ok_or(MlsError::UnknownClient)?;
-        let snapshot = persistence::serialize(client)?;
-        let handle = handle()?;
-        state.clients.remove(&client_handle);
-        state.snapshots.insert(handle.clone(), snapshot);
-        Ok(handle)
+        self.mutate(|state| {
+            let client = state
+                .clients
+                .get(&client_handle)
+                .ok_or(MlsError::UnknownClient)?;
+            let snapshot = persistence::serialize(client)?;
+            let handle = Self::fresh_handle(state)?;
+            state.clients.remove(&client_handle);
+            state.snapshots.insert(handle.clone(), snapshot);
+            Ok(handle)
+        })
     }
 
     pub fn restore_client(&self, snapshot_handle: String) -> Result<ClientInfo, MlsError> {
-        let mut state = self.lock()?;
-        let snapshot = state
-            .snapshots
-            .remove(&snapshot_handle)
-            .ok_or(MlsError::InvalidSnapshot)?;
-        let client = persistence::restore(&snapshot)?;
-        let handle = handle()?;
-        let info = client.info(handle.clone());
-        state.clients.insert(handle, client);
-        Ok(info)
+        self.mutate(|state| {
+            let snapshot = state
+                .snapshots
+                .remove(&snapshot_handle)
+                .ok_or(MlsError::InvalidSnapshot)?;
+            let client = persistence::restore(&snapshot)?;
+            let handle = Self::fresh_handle(state)?;
+            let info = client.info(handle.clone());
+            state.clients.insert(handle, client);
+            Ok(info)
+        })
     }
 
     pub fn release_client(&self, client_handle: String) -> Result<(), MlsError> {
-        self.lock()?
-            .clients
-            .remove(&client_handle)
-            .ok_or(MlsError::UnknownClient)?;
-        Ok(())
+        self.mutate(|state| {
+            state
+                .clients
+                .remove(&client_handle)
+                .ok_or(MlsError::UnknownClient)?;
+            Ok(())
+        })
     }
 
     pub fn discard_snapshot(&self, snapshot_handle: String) -> Result<(), MlsError> {
-        self.lock()?
-            .snapshots
-            .remove(&snapshot_handle)
-            .ok_or(MlsError::InvalidSnapshot)?;
-        Ok(())
+        self.mutate(|state| {
+            state
+                .snapshots
+                .remove(&snapshot_handle)
+                .ok_or(MlsError::InvalidSnapshot)?;
+            Ok(())
+        })
     }
 
     /// Diagnostic fixtures only. Android exposes this method only in debug builds.

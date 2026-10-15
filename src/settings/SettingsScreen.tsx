@@ -2,6 +2,7 @@ import React from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useTheme } from '../theme';
 import { AppText, Divider, IconButton, Screen } from '../ui';
+import {LocalStorageSettings} from './LocalStorageSettings';
 
 // Release bundles do not load the selector or connectivity diagnostic.
 const DevelopmentBackendDiagnostic = __DEV__
@@ -68,6 +69,7 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
         <AppText variant="caption" color="textMuted" style={{ marginTop: theme.spacing.xl }}>
           More preferences are coming soon.
         </AppText>
+        <LocalStorageSettings />
         {DevelopmentBackendDiagnostic ? <DevelopmentBackendDiagnostic /> : null}
       </ScrollView>
     </Screen>

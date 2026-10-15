@@ -1,8 +1,10 @@
 import {NativeModules, Platform} from 'react-native';
+import {decodeStoredDecryptions, validateDecryptionCursor} from './recovery';
 import type {
   OpenMls,
   OpenMlsAvailability,
   OpenMlsBridgeErrorCode,
+  MlsDecryptionCursor,
 } from './types';
 
 export class OpenMlsBridgeError extends Error {
@@ -17,6 +19,8 @@ export class OpenMlsBridgeError extends Error {
 
 const requiredMethods: ReadonlyArray<keyof OpenMls> = [
   'initialize',
+  'listClients',
+  'readStoredDecryptions',
   'createClient',
   'generateKeyPackage',
   'createGroup',
@@ -67,17 +71,29 @@ export function getOpenMlsAvailability(): OpenMlsAvailability {
   return {available: true, platform: 'android'};
 }
 
-function nativeOpenMls(): OpenMls {
+type NativeOpenMls = Omit<OpenMls, 'readStoredDecryptions'> & {
+  readStoredDecryptions(beforeJSON: string, limit: number): Promise<string>;
+};
+
+function nativeOpenMls(): NativeOpenMls {
   const availability = getOpenMlsAvailability();
   if (!availability.available) {
     throw new OpenMlsBridgeError(availability.code, availability.message);
   }
-  return NativeModules.VoidOpenMls as OpenMls;
+  return NativeModules.VoidOpenMls as NativeOpenMls;
 }
 
 /** Lazy native facade; importing it does not create identity material. */
 export const openMls: OpenMls = {
   initialize: async () => nativeOpenMls().initialize(),
+  listClients: async () => nativeOpenMls().listClients(),
+  readStoredDecryptions: async (before: MlsDecryptionCursor | null = null, limit = 50) => {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new OpenMlsBridgeError('INVALID_INPUT', 'The stored message page size is invalid.');
+    }
+    const cursor = before === null ? null : validateDecryptionCursor(before);
+    return decodeStoredDecryptions(await nativeOpenMls().readStoredDecryptions(JSON.stringify(cursor), limit));
+  },
   createClient: async credentialIdentityBase64 =>
     nativeOpenMls().createClient(credentialIdentityBase64),
   generateKeyPackage: async clientHandle =>
