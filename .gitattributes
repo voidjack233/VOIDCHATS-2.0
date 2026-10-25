@@ -1,3 +1,2 @@
-backend/migrations/*.sql text eol=lf
 android/app/src/main/assets/storage/*.sql text eol=lf
 scripts/*.sh text eol=lf

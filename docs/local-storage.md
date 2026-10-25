@@ -1,6 +1,6 @@
 # Encrypted local storage
 
-VOID stores conversation metadata, messages, contacts, and requests in an on-device SQLCipher database. OpenMLS checkpoints use the same database and native transaction boundary. PostgreSQL remains the backend's public account store; local storage does not start or depend on a backend service.
+VOID stores conversation metadata, messages, contacts, and requests in an on-device SQLCipher database. OpenMLS checkpoints use the same database and native transaction boundary. The local store operates independently of any remote service.
 
 ## Components
 
@@ -78,7 +78,7 @@ The SQLite transaction gives crash consistency within the supported filesystem's
 
 In a debug build, complete startup acknowledgments, open **Preview VOID → Profile → Settings → Local storage**, then select **Set up local storage**. This creates no registered account. Opening an existing store restores it automatically. The conversations, chat, contacts and requests screens read actual persisted records and preserve empty states. Chats render chronological messages with earlier-page loading, edits, tombstones, reactions and delivery state. Read counts and request status updates persist. Contact identity is always shown as unverified or changed. Sending and lookup remain disabled.
 
-Closing storage preserves the device identity and records for reopening. Removing local data deletes this device's protected store and signing identity; it makes no backend account changes. If another app context still holds the same store open, removal fails before deleting files or the wrapping alias; that context must close first. Registered-account logout, remote account removal and recovery require a future account/session design.
+Closing storage preserves the device identity and records for reopening. Removing local data deletes this device's protected store and signing identity; it does not affect any remote accounts. If another app context still holds the same store open, removal fails before deleting files or the wrapping alias; that context must close first. Registered-account logout, remote account removal and recovery require a future account/session design.
 
 Legacy JavaScript methods that could replace, suspend or release the protected primary identity are rejected. Account removal uses the explicit storage lifecycle instead. Rust's isolated memory-engine lifecycle and self-tests remain available for automated verification; secret snapshots never become JavaScript values. The primary handle is public local metadata, not an account identifier.
 
@@ -116,7 +116,6 @@ Verification completed on 2026-10-15:
 | Installed release restrictions | 1 passed against a non-debuggable x86_64 release APK: development identity creation and native self-test both rejected without creating a key/store |
 | ARM64 builds | Debug and release APK assembly passed; both contain SQLCipher and OpenMLS for `arm64-v8a` |
 | Actual React Native UI | Startup, explicit setup, close/reopen, force-stop/relaunch restoration, empty conversation/contact/request lists, and confirmed removal passed through the native bridge |
-| Existing Go backend | `go test ./...` and `go vet ./...` passed |
 
 The Android suite verifies encrypted file contents and Keystore roundtrip, missing/tampered keys, corruption and empty/truncated-file preservation, checksum/future-schema rejection, concurrent initialization, refusal to remove another context's active store, stable message/conversation cursors, unread/tombstone/contact behavior, large native snapshot reads, and bounded committed-decryption recovery without ratchet advancement. Its XML is preserved locally at `android/app/build/outputs/androidTest-results/encrypted-storage-15-tests.xml`.
 

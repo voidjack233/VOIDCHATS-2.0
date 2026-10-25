@@ -42,4 +42,4 @@ iOS bindings/runtime are not implemented or tested. Only portable Rust code and 
 
 State restoration is native memory only. Process termination loses all clients/snapshots. Durable encrypted storage, atomic persistence/rollback protection, and authenticated identity binding to future VOID-ID registration remain required before production messaging. The dependency audit excludes VOID's bridge, storage and application. Existing npm advisory findings and the unsuccessful `cargo-audit` installation are documented separately; successful build/tests do not resolve them.
 
-Startup, theme, frontend screens, existing Expo entry/configuration, and the Go backend were not changed. No messaging transport, account initialization, or production messaging connection was added. No changes were pushed or merged.
+Startup, theme, frontend screens, and existing Expo entry/configuration were not changed. No messaging transport, account initialization, or production messaging connection was added. No changes were pushed or merged.

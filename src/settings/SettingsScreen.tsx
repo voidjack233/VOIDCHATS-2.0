@@ -4,11 +4,6 @@ import { useTheme } from '../theme';
 import { AppText, Divider, IconButton, Screen } from '../ui';
 import {LocalStorageSettings} from './LocalStorageSettings';
 
-// Release bundles do not load the selector or connectivity diagnostic.
-const DevelopmentBackendDiagnostic = __DEV__
-  ? (require('../backend/BackendDiagnostic') as typeof import('../backend/BackendDiagnostic')).BackendDiagnostic
-  : null;
-
 export interface SettingsScreenProps {
   onBack: () => void;
 }
@@ -70,7 +65,6 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
           More preferences are coming soon.
         </AppText>
         <LocalStorageSettings />
-        {DevelopmentBackendDiagnostic ? <DevelopmentBackendDiagnostic /> : null}
       </ScrollView>
     </Screen>
   );

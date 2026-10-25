@@ -25,7 +25,6 @@ src/
   chat/            conversation detail UI
   crypto/          typed native OpenMLS interface, independent of screens
   storage/         typed local repositories, storage lifecycle and data hooks
-  backend/         typed backend origins and development-only health diagnostic
   requests/        message requests UI
   contacts/        contacts and VOID-ID discovery UI
   profile/         profile UI
@@ -36,7 +35,7 @@ src/
 
 First-launch startup progresses through Welcome, How VOID Works, Protect Your Identity, Terms of Service, and the account-initialization boundary. The development-only **Preview VOID** action opens the messenger. In Settings, explicit local storage setup creates an unregistered device identity and an empty encrypted store. Subsequent debug launches restore that identity and local preview; missing or damaged state never silently creates a replacement.
 
-Conversations, chat history, contacts, and requests read persisted local records and preserve empty states when none exist. Message composition and VOID-ID lookup remain disabled. Opening storage does not initialize an account or call the backend. See [local storage architecture, lifecycle and verification](docs/local-storage.md).
+Conversations, chat history, contacts, and requests read persisted local records and preserve empty states when none exist. Message composition and VOID-ID lookup remain disabled. Opening storage does not initialize an account or contact a remote service. See [local storage architecture, lifecycle and verification](docs/local-storage.md).
 
 ## Native MLS
 
@@ -46,10 +45,8 @@ The Android storage coordinator persists complete native MLS checkpoints and app
 
 See [verification results and remaining device checks](docs/openmls-verification.md) for the Rust and native binding test results and platform limitations.
 
-## Backend
+## Current scope
 
-The Go backend persists public account data in PostgreSQL and provides health, readiness, and account creation/retrieval endpoints. Clients supply their VOID-ID and identity public key; native MLS identity state remains on the device. The Android debug app has a Settings diagnostic that checks backend health without initializing an account.
+This repository contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The previous Go API, PostgreSQL development infrastructure, and backend connection diagnostic have been removed to make room for a redesigned 1:1 messaging architecture.
 
-Start the Go API manually from the repository root with `.\scripts\run-backend.ps1`. The launcher loads the backend connection configuration and runs Go in the foreground. Use [the native PostgreSQL guide](docs/NATIVE-POSTGRES.md) for setup and pgAdmin inspection of `void_dev_native`. This path uses native port 5432 and the ignored `.env.native` application credentials; it does not require Podman.
-
-Follow [the development infrastructure guide](docs/DEVELOPMENT.md) for Podman startup, local credentials, migrations, persistence checks, physical-phone LAN access, and Cloudflare Tunnel boundaries. The container setup publishes PostgreSQL only on host loopback port 15432; Android cleartext support is debug-only and release origins require HTTPS. See [backend/README.md](backend/README.md) for the API contract and [development verification results](docs/development-verification.md) for completed checks and remaining device/external verification. Application authentication and account ownership proof remain future work.
+Account registration, remote key exchange, and network message transport are not implemented. UI preview and local storage remain independent of a server.
