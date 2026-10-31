@@ -1,6 +1,6 @@
 # VOID-E2EE 2.0
 
-Native React Native and TypeScript Android application for VOID, with encrypted local records and protected native OpenMLS persistence. Account registration and network message delivery remain unfinished.
+Native React Native and TypeScript Android application for VOID, with encrypted local records and protected native OpenMLS persistence. The frontend's account registration and network message delivery remain unfinished. A standalone phase-one Go registration API is under [backend/](backend/README.md).
 
 ## Run
 
@@ -47,6 +47,6 @@ See [verification results and remaining device checks](docs/openmls-verification
 
 ## Current scope
 
-This repository contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The previous Go API, PostgreSQL development infrastructure, and backend connection diagnostic have been removed to make room for a redesigned 1:1 messaging architecture.
+This repository contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The previous Go API, PostgreSQL development infrastructure, and backend connection diagnostic were removed. A new, smaller Go backend now lives in [backend/](backend/README.md), with PostgreSQL account registration only.
 
-Account registration, remote key exchange, and network message transport are not implemented. UI preview and local storage remain independent of a server.
+The standalone backend supports cryptographically proven account registration, but the frontend does not call it yet and cannot sign the required independent authentication challenge. Remote key exchange and messaging transport are not implemented. UI preview and local storage remain independent of the server.
