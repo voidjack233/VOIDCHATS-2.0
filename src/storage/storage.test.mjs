@@ -10,6 +10,7 @@ import ts from 'typescript';
 
 // Host-only SQLite tests use isolated synthetic fixtures, never app/user data.
 const migration = readFileSync(new URL('../../android/app/src/main/assets/storage/001_initial.sql', import.meta.url), 'utf8');
+const registrationMigration = readFileSync(new URL('../../android/app/src/main/assets/storage/002_account_registration.sql', import.meta.url), 'utf8');
 function database(t, path = ':memory:') {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA foreign_keys=ON');
@@ -320,6 +321,207 @@ test('corruption and unavailable encryption preserve distinct sanitized fail-clo
     module.open = async () => { throw {code,message:'RAW-PRIVATE-MARKER'}; };
     await assert.rejects(controller.openExisting(),{code});
     assert.equal(controller.getSnapshot().errorCode,code);
+  }
+});
+
+const registrationApi = 'https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz';
+const registrationIdentity = {...identity, signaturePublicKeyBase64: Buffer.alloc(32, 7).toString('base64')};
+const registrationBinding = {void_id: '9223372036854775807', username: 'Synthetic account',
+  created_at: '2026-11-01T03:00:00.123456Z', api_url: registrationApi,
+  auth_public_key: registrationIdentity.signaturePublicKeyBase64};
+const registeredIdentity = {...registrationIdentity, accountVoidId: registrationBinding.void_id,
+  accountUsername: registrationBinding.username, accountApiUrl: registrationApi};
+const registeredSnapshot = () => ({...snapshot(), schemaVersion: 2, identity: registeredIdentity});
+const registrationSignature = Buffer.alloc(64, 3).toString('base64');
+function registrationNative(overrides = {}) {
+  return native({prepareAccountRegistration: async () => JSON.stringify(registrationIdentity),
+    signAccountChallenge: async () => registrationSignature,
+    completeAccountRegistration: async () => JSON.stringify(registeredSnapshot()), ...overrides});
+}
+
+test('account migration upgrades an existing identity without replacing its key, checkpoint or history', t => {
+  const db = database(t);
+  db.prepare('INSERT INTO local_identity VALUES(1,?,?,?,?,NULL,?)').run(identity.localDeviceId,
+    identity.clientHandle, identity.credentialIdentityBase64, identity.signaturePublicKeyBase64, identity.createdAt);
+  db.prepare('INSERT INTO native_mls_state VALUES(1,9,?)').run(Buffer.from('SYNTHETIC-PROTECTED-CHECKPOINT'));
+  direct(db); incoming(db, 'kept-history');
+  const before = db.prepare('SELECT * FROM local_identity').get();
+  db.exec('BEGIN');
+  db.exec(registrationMigration);
+  db.exec('PRAGMA user_version=2');
+  db.exec('COMMIT');
+  assert.deepEqual(db.prepare('SELECT * FROM local_identity').get(), before);
+  assert.equal(db.prepare('SELECT revision FROM native_mls_state').get().revision, 9);
+  assert.equal(Buffer.from(db.prepare('SELECT snapshot FROM native_mls_state').get().snapshot).toString(), 'SYNTHETIC-PROTECTED-CHECKPOINT');
+  assert.equal(db.prepare('SELECT id FROM messages').get().id, 'kept-history');
+  assert.equal(db.prepare('SELECT count(*) AS count FROM account_registration').get().count, 0);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 2);
+});
+
+test('account metadata defaults to unsigned proof and rejects invalid singleton/proof states', t => {
+  const db = database(t); db.exec(registrationMigration);
+  db.prepare('INSERT INTO account_registration(slot,username,api_url) VALUES(1,?,?)').run('Synthetic account', registrationApi);
+  const row = db.prepare('SELECT proof_signed,created_at FROM account_registration').get();
+  assert.equal(row.proof_signed, 0); assert.equal(row.created_at, null);
+  assert.throws(() => db.prepare('INSERT INTO account_registration(slot,username,api_url) VALUES(2,?,?)').run('Other', registrationApi));
+  assert.throws(() => db.exec('UPDATE account_registration SET proof_signed=2'));
+  assert.throws(() => db.exec('UPDATE account_registration SET proof_signed=NULL'));
+  db.exec('UPDATE account_registration SET proof_signed=1');
+  assert.equal(db.prepare('SELECT proof_signed FROM account_registration').get().proof_signed, 1);
+});
+
+test('a committed account binding cannot be cleared or switched to another VOID-ID', t => {
+  const db = database(t); db.exec(registrationMigration);
+  db.prepare('INSERT INTO local_identity VALUES(1,?,?,?,?,NULL,?)').run(identity.localDeviceId,
+    identity.clientHandle, identity.credentialIdentityBase64, identity.signaturePublicKeyBase64, identity.createdAt);
+  const bind = db.prepare('UPDATE local_identity SET account_void_id=? WHERE slot=1');
+  bind.run(registrationBinding.void_id);
+  bind.run(registrationBinding.void_id);
+  assert.throws(() => bind.run('123'), /account_binding_immutable/);
+  assert.throws(() => bind.run(null), /account_binding_immutable/);
+  assert.equal(db.prepare('SELECT account_void_id FROM local_identity').get().account_void_id, registrationBinding.void_id);
+});
+
+test('real account registration works in release while debug initialization remains gated', async () => {
+  const load = modules(); const calls = [];
+  const module = registrationNative({
+    prepareAccountRegistration: async (username, apiUrl) => {
+      calls.push(['prepare', username, apiUrl]); return JSON.stringify(registrationIdentity);
+    },
+    signAccountChallenge: async message => { calls.push(['sign', message]); return registrationSignature; },
+    completeAccountRegistration: async json => {
+      calls.push(['complete', JSON.parse(json)]); return JSON.stringify(registeredSnapshot());
+    },
+    initializeDevelopment: async () => { throw new Error('Debug initialization must stay blocked.'); },
+  });
+  const storage = driver(load, module, false);
+  assert.equal(calls.length, 0);
+  const prepared = await storage.prepareAccountRegistration(registrationBinding.username, registrationApi);
+  assert.equal(prepared.signaturePublicKeyBase64, registrationIdentity.signaturePublicKeyBase64);
+  assert.equal(await storage.signAccountChallenge('SYNTHETIC-PUBLIC-CHALLENGE'), registrationSignature);
+  const result = await storage.completeAccountRegistration(registrationBinding);
+  assert.equal(result.identity.accountVoidId, registrationBinding.void_id);
+  assert.equal(result.identity.accountUsername, registrationBinding.username);
+  assert.equal(result.identity.accountApiUrl, registrationApi);
+  assert.deepEqual(calls, [['prepare', registrationBinding.username, registrationApi],
+    ['sign', 'SYNTHETIC-PUBLIC-CHALLENGE'], ['complete', registrationBinding]]);
+  await assert.rejects(storage.initializeDevelopment(), {code: 'DEVELOPMENT_ONLY'});
+});
+
+test('older native builds require rebuilding only when registration methods are requested', async () => {
+  const load = modules(); const module = native(); const storage = driver(load, module, false);
+  assert.equal((await storage.open()).identity.clientHandle, identity.clientHandle);
+  await assert.rejects(storage.prepareAccountRegistration('Synthetic', registrationApi), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
+  await assert.rejects(storage.signAccountChallenge('YQ=='), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
+  await assert.rejects(storage.completeAccountRegistration(registrationBinding), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
+  const partlyUpdated = registrationNative({signAccountChallenge: undefined});
+  await assert.rejects(driver(load, partlyUpdated).prepareAccountRegistration('Synthetic', registrationApi), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
+});
+
+test('registration bridge rejects malformed or secret-shaped native output and sanitizes failures', async () => {
+  const load = modules(); const module = registrationNative(); const storage = driver(load, module, false);
+  for (const reply of ['{malformed', JSON.stringify({...registrationIdentity, privateKey: 'RAW-SECRET-MARKER'}),
+    JSON.stringify({...registrationIdentity, accountVoidId: 123}), JSON.stringify(null)]) {
+    module.prepareAccountRegistration = async () => reply;
+    await assert.rejects(storage.prepareAccountRegistration('Synthetic', registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
+  }
+  for (const signature of ['RAW-SECRET-MARKER', JSON.stringify({signature: registrationSignature}), Buffer.alloc(63).toString('base64'), null]) {
+    module.signAccountChallenge = async () => signature;
+    await assert.rejects(storage.signAccountChallenge('YQ=='), {code: 'INVALID_NATIVE_RESPONSE'});
+  }
+  module.completeAccountRegistration = async () => JSON.stringify({...registeredSnapshot(), secretSnapshot: 'RAW-SECRET-MARKER'});
+  await assert.rejects(storage.completeAccountRegistration(registrationBinding), {code: 'INVALID_NATIVE_RESPONSE'});
+  for (const method of ['prepareAccountRegistration', 'signAccountChallenge', 'completeAccountRegistration']) {
+    module[method] = async () => { throw {code: 'DATABASE_ERROR', message: 'RAW-SECRET-MARKER'}; };
+  }
+  for (const action of [() => storage.prepareAccountRegistration('Synthetic', registrationApi),
+    () => storage.signAccountChallenge('YQ=='), () => storage.completeAccountRegistration(registrationBinding)]) {
+    await assert.rejects(action(), error => error.code === 'DATABASE_ERROR' && !error.message.includes('RAW-SECRET'));
+  }
+});
+
+test('controller publishes completed account identity and restores its public binding after reopening', async () => {
+  const load = modules(); let current = {...snapshot(), schemaVersion: 2, identity: registrationIdentity};
+  const module = registrationNative({getStatus: async () => JSON.stringify(current),
+    open: async () => JSON.stringify(current),
+    completeAccountRegistration: async json => {
+      assert.deepEqual(JSON.parse(json), registrationBinding);
+      current = registeredSnapshot(); return JSON.stringify(current);
+    }});
+  const controller = new (load('controller').StorageController)(driver(load, module, false));
+  await assert.rejects(controller.signAccountChallenge('YQ=='), {code: 'LOCKED'});
+  const prepared = await controller.prepareAccountRegistration(registrationBinding.username, registrationApi);
+  assert.equal(prepared.localDeviceId, registrationIdentity.localDeviceId);
+  assert.equal(controller.getSnapshot().status, 'ready');
+  assert.equal(await controller.signAccountChallenge('YQ=='), registrationSignature);
+  const before = controller.getSnapshot().revision;
+  await controller.completeAccountRegistration(registrationBinding);
+  assert.equal(controller.getSnapshot().revision, before + 1);
+  assert.equal(controller.getSnapshot().identity.accountVoidId, registrationBinding.void_id);
+  await controller.closeStore();
+  assert.equal(controller.getSnapshot().identity, null);
+  await controller.openExisting();
+  assert.equal(controller.getSnapshot().status, 'ready');
+  assert.equal(controller.getSnapshot().schemaVersion, 2);
+  assert.equal(controller.getSnapshot().identity.accountUsername, registrationBinding.username);
+  assert.equal(controller.getSnapshot().identity.accountApiUrl, registrationApi);
+  assert.equal(controller.getSnapshot().identity.signaturePublicKeyBase64, registrationIdentity.signaturePublicKeyBase64);
+});
+
+test('failed account preparation never falls back to development identity creation or local-data removal', async () => {
+  const load = modules(); let legacyCreates = 0; let removals = 0;
+  const module = registrationNative({open: async () => JSON.stringify({...snapshot(), identity: registrationIdentity}),
+    prepareAccountRegistration: async () => { throw {code: 'KEY_UNAVAILABLE', message: 'RAW-KEY-MARKER'}; },
+    initializeDevelopment: async () => { legacyCreates++; return JSON.stringify(snapshot()); },
+    removeLocalData: async () => { removals++; return JSON.stringify(snapshot('not_initialized')); }});
+  const controller = new (load('controller').StorageController)(driver(load, module));
+  await controller.openExisting();
+  await assert.rejects(controller.prepareAccountRegistration('Synthetic', registrationApi), {code: 'KEY_UNAVAILABLE'});
+  assert.equal(controller.getSnapshot().status, 'error');
+  assert.equal(controller.getSnapshot().identity, null);
+  assert.equal(controller.getSnapshot().message.includes('RAW-KEY'), false);
+  assert.equal(legacyCreates, 0); assert.equal(removals, 0);
+  await controller.openExisting();
+  assert.equal(controller.getSnapshot().identity.localDeviceId, registrationIdentity.localDeviceId);
+  assert.equal(controller.getSnapshot().identity.signaturePublicKeyBase64, registrationIdentity.signaturePublicKeyBase64);
+});
+
+test('controller refuses preparation results from a different local device', async () => {
+  const load = modules();
+  const module = registrationNative({getStatus: async () => JSON.stringify({...snapshot(), identity: {...registrationIdentity, localDeviceId: 'different-device'}})});
+  const controller = new (load('controller').StorageController)(driver(load, module));
+  await assert.rejects(controller.prepareAccountRegistration('Synthetic', registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
+  assert.equal(controller.getSnapshot().status, 'error');
+  assert.equal(controller.getSnapshot().identity, null);
+});
+
+test('controller rejects a preparation snapshot with the same device ID but a different signing key', async () => {
+  const load = modules();
+  const module = registrationNative({getStatus: async () => JSON.stringify({...snapshot(),
+    identity: {...registrationIdentity, signaturePublicKeyBase64: Buffer.alloc(32, 9).toString('base64')}})});
+  const controller = new (load('controller').StorageController)(driver(load, module));
+  await assert.rejects(controller.prepareAccountRegistration('Synthetic', registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
+  assert.equal(controller.getSnapshot().status, 'error');
+  assert.equal(controller.getSnapshot().identity, null);
+});
+
+test('controller refuses completion snapshots that do not exactly match the registered public binding', async () => {
+  const variants = [
+    {label: 'VOID-ID', value: {...registeredSnapshot(), identity: {...registeredIdentity, accountVoidId: '123'}}},
+    {label: 'username', value: {...registeredSnapshot(), identity: {...registeredIdentity, accountUsername: 'Other name'}}},
+    {label: 'server', value: {...registeredSnapshot(), identity: {...registeredIdentity, accountApiUrl: 'https://other.example'}}},
+    {label: 'public key', value: {...registeredSnapshot(), identity: {...registeredIdentity, signaturePublicKeyBase64: Buffer.alloc(32, 9).toString('base64')}}},
+    {label: 'absent identity', value: {...registeredSnapshot(), identity: null}},
+    {label: 'locked store', value: {...registeredSnapshot(), status: 'locked'}},
+    {label: 'uninitialized store', value: {...registeredSnapshot(), status: 'not_initialized'}},
+  ];
+  for (const {label, value} of variants) {
+    const load = modules();
+    const module = registrationNative({completeAccountRegistration: async () => JSON.stringify(value)});
+    const controller = new (load('controller').StorageController)(driver(load, module));
+    await assert.rejects(controller.completeAccountRegistration(registrationBinding), {code: 'INVALID_NATIVE_RESPONSE'}, label);
+    assert.equal(controller.getSnapshot().status, 'error', label);
+    assert.equal(controller.getSnapshot().identity, null, label);
   }
 });
 

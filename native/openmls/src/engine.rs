@@ -9,7 +9,9 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-use openmls_traits::{OpenMlsProvider, crypto::OpenMlsCrypto, random::OpenMlsRand};
+use openmls_traits::{
+    OpenMlsProvider, crypto::OpenMlsCrypto, random::OpenMlsRand, signatures::Signer,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
@@ -371,6 +373,38 @@ impl MlsEngine {
                 .map_err(|_| MlsError::CryptoFailure)?;
             client.key_package_count += 1;
             wire(&MlsMessageOut::from(package.key_package().clone()))
+        })
+    }
+
+    /// Registration proof only. The Android coordinator also verifies the exact
+    /// prepared username, public key, token, expiry and nonce before this call.
+    /// No private signing material or general-purpose signing API crosses JS.
+    pub fn sign_registration_challenge(
+        &self,
+        client_handle: String,
+        message: Vec<u8>,
+    ) -> Result<Vec<u8>, MlsError> {
+        input(&message, 4096)?;
+        let text = std::str::from_utf8(&message).map_err(|_| MlsError::InvalidInput)?;
+        let fields: Vec<_> = text.split('\n').collect();
+        if fields.len() != 7
+            || fields[0] != "VOID-NOTHINGNESS:register:v1"
+            || !fields[6].is_empty()
+            || fields[1..6]
+                .iter()
+                .any(|field| field.is_empty() || field.contains('\r'))
+        {
+            return Err(MlsError::InvalidInput);
+        }
+        self.read(|state| {
+            let client = state
+                .clients
+                .get(&client_handle)
+                .ok_or(MlsError::UnknownClient)?;
+            client
+                .signer
+                .sign(&message)
+                .map_err(|_| MlsError::CryptoFailure)
         })
     }
 

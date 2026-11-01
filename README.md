@@ -1,12 +1,14 @@
 # VOID-E2EE 2.0
 
-Native React Native and TypeScript Android application for VOID, with encrypted local records and protected native OpenMLS persistence. Account registration and network message delivery remain unfinished.
+Native React Native and TypeScript Android application for VOID, with signed account initialization, encrypted local records, and protected native OpenMLS persistence. Network message delivery remains unfinished.
 
 ## Run
 
-Install dependencies with `npm install`. OpenMLS requires a custom native Android development build; Expo Go cannot load the Rust module. Configure the Android SDK, NDK **27.1.12297006**, **JDK 17** (`JAVA_HOME`) and rustup, then follow [native setup and verification](native/openmls/README.md).
+Install dependencies with `npm install`. Account initialization and OpenMLS require a rebuilt custom native Android app; Expo Go cannot load the Rust module. Configure the Android SDK, NDK **27.1.12297006**, **JDK 17** (`JAVA_HOME`) and rustup, then follow [native setup and verification](native/openmls/README.md). Registration is available in native debug and release builds; the debug preview remains separate.
 
 Run `npm start` for Metro and `npm run android` to build and install on a connected physical Android phone with USB debugging enabled. The Android command uses that Metro server instead of launching another with the Expo preview configuration. Use `adb reverse tcp:8081 tcp:8081` for Metro over USB. `npm run android:build` builds an APK without requiring an emulator or phone. `npm run crypto:test` tests Rust; `npm run crypto:bridgecheck` tests generated Kotlin bindings against the actual host Rust library. In the phone's React Native DevTools console, `await globalThis.voidMlsSelfTest()` runs the native bridge diagnostic.
+
+For an APK you can copy to your phone and open without Metro, run `npm run android:apk`. This builds `android/app/build/outputs/apk/release/app-release.apk` with bundled JavaScript, encrypted storage and the Rust signing module. Transfer the APK to your Android phone, open it, allow installation from that source if Android asks, and launch **VOID**. No emulator or USB debugging is needed for this installation route. This testing APK uses the repository's development signing key; store distribution needs separate production signing. The build script also detects the portable Java/SDK tools in the ignored `android/build/tooling` folder when no valid external setup is configured.
 
 The existing Expo setup remains available for UI preview with `npx expo start` and Expo Go. Cryptographic calls in Expo Go fail with an explicit unavailable error. The Android custom build uses `native-entry.js` and `metro.native.config.js`, preserving the same startup UI and theme. Expo's entry and Metro configuration remain available for Expo Go.
 
@@ -19,7 +21,8 @@ Use `npm run typecheck` for TypeScript validation and `npm run lint` for linting
 ```text
 src/
   app/             app bootstrap, providers, navigation composition
-  startup/         welcome, identity guidance, acknowledgments, initialization boundary
+  account/         signed registration client, validation, setup lifecycle and provider
+  startup/         welcome, identity guidance, acknowledgments, account setup
   onboarding/      future entry flow UI
   conversations/   conversation list UI and reusable display model
   chat/            conversation detail UI
@@ -33,7 +36,9 @@ src/
   theme/           semantic dark theme and typography/spacing tokens
 ```
 
-First-launch startup progresses through Welcome, How VOID Works, Protect Your Identity, Terms of Service, and the account-initialization boundary. The development-only **Preview VOID** action opens the messenger. In Settings, explicit local storage setup creates an unregistered device identity and an empty encrypted store. Subsequent debug launches restore that identity and local preview; missing or damaged state never silently creates a replacement.
+First-launch startup progresses through Welcome, How VOID Works, Protect Your Identity, Terms of Service, and account setup. Enter a username and choose **Create account** to register the protected device identity with the backend configured in [src/config/api.ts](src/config/api.ts). Successful setup saves the returned VOID-ID and username, opens the messenger, and displays those values in Profile. Subsequent launches restore a registered account from encrypted storage without registering again. See [account initialization and retry behavior](docs/account-initialization.md).
+
+The development-only **Preview VOID** action opens the messenger without registration. In Settings, explicit local storage setup creates an unregistered device identity and an empty encrypted store. An unregistered identity stays in the startup flow on the next launch and can be reused for account setup. Missing or damaged state never silently creates a replacement identity.
 
 Conversations, chat history, contacts, and requests read persisted local records and preserve empty states when none exist. Message composition and VOID-ID lookup remain disabled. Opening storage does not initialize an account or contact a remote service. See [local storage architecture, lifecycle and verification](docs/local-storage.md).
 
@@ -41,12 +46,12 @@ Conversations, chat history, contacts, and requests read persisted local records
 
 `native/openmls/` implements official OpenMLS **0.9.1** with RustCrypto and the RFC 9420 X25519/AES-128-GCM/SHA-256/Ed25519 ciphersuite. UniFFI generates the Android Kotlin bindings; private keys and MLS state remain in Rust. The typed `src/crypto/` interface is not connected to messaging screens. Alice/Bob diagnostics use real OpenMLS operations and do not create application accounts.
 
-The Android storage coordinator persists complete native MLS checkpoints and application records in SQLCipher, with its database key wrapped by Android Keystore. Checkpoints and crypto-event records commit before cryptographic results reach JavaScript. Identity binding to future VOID-ID registration, public authentication and messaging transport remain future work. See [local storage boundaries](docs/local-storage.md) and [security findings](docs/openmls-security.md); the dependency audit does not make VOID audited.
+The Android storage coordinator persists complete native MLS checkpoints and application records in SQLCipher, with its database key wrapped by Android Keystore. Checkpoints and crypto-event records commit before cryptographic results reach JavaScript. Account setup signs a constrained backend challenge using the existing native Ed25519 key and atomically saves the resulting public account association. Login sessions and messaging transport remain future work. See [account initialization boundaries](docs/account-initialization.md), [local storage boundaries](docs/local-storage.md), and [security findings](docs/openmls-security.md); the dependency audit does not make VOID audited.
 
 See [verification results and remaining device checks](docs/openmls-verification.md) for the Rust and native binding test results and platform limitations.
 
 ## Current scope
 
-This repository contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The previous Go API, PostgreSQL development infrastructure, and backend connection diagnostic have been removed to make room for a redesigned 1:1 messaging architecture.
+This checkout contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The Go account service is maintained separately on the repository's [backend branch](https://github.com/voidjack233/VOIDCHATS-2.0/tree/backend).
 
-Account registration, remote key exchange, and network message transport are not implemented. UI preview and local storage remain independent of a server.
+Signed account initialization connects to that service. Account lookup/recovery, authenticated sessions, remote key exchange, and network message transport are not implemented. UI preview and opening existing local storage remain independent of a server. The registration changes still require native build and device verification; see the [current verification limitations](docs/account-initialization.md#verification).

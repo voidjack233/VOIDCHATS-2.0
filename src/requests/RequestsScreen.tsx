@@ -62,7 +62,7 @@ export function RequestsScreen() {
         ListEmptyComponent={storage.status === 'ready' && !error ? <View style={{marginTop: theme.spacing.xxxl}}>
           <AppText variant="heading">{loading ? 'Loading requests…' : 'No message requests'}</AppText>
           <AppText variant="body" color="textSecondary" style={{marginTop: theme.spacing.sm}}>No requests are saved on this device.</AppText>
-        </View> : null}
+        </View> : undefined}
       />
     </Screen>
   );

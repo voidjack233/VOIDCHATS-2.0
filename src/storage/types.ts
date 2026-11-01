@@ -28,8 +28,10 @@ export interface LocalIdentity {
   clientHandle: string;
   credentialIdentityBase64: string;
   signaturePublicKeyBase64: string;
-  /** Local association only; null until a future explicit account binding. */
+  /** Public server association, committed only after signed registration. */
   accountVoidId: string | null;
+  accountUsername?: string | null;
+  accountApiUrl?: string | null;
   createdAt: number;
 }
 
@@ -221,5 +223,8 @@ export interface NativeStorageModule {
   close(): Promise<string>;
   removeLocalData(): Promise<string>;
   getLocalIdentity(): Promise<string>;
+  prepareAccountRegistration(username: string, apiUrl: string): Promise<string>;
+  signAccountChallenge(messageBase64: string): Promise<string>;
+  completeAccountRegistration(accountJSON: string): Promise<string>;
   execute(operation: StorageOperation, payloadJSON: string): Promise<string>;
 }

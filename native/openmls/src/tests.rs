@@ -1,5 +1,75 @@
 use crate::{MlsEngine, MlsError};
 
+#[test]
+fn account_proofs_sign_verbatim_ed25519_and_reject_other_domains() {
+    use openmls_rust_crypto::OpenMlsRustCrypto;
+    use openmls_traits::{OpenMlsProvider, crypto::OpenMlsCrypto};
+    let engine = MlsEngine::new();
+    let identity = engine
+        .create_client(b"account-proof-fixture".to_vec())
+        .unwrap();
+    let message =
+        b"VOID-NOTHINGNESS:register:v1\ntoken\n2026-11-01T09:00:00Z\nkey\ndXNlcg==\nnonce\n"
+            .to_vec();
+    let signature = engine
+        .sign_registration_challenge(identity.client_handle.clone(), message.clone())
+        .unwrap();
+    assert_eq!(signature.len(), 64);
+    let crypto = OpenMlsRustCrypto::default();
+    crypto
+        .crypto()
+        .verify_signature(
+            super::SUITE.signature_algorithm(),
+            &message,
+            &identity.signature_public_key,
+            &signature,
+        )
+        .unwrap();
+    let mut changed = message.clone();
+    changed[0] ^= 1;
+    assert!(
+        crypto
+            .crypto()
+            .verify_signature(
+                super::SUITE.signature_algorithm(),
+                &changed,
+                &identity.signature_public_key,
+                &signature
+            )
+            .is_err()
+    );
+    assert_eq!(
+        engine.sign_registration_challenge(identity.client_handle.clone(), changed),
+        Err(MlsError::InvalidInput)
+    );
+    assert_eq!(
+        engine.sign_registration_challenge(
+            identity.client_handle.clone(),
+            b"arbitrary data".to_vec()
+        ),
+        Err(MlsError::InvalidInput)
+    );
+    let mut trailing = message.clone();
+    trailing.extend_from_slice(b"extra\n");
+    assert_eq!(
+        engine.sign_registration_challenge(identity.client_handle.clone(), trailing),
+        Err(MlsError::InvalidInput)
+    );
+    assert_eq!(
+        engine.sign_registration_challenge("missing-client".into(), message),
+        Err(MlsError::UnknownClient)
+    );
+    engine.close_engine();
+    assert!(
+        engine
+            .sign_registration_challenge(
+                identity.client_handle,
+                b"VOID-NOTHINGNESS:register:v1\ntoken\nexpiry\nkey\nusername\nnonce\n".to_vec()
+            )
+            .is_err()
+    );
+}
+
 fn pair() -> (std::sync::Arc<MlsEngine>, String, String, Vec<u8>) {
     let engine = MlsEngine::new();
     let alice = engine

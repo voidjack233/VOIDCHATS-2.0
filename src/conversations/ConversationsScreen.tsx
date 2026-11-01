@@ -37,7 +37,7 @@ export function ConversationsScreen({
             {hasMore ? <Button title="Load more conversations" variant="secondary" loading={loading} onPress={loadMore} /> : null}
             {error && !hasMore ? <Button title="Try again" variant="secondary" onPress={refresh} /> : null}
           </View>
-        ) : null}
+        ) : undefined}
         renderItem={({item}) => {
           const conversation = conversationFromRecord(item);
           return <View style={{paddingHorizontal: theme.spacing.xl}}><ConversationRow conversation={conversation} onPress={() => onOpenConversation(conversation)} /></View>;
@@ -88,7 +88,7 @@ export function ConversationsScreen({
             No conversations are stored on this device yet.
           </AppText>
         </View>
-        ) : null}
+        ) : undefined}
       />
     </Screen>
   );

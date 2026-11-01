@@ -90,7 +90,7 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
         ListEmptyComponent={storage.status === 'ready' && !messages.error ? <View style={styles.empty}>
           <AppText variant="heading">{messages.loading ? 'Loading messages…' : 'No messages yet'}</AppText>
           <AppText variant="body" color="textSecondary" style={{marginTop: theme.spacing.sm}}>Messages stored on this device appear here.</AppText>
-        </View> : null}
+        </View> : undefined}
       />
       <View style={[styles.composer, {paddingHorizontal: theme.spacing.lg, paddingTop: theme.spacing.md, paddingBottom: theme.spacing.lg, borderTopColor: theme.colors.border}]}>
         <View style={styles.composerRow}>

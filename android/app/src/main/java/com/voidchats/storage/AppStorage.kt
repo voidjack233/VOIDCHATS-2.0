@@ -90,6 +90,11 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
 
   fun initializeDevelopment(): String = encrypted.withLifecycleLock {
     if (!BuildConfig.DEBUG) throw StorageFailure("DEVELOPMENT_ONLY")
+    initializeLocalIdentity()
+  }
+
+  /** Called only by explicit development setup or account registration. */
+  private fun initializeLocalIdentity(): String = encrypted.withLifecycleLock {
     if (encrypted.exists()) return@withLifecycleLock open()
     try {
       val db = encrypted.open(create = true)
@@ -113,8 +118,84 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
         put("localDeviceId", it.getString(0)); put("clientHandle", it.getString(1))
         put("credentialIdentityBase64", it.getString(2)); put("signaturePublicKeyBase64", it.getString(3))
         put("accountVoidId", if (it.isNull(4)) JSONObject.NULL else it.getString(4)); put("createdAt", it.getLong(5))
+        val account = registration()
+        put("accountUsername", if (it.isNull(4) || account == null) JSONObject.NULL else account.getString("username"))
+        put("accountApiUrl", if (it.isNull(4) || account == null) JSONObject.NULL else account.getString("api_url"))
       }
     }
+  }
+
+  private fun registration(): JSONObject? = requireDatabase().rawQuery("SELECT username,api_url,proof_signed,created_at FROM account_registration WHERE slot=1", emptyArray()).use {
+    if (!it.moveToFirst()) null else JSONObject().put("username", it.getString(0)).put("api_url", it.getString(1))
+      .put("proof_signed", it.getInt(2)).put("created_at", if (it.isNull(3)) JSONObject.NULL else it.getString(3))
+  }
+
+  /** Reuses durable identity material, including after failures and restarts. */
+  fun prepareAccountRegistration(username: String, apiUrl: String): String {
+    require(RegistrationProof.validUsername(username))
+    RegistrationProof.validateApiUrl(apiUrl)
+    initializeLocalIdentity()
+    val identity = localIdentity() ?: throw StorageFailure("DATABASE_ERROR")
+    val db = requireDatabase()
+    db.beginTransaction()
+    try {
+      val current = registration()
+      if (!identity.isNull("accountVoidId")) {
+        if (current == null || current.getString("username") != username || current.getString("api_url") != apiUrl) throw StorageFailure("CONFLICT")
+      } else if (current == null || current.getString("username") != username || current.getString("api_url") != apiUrl) {
+        db.execSQL("INSERT INTO account_registration(slot,username,api_url,proof_signed,created_at) VALUES(1,?,?,0,NULL) ON CONFLICT(slot) DO UPDATE SET username=excluded.username,api_url=excluded.api_url,proof_signed=0,created_at=NULL", arrayOf(username, apiUrl))
+      }
+      db.setTransactionSuccessful()
+    } finally { db.endTransaction() }
+    return localIdentity()!!.toString()
+  }
+
+  fun signAccountChallenge(messageBase64: String): String {
+    val identity = localIdentity() ?: throw StorageFailure("NOT_INITIALIZED")
+    if (!identity.isNull("accountVoidId")) throw StorageFailure("CONFLICT")
+    val pending = registration() ?: throw StorageFailure("INVALID_INPUT")
+    val message = RegistrationProof.validate(messageBase64, pending.getString("username"), identity.getString("signaturePublicKeyBase64"))
+    // Signing does not mutate MLS state. Persist the intent before returning the
+    // public proof so a successful remote result can be saved after reopening.
+    val signature = requireEngine().signRegistrationChallenge(identity.getString("clientHandle"), message)
+    val db = requireDatabase()
+    db.beginTransaction()
+    try {
+      db.execSQL("UPDATE account_registration SET proof_signed=1 WHERE slot=1")
+      db.setTransactionSuccessful()
+    } finally { db.endTransaction() }
+    return base64(signature)
+  }
+
+  fun completeAccountRegistration(accountJSON: String): String {
+    require(accountJSON.length in 1..8192)
+    val account = try {
+      val parser = JSONTokener(accountJSON)
+      val parsed = parser.nextValue() as? JSONObject ?: throw IllegalArgumentException()
+      require(parser.nextClean() == '\u0000')
+      parsed
+    } catch (_: org.json.JSONException) { throw IllegalArgumentException() }
+    val fields = setOf("void_id", "username", "created_at", "api_url", "auth_public_key")
+    require(account.length() == fields.size && account.keys().asSequence().all { it in fields && account.get(it) is String })
+    val voidId = account.getString("void_id")
+    require(Regex("^[1-9][0-9]{0,18}$").matches(voidId) && voidId.toLongOrNull() != null)
+    require(RegistrationProof.timestampMillis(account.getString("created_at")) >= 0)
+    val identity = localIdentity() ?: throw StorageFailure("NOT_INITIALIZED")
+    val db = requireDatabase()
+    db.beginTransaction()
+    try {
+      val pending = registration() ?: throw StorageFailure("INVALID_INPUT")
+      if (pending.getString("username") != account.getString("username") || pending.getString("api_url") != account.getString("api_url") ||
+          pending.getInt("proof_signed") != 1 || identity.getString("signaturePublicKeyBase64") != account.getString("auth_public_key")) throw StorageFailure("CONFLICT")
+      if (!identity.isNull("accountVoidId")) {
+        if (identity.getString("accountVoidId") != voidId || pending.optString("created_at") != account.getString("created_at")) throw StorageFailure("CONFLICT")
+      } else {
+        db.execSQL("UPDATE local_identity SET account_void_id=? WHERE slot=1 AND account_void_id IS NULL", arrayOf(voidId))
+        db.execSQL("UPDATE account_registration SET created_at=? WHERE slot=1", arrayOf(account.getString("created_at")))
+      }
+      db.setTransactionSuccessful()
+    } finally { db.endTransaction() }
+    return status()
   }
 
   fun requireDatabase(): SQLiteDatabase = database ?: throw StorageFailure(if (encrypted.exists()) "LOCKED" else "NOT_INITIALIZED")

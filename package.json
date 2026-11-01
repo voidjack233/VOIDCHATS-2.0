@@ -7,6 +7,7 @@
     "start": "react-native start --config metro.native.config.js",
     "android": "react-native run-android --no-packager",
     "android:build": "node scripts/android-build.mjs",
+    "android:apk": "node scripts/android-build.mjs --release",
     "native:android": "node scripts/build-openmls-android.mjs",
     "crypto:test": "node scripts/test-openmls.mjs",
     "crypto:bridgecheck": "node scripts/check-openmls-bindings.mjs",
@@ -15,10 +16,10 @@
     "lint": "eslint src index.js native-entry.js react-native.config.js babel.config.js metro.config.js metro.native.config.js .eslintrc.js --ext .js,.ts,.tsx"
   },
   "dependencies": {
-    "expo": "~57.0.17",
-    "react": "^19.2.3",
-    "react-native": "0.86.3",
-    "react-native-safe-area-context": "~5.7.0"
+    "expo": "^58.0.21",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-safe-area-context": "~5.10.1"
   },
   "devDependencies": {
     "@babel/core": "^7.25.0",
@@ -31,7 +32,7 @@
     "@react-native/eslint-config": "0.86.3",
     "@react-native/metro-config": "0.86.3",
     "@react-native/typescript-config": "0.86.3",
-    "@types/react": "~19.2.4",
+    "@types/react": "~19.3.0",
     "eslint": "^8.19.0",
     "typescript": "~6.0.3"
   }

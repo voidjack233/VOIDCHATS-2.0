@@ -1,4 +1,4 @@
-import {StorageError} from './bridge';
+import {StorageError} from './errors';
 import type {ContactRecord, ConversationCursor, ConversationMember, ConversationPage, ConversationRecord, LocalIdentity, MessagePage, MessageRecord, MessageRequestRecord, NativeStorageSnapshot} from './types';
 
 type RecordValue = Record<string, unknown>;
@@ -36,6 +36,8 @@ export function decodeIdentity(value: unknown): LocalIdentity {
     credentialIdentityBase64: text(row.credentialIdentityBase64),
     signaturePublicKeyBase64: text(row.signaturePublicKeyBase64),
     accountVoidId: nullableText(row.accountVoidId), createdAt: number(row.createdAt),
+    accountUsername: row.accountUsername === undefined ? null : nullableText(row.accountUsername),
+    accountApiUrl: row.accountApiUrl === undefined ? null : nullableText(row.accountApiUrl),
   };
 }
 export function decodeSnapshot(value: unknown): NativeStorageSnapshot {

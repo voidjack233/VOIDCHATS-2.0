@@ -23,8 +23,10 @@ export function StartupNavigator({onPreview}: StartupNavigatorProps) {
   const [step, setStep] = useState<StartupStep>('welcome');
   const [securityAcknowledged, setSecurityAcknowledged] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
+  const [initializing, setInitializing] = useState(false);
 
   const goBack = useCallback(() => {
+    if (initializing) { return; }
     switch (step) {
       case 'how-it-works':
         setStep('welcome');
@@ -39,7 +41,7 @@ export function StartupNavigator({onPreview}: StartupNavigatorProps) {
         setStep('terms');
         break;
     }
-  }, [step]);
+  }, [initializing, step]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -89,6 +91,6 @@ export function StartupNavigator({onPreview}: StartupNavigatorProps) {
         />
       );
     case 'initializing':
-      return <InitializingScreen onBack={goBack} onPreview={onPreview} />;
+      return <InitializingScreen onBack={goBack} onPreview={onPreview} onBusyChange={setInitializing} />;
   }
 }

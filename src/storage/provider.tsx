@@ -23,6 +23,8 @@ export function useStorage() {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   return {...state, repositories: controller.repositories,
     openExisting: controller.openExisting, createDevelopmentStorage: controller.createDevelopmentStorage,
+    prepareAccountRegistration: controller.prepareAccountRegistration, signAccountChallenge: controller.signAccountChallenge,
+    completeAccountRegistration: controller.completeAccountRegistration,
     closeStore: controller.closeStore, removeLocalData: controller.removeLocalData};
 }
 

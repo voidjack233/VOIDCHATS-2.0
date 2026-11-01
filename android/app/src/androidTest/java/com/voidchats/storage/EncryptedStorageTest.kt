@@ -18,6 +18,72 @@ class EncryptedStorageTest {
     try { operation(); fail("Protected data must not open") } catch (_: StorageFailure) { }
   }
 
+  @Test fun accountRegistrationReusesProtectedKeyAndPersistsImmutableBinding() {
+    val name = namespace(); val first = AppStorage(context, name)
+    val api = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz"
+    try {
+      val identity = JSONObject(first.prepareAccountRegistration("測試 user", api))
+      assertTrue(identity.isNull("accountVoidId"))
+      assertEquals(identity.toString(), first.prepareAccountRegistration("測試 user", api))
+      val challenge = registrationMessage("測試 user", identity.getString("signaturePublicKeyBase64"))
+      assertEquals(64, RegistrationProof.bytes(first.signAccountChallenge(challenge)).size)
+      first.lock()
+      val reopened = AppStorage(context, name)
+      try {
+        reopened.open()
+        val result = JSONObject().put("void_id", "9223372036854775807").put("username", "測試 user")
+          .put("created_at", "2026-11-01T08:58:12.123456Z").put("api_url", api)
+          .put("auth_public_key", identity.getString("signaturePublicKeyBase64"))
+        val snapshot = JSONObject(reopened.completeAccountRegistration(result.toString())).getJSONObject("identity")
+        assertEquals("9223372036854775807", snapshot.getString("accountVoidId"))
+        assertEquals("測試 user", snapshot.getString("accountUsername"))
+        assertEquals(api, snapshot.getString("accountApiUrl"))
+        assertEquals(identity.getString("signaturePublicKeyBase64"), snapshot.getString("signaturePublicKeyBase64"))
+        assertEquals(snapshot.toString(), JSONObject(reopened.completeAccountRegistration(result.toString())).getJSONObject("identity").toString())
+        try { reopened.completeAccountRegistration(result.put("void_id", "123").toString()); fail("Account binding must be immutable") } catch (error: StorageFailure) { assertEquals("CONFLICT", error.code) }
+        reopened.lock(); reopened.open()
+        assertEquals(snapshot.toString(), reopened.localIdentity()!!.toString())
+      } finally { reopened.lock() }
+    } finally { first.removeLocalData() }
+  }
+
+  @Test fun registrationRefusesChangedIdentityBindingsAndMalformedProofs() {
+    val store = AppStorage(context, namespace()); val api = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz"
+    try {
+      val identity = JSONObject(store.prepareAccountRegistration("alice", api))
+      for (message in listOf(
+        registrationMessage("bob", identity.getString("signaturePublicKeyBase64")),
+        registrationMessage("alice", RegistrationProof.base64(ByteArray(32))),
+        registrationMessage("alice", identity.getString("signaturePublicKeyBase64"), System.currentTimeMillis() - 60_000),
+        RegistrationProof.base64("not a registration challenge".toByteArray()),
+      )) {
+        try { store.signAccountChallenge(message); fail("Mismatched challenge must not be signed") } catch (_: IllegalArgumentException) { }
+      }
+      val response = JSONObject().put("void_id", "123").put("username", "alice").put("created_at", "2026-11-01T08:58:12Z")
+        .put("api_url", api).put("auth_public_key", identity.getString("signaturePublicKeyBase64"))
+      try { store.completeAccountRegistration(response.toString()); fail("No proof has been signed") } catch (error: StorageFailure) { assertEquals("CONFLICT", error.code) }
+      store.signAccountChallenge(registrationMessage("alice", identity.getString("signaturePublicKeyBase64")))
+      for (field in listOf("username", "api_url", "auth_public_key")) {
+        val wrong = JSONObject(response.toString()).put(field, "mismatched")
+        try { store.completeAccountRegistration(wrong.toString()); fail("Mismatched result must not bind") } catch (error: StorageFailure) { assertEquals("CONFLICT", error.code) }
+      }
+      assertTrue(store.localIdentity()!!.isNull("accountVoidId"))
+      assertEquals(identity.getString("signaturePublicKeyBase64"), store.localIdentity()!!.getString("signaturePublicKeyBase64"))
+      store.lock(); store.open()
+      assertEquals(identity.getString("signaturePublicKeyBase64"), store.localIdentity()!!.getString("signaturePublicKeyBase64"))
+      for (invalid in listOf(" alice", "alice ", "\u200B", "a\u0000b", "a".repeat(33))) {
+        try { store.prepareAccountRegistration(invalid, api); fail("Invalid username") } catch (_: IllegalArgumentException) { }
+      }
+    } finally { store.removeLocalData() }
+  }
+
+  private fun registrationMessage(username: String, key: String, expiry: Long = System.currentTimeMillis() + 120_000): String {
+    val format = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+    val token = android.util.Base64.encodeToString(ByteArray(32) { 1 }, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+    val nonce = android.util.Base64.encodeToString(ByteArray(32) { 2 }, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+    return RegistrationProof.base64("VOID-NOTHINGNESS:register:v1\n$token\n${format.format(java.util.Date(expiry))}\n$key\n${RegistrationProof.base64(username.toByteArray(Charsets.UTF_8))}\n$nonce\n".toByteArray(Charsets.UTF_8))
+  }
+
   @Test fun sqlCipherEncryptionAndKeystoreRoundTrip() {
     val name = namespace(); val store = EncryptedDatabase(context, name)
     try {

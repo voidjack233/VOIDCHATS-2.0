@@ -1,5 +1,5 @@
 import React, {useEffect, useState} from 'react';
-import {BackHandler, StyleSheet} from 'react-native';
+import {ActivityIndicator, BackHandler, StyleSheet, View} from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {ChatScreen} from '../../chat';
 import {ContactsScreen} from '../../contacts';
@@ -9,6 +9,7 @@ import {RequestsScreen} from '../../requests';
 import {SettingsScreen} from '../../settings';
 import {useTheme} from '../../theme';
 import {useStorage} from '../../storage';
+import {AppText} from '../../ui';
 import {BottomTabBar, type MainTab} from './BottomTabBar';
 import {StartupNavigator} from './StartupNavigator';
 
@@ -21,18 +22,24 @@ export function AppNavigator(): React.JSX.Element {
   const theme = useTheme();
   const storage = useStorage();
   const [mode, setMode] = useState<'startup' | 'preview'>('startup');
+  const [restored, setRestored] = useState(false);
+  const registered = storage.status === 'ready' && Boolean(storage.identity?.accountVoidId);
 
   useEffect(() => {
-    // Restoring a local development identity does not register a VOID account.
-    if (__DEV__ && storage.status === 'ready' && storage.identity) {
-      setMode('preview');
-    }
-  }, [storage.status, storage.identity]);
+    if (storage.status !== 'opening') { setRestored(true); }
+  }, [storage.status]);
 
   return (
     <SafeAreaView
       style={[styles.container, {backgroundColor: theme.colors.background}]}>
-      {mode === 'startup' ? (
+      {!restored && storage.status === 'opening' ? (
+        <View style={styles.restoring}>
+          <ActivityIndicator color={theme.colors.accent} />
+          <AppText color="textSecondary" accessibilityLiveRegion="polite" style={{marginTop: theme.spacing.lg}}>
+            Opening your encrypted storage…
+          </AppText>
+        </View>
+      ) : !registered && mode === 'startup' ? (
         <StartupNavigator
           onPreview={() => {
             if (__DEV__) {
@@ -114,4 +121,5 @@ function MessengerNavigator(): React.JSX.Element {
 
 const styles = StyleSheet.create({
   container: {flex: 1},
+  restoring: {flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24},
 });

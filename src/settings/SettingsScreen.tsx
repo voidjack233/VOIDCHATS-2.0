@@ -3,6 +3,7 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 import { useTheme } from '../theme';
 import { AppText, Divider, IconButton, Screen } from '../ui';
 import {LocalStorageSettings} from './LocalStorageSettings';
+import {useStorage} from '../storage';
 
 export interface SettingsScreenProps {
   onBack: () => void;
@@ -27,6 +28,7 @@ function SettingRow({ label, value }: SettingRowProps) {
 
 export function SettingsScreen({ onBack }: SettingsScreenProps) {
   const theme = useTheme();
+  const storage = useStorage();
 
   return (
     <Screen>
@@ -52,7 +54,7 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
           ACCOUNT
         </AppText>
         <Divider />
-        <SettingRow label="VOID-ID" value="Not set up" />
+        <SettingRow label="VOID-ID" value={storage.status === 'ready' ? storage.identity?.accountVoidId ?? 'Not set up' : 'Local storage unavailable'} />
         <Divider />
 
         <AppText variant="caption" color="textMuted" style={[styles.sectionLabel, { marginTop: theme.spacing.xxl, marginBottom: theme.spacing.sm }]}>

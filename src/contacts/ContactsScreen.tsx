@@ -40,7 +40,7 @@ export function ContactsScreen() {
         ListEmptyComponent={storage.status === 'ready' && !error ? <View style={[styles.emptyState, {paddingVertical: theme.spacing.xl}]}>
           <AppText variant="heading">{loading ? 'Loading contacts…' : 'No contacts yet'}</AppText>
           <AppText variant="body" color="textSecondary" style={[styles.emptyDescription, {marginTop: theme.spacing.sm}]}>No contacts are saved on this device yet.</AppText>
-        </View> : null}
+        </View> : undefined}
         ListFooterComponent={<Surface bordered padded style={{marginTop: theme.spacing.xxl}}>
           <AppText variant="heading">Find someone by VOID-ID</AppText>
           <AppText variant="body" color="textSecondary" style={{marginTop: theme.spacing.sm}}>VOID-ID lookup is not connected yet. A saved public key does not establish trust.</AppText>

@@ -82,16 +82,16 @@ android {
     namespace "com.voidchats"
     sourceSets {
         main {
-            java.srcDir layout.buildDirectory.dir("generated/openmls/kotlin")
-            jniLibs.srcDir layout.buildDirectory.dir("generated/openmls/jniLibs")
+            java.srcDir layout.buildDirectory.dir("generated/openmls/kotlin").get().asFile
+            jniLibs.srcDir layout.buildDirectory.dir("generated/openmls/jniLibs").get().asFile
         }
     }
     defaultConfig {
         applicationId "com.voidchats"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "1.0.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {

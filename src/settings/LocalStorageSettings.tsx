@@ -31,7 +31,9 @@ export function LocalStorageSettings() {
   function removeData() {
     Alert.alert(
       'Delete local data?',
-      'This permanently deletes this device’s conversations, messages, contacts, requests, and MLS identity. It cannot be undone.',
+      storage.identity?.accountVoidId
+        ? 'This permanently deletes this device’s conversations, messages, contacts, requests, and identity keys. Your registered account remains on the server. Account recovery is not available, so you will lose access to this account. It cannot be undone.'
+        : 'This permanently deletes this device’s conversations, messages, contacts, requests, and MLS identity. It cannot be undone.',
       [
         {text: 'Cancel', style: 'cancel'},
         {text: 'Delete local data', style: 'destructive', onPress: () => { update(storage.removeLocalData); }},
