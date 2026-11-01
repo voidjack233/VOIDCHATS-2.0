@@ -1,6 +1,6 @@
 # VOID-E2EE 2.0
 
-Native React Native and TypeScript Android application for VOID, with encrypted local records and protected native OpenMLS persistence. Account registration and network message delivery remain unfinished.
+Native React Native and TypeScript Android application for VOID, with encrypted local records and protected native OpenMLS persistence. A native Go account-registration backend is available in `backend/`; mobile registration integration and network message delivery remain unfinished.
 
 ## Run
 
@@ -13,6 +13,20 @@ The existing Expo setup remains available for UI preview with `npx expo start` a
 On macOS, install the iOS native dependencies with `bundle install` and `cd ios && bundle exec pod install`, then run `npm run ios` from the project root.
 
 Use `npm run typecheck` for TypeScript validation and `npm run lint` for linting.
+
+## Go registration backend
+
+`backend/` contains the native Go account-initialization API, Ed25519 registration challenges, Snowflake VOID-IDs, PostgreSQL persistence, and health endpoints. It uses an existing PostgreSQL database and never provisions database objects or credentials automatically. Configure `backend/.env` with an owner-approved existing connection; real environment files and compiled binaries are excluded from Git.
+
+From the repository root:
+
+```bash
+cd backend
+go build ./cmd/void-server
+./void-server
+```
+
+See [backend API, configuration, and verification](backend/README.md). The mobile application is not yet wired to this API.
 
 ## Source layout
 
@@ -47,6 +61,7 @@ See [verification results and remaining device checks](docs/openmls-verification
 
 ## Current scope
 
-This repository contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The previous Go API, PostgreSQL development infrastructure, and backend connection diagnostic have been removed to make room for a redesigned 1:1 messaging architecture.
+This repository contains the mobile application, native OpenMLS integration, encrypted on-device storage, and the Go account-initialization backend in `backend/`.
 
-Account registration, remote key exchange, and network message transport are not implemented. UI preview and local storage remain independent of a server.
+The backend implements account registration. Mobile registration integration, remote key exchange, and network message transport remain unfinished. UI preview and local storage remain independent of a server.
+
