@@ -1,19 +1,19 @@
 # Phase 2: authentication and opaque relay
 
-The existing Go process now also serves `GET /dm9pZG5vdGhpbmduZXNz/ws`
+The Phase 2 implementation serves `GET /dm9pZG5vdGhpbmduZXNz/ws`
 as a WebSocket upgrade. Local development uses
 `ws://127.0.0.1:8080/dm9pZG5vdGhpbmduZXNz/ws`.
 Registration keeps its existing paths, payloads, and responses.
 
-The expected public URL is
+The public URL is
 `wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws`.
-**It is not exposed by the current tunnel rule**, which matches only
-`accounts|challenges`. No DNS, hostname, tunnel, or networking configuration was
-changed. Exposing this endpoint requires owner permission to extend the existing
-path expression to `^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges|ws)$`, retaining
-the existing `http://127.0.0.1:8080` service. This is a proposed configuration
-change, not an instruction the application executes. The currently running
-Phase 1 process is not replaced automatically by building Phase 2.
+On 2026-11-02, with owner approval, the existing tunnel path expression was
+extended to `^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges|ws)$`, retaining
+the existing `http://127.0.0.1:8080` service. Cloudflared was restarted and the
+rule validated; DNS, hostnames, credentials, other rules, and the backend process
+were unchanged. **The backend was still running Phase 1 at that point**, returning
+HTTP 404 for `/ws`. The Phase 2 backend must be launched separately before this
+URL can accept WebSocket connections. Building or adding a route does not deploy it.
 
 ## Authentication handshake
 
@@ -193,5 +193,5 @@ Connections and online presence belong to one process and are lost on restart.
 Multiple replicas, cross-instance relay, distributed flood controls, per-account
 message quotas, recovery, offline storage, group messaging, and recipient
 acknowledgments are outside this phase. A transport write alone cannot prove
-recipient delivery. Public WebSocket routing still awaits the separately approved
-tunnel rule change described above. No production deployment is performed.
+recipient delivery. Public WebSocket routing was configured on 2026-11-02, as
+described above. The rule update did not deploy the Phase 2 backend.

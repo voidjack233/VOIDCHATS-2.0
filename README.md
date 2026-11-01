@@ -1,6 +1,6 @@
 # VOID-NOTHINGNESS
 
-A native Go modular monolith for account initialization, returning-user WebSocket authentication, and online opaque message relay on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects. See [WEBSOCKET.md](WEBSOCKET.md) for the Phase 2 handshake, frame formats, limits, demo, and public routing limitation.
+A native Go modular monolith for account initialization, returning-user WebSocket authentication, and online opaque message relay on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects. See [WEBSOCKET.md](WEBSOCKET.md) for the Phase 2 handshake, frame formats, limits, demo, and deployment status.
 
 ## Run locally
 
@@ -23,16 +23,19 @@ Settings and defaults are listed in `.env.example`. Connection pooling defaults 
 
 ## Cloudflared
 
-The existing `void0000-main` tunnel exposes these two endpoints over HTTPS:
+The existing `void0000-main` tunnel routes these endpoints to the Go backend:
 
 - `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/challenges`
 - `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/accounts`
+- `GET wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws` (WebSocket upgrade; requires the Phase 2 backend)
+
+The owner-approved `/ws` route was added on 2026-11-02. Cloudflared was restarted to apply it. The backend process was left on Phase 1; adding the tunnel route does not deploy or activate the Phase 2 implementation.
 
 The following ingress rule is installed in `~/.cloudflared/config.yml`, before the existing routes for `api.voidchats.xyz`:
 
 ```yaml
 - hostname: api.voidchats.xyz
-  path: ^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges)$
+  path: ^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges|ws)$
   service: http://127.0.0.1:8080
 ```
 
