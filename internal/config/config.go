@@ -26,6 +26,10 @@ type Config struct {
 	MaxRateClients        int
 	MaxConcurrentRequests int
 	DatabaseMaxConns      int32
+	WSAuthTimeout         time.Duration
+	WSMaxConnections      int
+	WSQueueSize           int
+	WSMaxPayloadBytes     int
 }
 
 // ReadEnvFile parses literal KEY=VALUE assignments, never shell code. Existing
@@ -133,6 +137,9 @@ func Load(path string) (Config, error) {
 		{"VOID_RATE_BURST", 10, 1, 1000, &c.RateBurst},
 		{"VOID_MAX_RATE_CLIENTS", 4096, 1, 100000, &c.MaxRateClients},
 		{"VOID_MAX_CONCURRENT_REQUESTS", 64, 1, 1024, &c.MaxConcurrentRequests},
+		{"VOID_WS_MAX_CONNECTIONS", 256, 1, 4096, &c.WSMaxConnections},
+		{"VOID_WS_QUEUE_SIZE", 16, 1, 256, &c.WSQueueSize},
+		{"VOID_WS_MAX_PAYLOAD_BYTES", 16384, 1, 16384, &c.WSMaxPayloadBytes},
 	}
 	for _, field := range fields {
 		n, err := integer(field.key, field.fallback, field.min, field.max)
@@ -154,6 +161,7 @@ func Load(path string) (Config, error) {
 		{"VOID_CHALLENGE_TTL", "2m", time.Second, 10 * time.Minute, &c.ChallengeTTL},
 		{"VOID_REQUEST_TIMEOUT", "5s", 100 * time.Millisecond, 30 * time.Second, &c.RequestTimeout},
 		{"VOID_SHUTDOWN_TIMEOUT", "10s", time.Second, time.Minute, &c.ShutdownTimeout},
+		{"VOID_WS_AUTH_TIMEOUT", "10s", time.Second, 10 * time.Second, &c.WSAuthTimeout},
 	}
 	for _, field := range durations {
 		d, err := time.ParseDuration(get(field.key, field.fallback))

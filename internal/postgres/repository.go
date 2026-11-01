@@ -249,15 +249,14 @@ func (r *Repository) Validate(ctx context.Context) error {
 	return nil
 }
 
-// INSERT ... RETURNING needs access only to the columns it writes or returns.
+// Registration needs INSERT ... RETURNING, and returning-user authentication
+// additionally reads auth_public_key by VOID-ID.
 // Additional privileges, including those of the configured postgres login, do
 // not prevent the application from using its existing database connection.
 func hasRequiredColumnAccess(name string, selectable, insertable bool) bool {
 	switch name {
-	case "void_id", "username":
+	case "void_id", "username", "auth_public_key":
 		return selectable && insertable
-	case "auth_public_key":
-		return insertable
 	case "created_at":
 		return selectable
 	default:

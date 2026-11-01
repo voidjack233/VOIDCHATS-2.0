@@ -14,9 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"void-nothingness/internal/account"
+	"void-nothingness/internal/auth"
 	"void-nothingness/internal/config"
 	"void-nothingness/internal/httpapi"
 	"void-nothingness/internal/postgres"
+	"void-nothingness/internal/relay"
 	"void-nothingness/internal/snowflake"
 )
 
@@ -71,7 +73,25 @@ func run() error {
 		return err
 	}
 	handler := httpapi.New(service, repo.Ready, httpapi.Options{RequestTimeout: cfg.RequestTimeout, RatePerMinute: cfg.RatePerMinute, RateBurst: cfg.RateBurst, MaxRateClients: cfg.MaxRateClients, MaxConcurrentRequests: cfg.MaxConcurrentRequests})
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: handler, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: cfg.RequestTimeout + time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	authentication, err := auth.NewService(repo, cfg.WSAuthTimeout)
+	if err != nil {
+		return errors.New("invalid authentication configuration")
+	}
+	sockets, err := relay.New(authentication, relay.Options{
+		AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
+		QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
+		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048),
+	})
+	if err != nil {
+		return errors.New("invalid WebSocket configuration")
+	}
+	defer sockets.Close()
+	routes := http.NewServeMux()
+	// WebSockets own their authentication/heartbeat deadlines. Mount outside
+	// the short registration request timeout without changing existing routes.
+	routes.Handle("/dm9pZG5vdGhpbmduZXNz/ws", sockets)
+	routes.Handle("/", handler)
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: routes, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: cfg.RequestTimeout + time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return errors.New("cannot listen on configured HTTP address")
@@ -90,6 +110,9 @@ func run() error {
 		return nil
 	case <-root.Done():
 	}
+	// http.Server.Shutdown does not close hijacked WebSocket connections.
+	// Close both authenticated and pending sockets before draining HTTP.
+	_ = sockets.Close()
 	shutdown, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdown); err != nil {

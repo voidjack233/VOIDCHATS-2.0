@@ -1,0 +1,13 @@
+Local demonstration: in-memory accounts and ephemeral keys; no real database writes or network configuration changes.
+Registered two disposable accounts through the existing HTTP registration handlers.
+Alice authenticated: {"type":"auth_ok","void_id":"1"}
+Bob authenticated: {"type":"auth_ok","void_id":"2"}
+Both authenticated WebSocket connections are active.
+Bob received simulated ciphertext: {"type":"message","request_id":"demo-alice-1","sender_id":"1","payload":"U0lNVUxBVEVELUNJUEhFUlRFWFQ6YWxpY2UtdG8tYm9iOm9wYXF1ZS1kZW1vLWJ5dGVz"}
+Alice received transport result: {"type":"result","request_id":"demo-alice-1","status":"forwarded"}
+Alice received simulated ciphertext: {"type":"message","request_id":"demo-bob-1","sender_id":"2","payload":"U0lNVUxBVEVELUNJUEhFUlRFWFQ6Ym9iLXRvLWFsaWNlOm9wYXF1ZS1yZXBseS1ieXRlcw=="}
+Bob received transport result: {"type":"result","request_id":"demo-bob-1","status":"forwarded"}
+forwarded means transport forwarding completed; it does not acknowledge recipient processing or guarantee delivery.
+Bob disconnected; his authenticated connection was removed.
+Alice received offline-recipient result: {"type":"result","request_id":"demo-offline-1","status":"unavailable"}
+All simulated clients disconnected; no active sessions remain and no offline messages were queued.

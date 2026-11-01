@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	filippo.io/edwards25519 v1.2.0
+	github.com/coder/websocket v1.8.15
 	github.com/jackc/pgx/v5 v5.12.0
 )
 

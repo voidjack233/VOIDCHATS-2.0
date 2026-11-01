@@ -1,6 +1,6 @@
 # VOID-NOTHINGNESS
 
-A native Go modular monolith for account initialization on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects.
+A native Go modular monolith for account initialization, returning-user WebSocket authentication, and online opaque message relay on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects. See [WEBSOCKET.md](WEBSOCKET.md) for the Phase 2 handshake, frame formats, limits, demo, and public routing limitation.
 
 ## Run locally
 
@@ -48,7 +48,7 @@ Both processes must remain running; no autostart service was installed. API clie
 
 ## Database connection
 
-The backend uses the existing connection chosen by the owner. Startup requires `SELECT` access to `void_id`, `username`, and `created_at`, and `INSERT` access to `void_id`, `username`, and `auth_public_key`. Additional privileges, ownership, and administrative role flags do not block startup. It never creates roles, grants permissions, or repairs the schema. The current connection uses `postgres`, as explicitly requested. Earlier administrative changes and authorized corrections are recorded in [DATABASE_CHANGES.md](DATABASE_CHANGES.md).
+The backend uses the existing connection chosen by the owner. Startup requires `SELECT` access to `void_id`, `username`, `auth_public_key`, and `created_at`, and `INSERT` access to `void_id`, `username`, and `auth_public_key`. Phase 2 reads the existing public authentication key by VOID-ID; it does not alter the table. Additional privileges, ownership, and administrative role flags do not block startup. It never creates roles, grants permissions, or repairs the schema. The current connection uses `postgres`, as explicitly requested. Earlier administrative changes and authorized corrections are recorded in [DATABASE_CHANGES.md](DATABASE_CHANGES.md).
 
 `id` is omitted from every insert, so PostgreSQL's `uuidv7()` default creates it. The server returns only public fields. Username uniqueness is deliberately not required by the existing schema.
 
@@ -95,7 +95,7 @@ All POST requests require `Content-Type: application/json`. Fields must be exact
 
    `void_id` is a positive signed 64-bit integer represented as a decimal JSON string. The timestamp comes from PostgreSQL. Registration creates no authenticated session, cookie, or token. VOID-IDs are public identifiers and never authentication secrets.
 
-Challenges are atomically consumed before signature verification and database access. Well-formed invalid signatures, expired challenges, concurrent replay, database failures, and interrupted in-flight registrations cannot reuse them. Obtain a fresh challenge after a failure. A disconnected client can miss a successful commit; retrying with a fresh proof then returns `409` if that key was registered. There is no account lookup/recovery or session flow in this phase.
+Registration challenges are atomically consumed before signature verification and database access. Well-formed invalid signatures, expired challenges, concurrent replay, database failures, and interrupted in-flight registrations cannot reuse them. Obtain a fresh challenge after a failure. A disconnected client can miss a successful commit; retrying with a fresh proof then returns `409` if that key was registered. Registration issues no session; returning users authenticate through [the separate WebSocket handshake](WEBSOCKET.md). Account recovery remains outside scope.
 
 Errors have the shape `{"error":{"code":"invalid_proof","message":"Registration proof is invalid or expired."}}`.
 

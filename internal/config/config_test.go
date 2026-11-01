@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLiteralEnvAndOverride(t *testing.T) {
@@ -93,5 +94,31 @@ func TestDuplicateAndUnterminatedAssignments(t *testing.T) {
 		if _, err := ReadEnvFile(path); err == nil {
 			t.Fatal("accepted invalid file")
 		}
+	}
+}
+
+func TestWebSocketDefaultsAndBounds(t *testing.T) {
+	t.Setenv("PGUSER", "app")
+	t.Setenv("PGDATABASE", "void")
+	c, err := Load("")
+	if err != nil || c.WSAuthTimeout != 10*time.Second || c.WSMaxConnections != 256 || c.WSQueueSize != 16 || c.WSMaxPayloadBytes != 16384 {
+		t.Fatalf("invalid WebSocket defaults: %v", err)
+	}
+	for _, tt := range []struct{ key, value string }{
+		{"VOID_WS_AUTH_TIMEOUT", "11s"},
+		{"VOID_WS_AUTH_TIMEOUT", "0s"},
+		{"VOID_WS_MAX_CONNECTIONS", "4097"},
+		{"VOID_WS_MAX_CONNECTIONS", "0"},
+		{"VOID_WS_QUEUE_SIZE", "257"},
+		{"VOID_WS_QUEUE_SIZE", "-1"},
+		{"VOID_WS_MAX_PAYLOAD_BYTES", "16385"},
+		{"VOID_WS_MAX_PAYLOAD_BYTES", "0"},
+	} {
+		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+			if _, err := Load(""); err == nil {
+				t.Fatal("accepted unbounded WebSocket configuration")
+			}
+		})
 	}
 }

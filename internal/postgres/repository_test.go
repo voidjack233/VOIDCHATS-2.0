@@ -24,7 +24,7 @@ func TestRequiredColumnAccessAllowsConfiguredLoginPrivileges(t *testing.T) {
 	}
 }
 
-func TestRequiredColumnAccessMatchesInsertReturning(t *testing.T) {
+func TestRequiredColumnAccessMatchesRegistrationAndAuthentication(t *testing.T) {
 	tests := []struct {
 		column                 string
 		selectable, insertable bool
@@ -37,9 +37,10 @@ func TestRequiredColumnAccessMatchesInsertReturning(t *testing.T) {
 		{"username", false, false, false},
 		{"username", false, true, false},
 		{"username", true, false, false},
-		{"auth_public_key", false, true, true},
+		{"auth_public_key", false, true, false},
 		{"auth_public_key", false, false, false},
 		{"auth_public_key", true, false, false},
+		{"auth_public_key", true, true, true},
 		{"created_at", true, false, true},
 		{"created_at", false, false, false},
 		{"created_at", false, true, false},

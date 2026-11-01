@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"void-nothingness/internal/account"
+	"void-nothingness/internal/auth"
 	"void-nothingness/internal/httpapi"
 	"void-nothingness/internal/postgres"
 	"void-nothingness/internal/snowflake"
@@ -113,6 +114,13 @@ func TestPostgresPersistenceAndUniqueness(t *testing.T) {
 	if _, err := repo.Insert(ctx, id, "duplicate-id", freshKey(t)); !errors.Is(err, account.ErrIDCollision) {
 		t.Fatalf("duplicate VOID-ID: got %v", err)
 	}
+	storedKey, err := repo.AuthenticationKey(ctx, id)
+	if err != nil || !bytes.Equal(storedKey, key) {
+		t.Fatalf("authentication lookup did not return the registered key: %v", err)
+	}
+	if _, err := repo.AuthenticationKey(ctx, freshID(t)); !errors.Is(err, auth.ErrNotFound) {
+		t.Fatalf("unknown authentication identity: %v", err)
+	}
 	if err := repo.Ready(ctx); err != nil {
 		t.Fatalf("readiness after insert: %v", err)
 	}
@@ -141,7 +149,6 @@ func TestPostgresRuntimePrivileges(t *testing.T) {
 	}
 	queries := []string{
 		"SELECT id FROM public.accounts LIMIT 1",
-		"SELECT auth_public_key FROM public.accounts LIMIT 1",
 		"SELECT * FROM public.accounts LIMIT 1",
 		"UPDATE public.accounts SET username = 'forbidden' WHERE false",
 		"DELETE FROM public.accounts WHERE false",
