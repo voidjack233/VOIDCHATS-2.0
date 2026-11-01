@@ -1,7 +1,0 @@
-.env
-.env.*
-!.env.example
-/void-server
-/bin/
-*.test
-coverage.out
