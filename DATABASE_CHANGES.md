@@ -68,3 +68,15 @@ COMMIT;
 Verification confirmed the role no longer exists and the existing account column definitions, defaults, constraints, and row count were unchanged. The current `.env` contents and permissions were unchanged. No `DROP OWNED` or cascade deletion was used. The earlier `PUBLIC TEMPORARY` revocation was not reversed because that was outside this request.
 
 The Go validator now accepts the configured `postgres` login. It checks required registration access and the existing schema, without rejecting additional role privileges. This supersedes the earlier startup restriction and credential-blocker findings above. Future PostgreSQL administration still requires separate explicit approval.
+
+## Durable messaging migration preparation: 2026-11-02
+
+The messaging handoff requested additive SQL for owner review. Prepared
+`migrations/001_messaging.sql`, `migrations/002_sessions.sql`, and separate
+parameterized privilege scripts. These files have **not** been applied to the
+existing database. No account rows, table definitions, credentials, roles,
+grants, database settings or real environment files were changed during this
+implementation. Normal startup performs only read-only schema/access validation;
+enabling messaging requires the owner-reviewed migrations first. Database tests
+remain separately opted in against an approved disposable `void_test_` database.
+See [deployment instructions](docs/MESSAGING_DEPLOYMENT.md).

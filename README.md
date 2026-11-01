@@ -2,9 +2,11 @@
 
 A native Go modular monolith for account initialization, returning-user WebSocket authentication, and online opaque message relay on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects. See [WEBSOCKET.md](WEBSOCKET.md) for the Phase 2 handshake, frame formats, limits, demo, and deployment status.
 
+The checkout also implements durable one-to-one messaging: short-lived bearer sessions, exact VOID-ID discovery, public MLS KeyPackage publication/claims, invitations, acceptance/decline/blocks, opaque messages, and ordered offline sync with durable acknowledgments and duplicate-safe retries. See the [exact API contract and examples](docs/MESSAGING_API.md) and [migration/deployment instructions](docs/MESSAGING_DEPLOYMENT.md). This feature defaults to **disabled** until the additive SQL has been reviewed and applied. The server never runs migrations itself. Enabling it removes the older WebSocket relay so conversation authorization and blocks cannot be bypassed.
+
 ## Run locally
 
-Run the commands below from the repository root on the `backend` branch of VOIDCHATS-2.0. The real `.env` is excluded from Git. For a new checkout, create your local `.env` from the settings in `.env.example` using an existing owner-approved connection; preserve an existing environment file.
+Run the commands below from the repository root of VOIDCHATS-2.0. The durable messaging work is on `codex/durable-messaging`, based on `backend`. The real `.env` is excluded from Git. For a new checkout, create your local `.env` from the settings in `.env.example` using an existing owner-approved connection; preserve an existing environment file.
 
 Go 1.26.5 and PostgreSQL 18 are required. The owner chose the existing `postgres` login in `.env` and database `void2-0e2ee`. The backend accepts that configured login and checks the access needed for registration. The existing username and password have not been changed. See [DATABASE_CHANGES.md](DATABASE_CHANGES.md) for the record of database/environment changes, including the explicitly authorized removal of `void_accounts_app`.
 
@@ -19,23 +21,24 @@ The default listener is `127.0.0.1:8080`. `SIGINT` or `SIGTERM` stops accepting 
 
 `.env.example` documents the available settings; configuration and credential changes belong to the owner. The application reads literal `KEY=VALUE` assignments (optional matching quotes), never shell commands or interpolation. Process environment overrides the file. `-env-file /path/to/file` selects another file; `-env-file ''` uses process environment alone. `DATABASE_URL`, if set, takes precedence over the `PG*` connection fields. Connection strings and database diagnostics are never logged.
 
-Settings and defaults are listed in `.env.example`. Connection pooling defaults to 8 connections. HTTP bodies are limited to 4096 bytes, headers to 8192 bytes, concurrent registration/readiness handlers to 64, pending challenges to 4096, and tracked rate-limit clients to 4096. Header/body/idle deadlines and database statement/lock/connect timeouts bound stalled operations. Request contexts reach PostgreSQL and ID generation.
+Settings and defaults are listed in `.env.example`. Connection pooling defaults to 8 connections. Registration HTTP bodies are limited to 4096 bytes, headers to 8192 bytes, concurrent registration/readiness handlers to 64, pending challenges to 4096, and tracked rate-limit clients to 4096. Enabled messaging has separate body, admission and authenticated account rate budgets, described in its API contract. Header/body/idle deadlines and database statement/lock/connect timeouts bound stalled operations. Request contexts reach PostgreSQL and ID generation.
 
 ## Cloudflared
 
-The existing `void0000-main` tunnel routes these endpoints to the Go backend:
+The existing `void0000-main` tunnel forwards the `/dm9pZG5vdGhpbmduZXNz` namespace to the Go backend. Available endpoints depend on the running build and feature mode:
 
 - `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/challenges`
 - `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/accounts`
 - `GET wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws` (WebSocket upgrade; requires the Phase 2 backend)
+- The durable HTTP APIs in [MESSAGING_API.md](docs/MESSAGING_API.md), after reviewed migrations and deployment with `VOID_MESSAGING_ENABLED=true`; that mode removes the older `/ws` endpoint.
 
-The owner-approved `/ws` route was added on 2026-11-02. Cloudflared was restarted to apply it. The backend process was left on Phase 1; adding the tunnel route does not deploy or activate the Phase 2 implementation.
+The owner-approved `/ws` route was added on 2026-11-02. The later durable-messaging handoff authorized expanding it to the complete API prefix; that one-line change was backed up, validated and applied on the same client date, and Cloudflared was restarted. The Go backend process remains unchanged on Phase 1. New public messaging paths currently return the backend's JSON `404`; routing does not activate the implementation. See [the verification/deployment record](docs/MESSAGING_VALIDATION.md).
 
 The following ingress rule is installed in `~/.cloudflared/config.yml`, before the existing routes for `api.voidchats.xyz`:
 
 ```yaml
 - hostname: api.voidchats.xyz
-  path: ^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges|ws)$
+  path: ^/dm9pZG5vdGhpbmduZXNz(/.*)?$
   service: http://127.0.0.1:8080
 ```
 

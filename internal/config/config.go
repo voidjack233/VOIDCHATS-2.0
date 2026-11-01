@@ -30,6 +30,8 @@ type Config struct {
 	WSMaxConnections      int
 	WSQueueSize           int
 	WSMaxPayloadBytes     int
+	MessagingEnabled      bool
+	APIAudience           string
 }
 
 // ReadEnvFile parses literal KEY=VALUE assignments, never shell code. Existing
@@ -93,6 +95,22 @@ func Load(path string) (Config, error) {
 	c := Config{ListenAddr: get("VOID_HTTP_ADDR", "127.0.0.1:8080")}
 	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
 		return Config{}, errors.New("invalid VOID_HTTP_ADDR")
+	}
+	c.MessagingEnabled, err = strconv.ParseBool(get("VOID_MESSAGING_ENABLED", "false"))
+	if err != nil {
+		return Config{}, errors.New("invalid VOID_MESSAGING_ENABLED")
+	}
+	c.APIAudience = get("VOID_API_AUDIENCE", "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz")
+	audience, err := url.Parse(c.APIAudience)
+	if err != nil || audience.Scheme != "https" || audience.Host == "" || audience.User != nil || audience.RawQuery != "" || audience.Fragment != "" || audience.RawPath != "" || strings.HasSuffix(audience.Path, "/") {
+		return Config{}, errors.New("invalid VOID_API_AUDIENCE")
+	}
+	if c.MessagingEnabled {
+		host, _, _ := net.SplitHostPort(c.ListenAddr)
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return Config{}, errors.New("messaging requires a loopback listener behind HTTPS termination")
+		}
 	}
 	c.DatabaseURL = get("DATABASE_URL", "")
 	if c.DatabaseURL == "" {

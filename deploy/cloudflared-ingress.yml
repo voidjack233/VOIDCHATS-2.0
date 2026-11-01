@@ -1,0 +1,3 @@
+- hostname: api.voidchats.xyz
+  path: ^/dm9pZG5vdGhpbmduZXNz(/.*)?$
+  service: http://127.0.0.1:8080

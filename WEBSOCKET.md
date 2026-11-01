@@ -1,5 +1,11 @@
 # Phase 2: authentication and opaque relay
 
+This describes the earlier online-only relay. Enabling the newer durable
+messaging mode disables `/ws` so it cannot bypass conversation acceptance or
+blocks. See [the durable API](docs/MESSAGING_API.md) and
+[current deployment record](docs/MESSAGING_VALIDATION.md). The historical tunnel
+expression below has since been expanded to the full API prefix.
+
 The Phase 2 implementation serves `GET /dm9pZG5vdGhpbmduZXNz/ws`
 as a WebSocket upgrade. Local development uses
 `ws://127.0.0.1:8080/dm9pZG5vdGhpbmduZXNz/ws`.

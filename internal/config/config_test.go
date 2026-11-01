@@ -122,3 +122,34 @@ func TestWebSocketDefaultsAndBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestMessagingRequiresExplicitEnablementAndPrivateListener(t *testing.T) {
+	t.Setenv("PGUSER", "app")
+	t.Setenv("PGDATABASE", "void")
+	t.Setenv("VOID_MESSAGING_ENABLED", "false")
+	t.Setenv("VOID_API_AUDIENCE", "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz")
+	c, err := Load("")
+	if err != nil || c.MessagingEnabled || c.APIAudience != "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz" {
+		t.Fatalf("unexpected messaging defaults: %v", err)
+	}
+	t.Setenv("VOID_MESSAGING_ENABLED", "true")
+	if _, err := Load(""); err != nil {
+		t.Fatal(err)
+	}
+	for _, listener := range []string{"0.0.0.0:8080", "192.0.2.1:8080", ":8080", "[::]:8080"} {
+		t.Run(listener, func(t *testing.T) {
+			t.Setenv("VOID_HTTP_ADDR", listener)
+			if _, err := Load(""); err == nil {
+				t.Fatal("accepted public plaintext bearer listener")
+			}
+		})
+	}
+	for _, value := range []string{"http://api.example/prefix", "https://api.example/prefix/", "https://user:secret@api.example/prefix", "https://api.example/prefix?token=secret", "https://api.example/prefix#fragment"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("VOID_API_AUDIENCE", value)
+			if _, err := Load(""); err == nil || strings.Contains(err.Error(), "secret") {
+				t.Fatal("accepted invalid audience or leaked it")
+			}
+		})
+	}
+}

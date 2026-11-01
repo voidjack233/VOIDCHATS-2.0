@@ -1,0 +1,7 @@
+--- cloudflared/config.yml.before-messaging
++++ cloudflared/config.yml
+@@ -66,3 +66,3 @@
+   - hostname: api.voidchats.xyz
+-    path: ^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges|ws)$
++    path: ^/dm9pZG5vdGhpbmduZXNz(/.*)?$
+     service: http://127.0.0.1:8080

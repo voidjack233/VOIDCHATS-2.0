@@ -17,8 +17,11 @@ import (
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/config"
 	"void-nothingness/internal/httpapi"
+	"void-nothingness/internal/messaging"
+	"void-nothingness/internal/messagingapi"
 	"void-nothingness/internal/postgres"
 	"void-nothingness/internal/relay"
+	"void-nothingness/internal/session"
 	"void-nothingness/internal/snowflake"
 )
 
@@ -72,26 +75,67 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	handler := httpapi.New(service, repo.Ready, httpapi.Options{RequestTimeout: cfg.RequestTimeout, RatePerMinute: cfg.RatePerMinute, RateBurst: cfg.RateBurst, MaxRateClients: cfg.MaxRateClients, MaxConcurrentRequests: cfg.MaxConcurrentRequests})
-	authentication, err := auth.NewService(repo, cfg.WSAuthTimeout)
-	if err != nil {
-		return errors.New("invalid authentication configuration")
+	ready := repo.Ready
+	var durableHandler http.Handler
+	var sockets *relay.Server
+	if cfg.MessagingEnabled {
+		messageStore := postgres.NewMessagingStore(pool)
+		sessionStore := postgres.NewSessionStore(pool)
+		check := func(ctx context.Context) error {
+			if err := repo.Ready(ctx); err != nil {
+				return err
+			}
+			if err := messageStore.Validate(ctx); err != nil {
+				return err
+			}
+			return sessionStore.Validate(ctx)
+		}
+		ctx, cancel := context.WithTimeout(root, 10*time.Second)
+		err = check(ctx)
+		cancel()
+		if err != nil {
+			return errors.New("messaging schema or privileges unavailable; review and apply the additive migrations before enabling messaging")
+		}
+		sessions, err := session.New(repo, sessionStore, cfg.APIAudience)
+		if err != nil {
+			return errors.New("invalid messaging session configuration")
+		}
+		messages, err := messaging.NewService(messageStore)
+		if err != nil {
+			return errors.New("invalid messaging configuration")
+		}
+		durableHandler = messagingapi.New(sessions, messages, messagingapi.Options{})
+		ready = check
+	} else {
+		authentication, err := auth.NewService(repo, cfg.WSAuthTimeout)
+		if err != nil {
+			return errors.New("invalid authentication configuration")
+		}
+		sockets, err = relay.New(authentication, relay.Options{
+			AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
+			QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
+			MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048),
+		})
+		if err != nil {
+			return errors.New("invalid WebSocket configuration")
+		}
+		defer sockets.Close()
 	}
-	sockets, err := relay.New(authentication, relay.Options{
-		AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
-		QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
-		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048),
-	})
-	if err != nil {
-		return errors.New("invalid WebSocket configuration")
-	}
-	defer sockets.Close()
+	handler := httpapi.New(service, ready, httpapi.Options{RequestTimeout: cfg.RequestTimeout, RatePerMinute: cfg.RatePerMinute, RateBurst: cfg.RateBurst, MaxRateClients: cfg.MaxRateClients, MaxConcurrentRequests: cfg.MaxConcurrentRequests})
 	routes := http.NewServeMux()
 	// WebSockets own their authentication/heartbeat deadlines. Mount outside
 	// the short registration request timeout without changing existing routes.
-	routes.Handle("/dm9pZG5vdGhpbmduZXNz/ws", sockets)
+	if durableHandler != nil {
+		messagingapi.Mount(routes, durableHandler)
+	} else {
+		routes.Handle("/dm9pZG5vdGhpbmduZXNz/ws", sockets)
+	}
 	routes.Handle("/", handler)
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: routes, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: cfg.RequestTimeout + time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	writeTimeout := cfg.RequestTimeout + time.Second
+	if cfg.MessagingEnabled {
+		writeTimeout = max(writeTimeout, 11*time.Second)
+	}
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: routes, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return errors.New("cannot listen on configured HTTP address")
@@ -101,7 +145,7 @@ func run() error {
 	defer server.Close()
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(listener) }()
-	slog.Info("VOID-NOTHINGNESS listening", "address", listener.Addr().String())
+	slog.Info("VOID-NOTHINGNESS listening", "address", listener.Addr().String(), "durable_messaging", cfg.MessagingEnabled)
 	select {
 	case err := <-serverErr:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -112,7 +156,9 @@ func run() error {
 	}
 	// http.Server.Shutdown does not close hijacked WebSocket connections.
 	// Close both authenticated and pending sockets before draining HTTP.
-	_ = sockets.Close()
+	if sockets != nil {
+		_ = sockets.Close()
+	}
 	shutdown, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdown); err != nil {
