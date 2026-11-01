@@ -1,0 +1,70 @@
+# Previous database and environment changes
+
+This report records the initial changes, the user's instruction to stop database administration, and subsequent explicitly authorized corrections. The initial review used read-only queries with `default_transaction_read_only=on`.
+
+## Persistent database changes
+
+On existing database `void2-0e2ee`:
+
+- Created login role `void_accounts_app` with a generated random password, `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS`, and no role memberships.
+- Granted it `CONNECT` on the database and `USAGE` on `public`.
+- Granted column-level `INSERT (void_id, username, auth_public_key)` and `SELECT (void_id, username, created_at)` on existing `public.accounts`.
+- Revoked `TEMPORARY` on `void2-0e2ee` from `PUBLIC`. This changes permissions for other roles relying on that implicit grant.
+
+Read-only inspection after the stop instruction confirmed this role and these grants remain. No development account rows were inserted, deleted, or updated. The existing database, schema, table definitions, constraints, and indexes were not replaced or changed.
+
+## Disposable integration resources
+
+Before the stop instruction, the integration runner created these databases and corresponding temporary login roles:
+
+| Database | Role |
+| --- | --- |
+| `void_test_36830f21827dd3a8` | `void_test_app_36830f21827dd3a8` |
+| `void_test_928b35affc212f35` | `void_test_app_928b35affc212f35` |
+| `void_test_36dd8b3a1b139994` | `void_test_app_36dd8b3a1b139994` |
+
+Each received a new `public.accounts` fixture and restricted grants. Test registrations were inserted only there. The runner dropped all three databases and roles on completion. Read-only inspection confirmed no `void_test_*` databases or `void_test_app_*` roles remain. No runner was active when the stop instruction was handled.
+
+## Environment-file changes
+
+- Initially changed the supplied `.env` permissions to `0600`, renamed it to `.env.admin.local`, and wrote a new `.env` using the generated application credentials and corrected database name.
+- At the subsequent read-only review, `.env` and `.env.admin.local` were byte-for-byte identical, both mode `0600`, and both contained the supplied `postgres` connection fields. Neither file has been modified, renamed, restored, or deleted in response to the stop instruction. No passwords are reproduced here.
+- Added `.env.example` with placeholder credentials and ignored actual environment files in `.gitignore`.
+
+## Configuration findings at the stop-instruction review
+
+- The current `.env` has `PGDATABASE=void2.0e2ee`. That database does not exist; the inspected existing database is `void2-0e2ee`. Recommendation: the owner should correct the database name when ready. No correction was applied after the stop instruction.
+- The current `.env` has `PGUSER=postgres`, a superuser. The Go server intentionally rejects an administrative runtime role. Recommendation: the owner should choose/configure a restricted application credential and review the role/grants listed above. No password or role changes were made after the stop instruction.
+- An additional sensitive `.env.admin.local` remains. Recommendation: the owner should decide how to retain or remove it. It has been preserved untouched.
+
+Database administration remains with the user. The integration runner now refuses to connect without an explicit administration opt-in; PostgreSQL integration tests are disabled unless separately opted in. Current verification uses unit tests and mocks only.
+
+## Subsequent authorized environment edit
+
+The user later explicitly authorized touching `.env` while leaving PostgreSQL unchanged. Under that permission, only the database-name assignment was changed:
+
+```diff
+-PGDATABASE=void2.0e2ee
++PGDATABASE=void2-0e2ee
+```
+
+All other file bytes, including the existing username/password, and its file permissions were preserved. `.env.admin.local` was not changed. A read-only startup check now connects successfully but rejects the `postgres` superuser as a runtime role. No database administration or application inserts were performed during this check. The owner must supply credentials for an existing suitable application role or separately authorize any PostgreSQL changes; none are assumed.
+
+## Subsequent authorized role removal and login choice
+
+The user explicitly instructed: "right now drop the void account app role... use postgress thats my account". Read-only dependency inspection confirmed `void_accounts_app` owned no database objects and had only the previously listed grants. The following targeted transaction removed those grants and the role:
+
+```sql
+BEGIN;
+REVOKE INSERT (void_id, username, auth_public_key),
+       SELECT (void_id, username, created_at)
+ON TABLE public.accounts FROM void_accounts_app;
+REVOKE USAGE ON SCHEMA public FROM void_accounts_app;
+REVOKE CONNECT ON DATABASE "void2-0e2ee" FROM void_accounts_app;
+DROP ROLE void_accounts_app;
+COMMIT;
+```
+
+Verification confirmed the role no longer exists and the existing account column definitions, defaults, constraints, and row count were unchanged. The current `.env` contents and permissions were unchanged. No `DROP OWNED` or cascade deletion was used. The earlier `PUBLIC TEMPORARY` revocation was not reversed because that was outside this request.
+
+The Go validator now accepts the configured `postgres` login. It checks required registration access and the existing schema, without rejecting additional role privileges. This supersedes the earlier startup restriction and credential-blocker findings above. Future PostgreSQL administration still requires separate explicit approval.
