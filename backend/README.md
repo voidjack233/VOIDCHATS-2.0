@@ -21,6 +21,31 @@ The default listener is `127.0.0.1:8080`. `SIGINT` or `SIGTERM` stops accepting 
 
 Settings and defaults are listed in `.env.example`. Connection pooling defaults to 8 connections. HTTP bodies are limited to 4096 bytes, headers to 8192 bytes, concurrent registration/readiness handlers to 64, pending challenges to 4096, and tracked rate-limit clients to 4096. Header/body/idle deadlines and database statement/lock/connect timeouts bound stalled operations. Request contexts reach PostgreSQL and ID generation.
 
+## Cloudflared
+
+The existing `void0000-main` tunnel exposes these two endpoints over HTTPS:
+
+- `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/challenges`
+- `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/accounts`
+
+The following ingress rule is installed in `~/.cloudflared/config.yml`, before the existing routes for `api.voidchats.xyz`:
+
+```yaml
+- hostname: api.voidchats.xyz
+  path: ^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges)$
+  service: http://127.0.0.1:8080
+```
+
+All 31 previous ingress rules are preserved. The original configuration is backed up at `~/.cloudflared/config.yml.before-backend`. No tunnel credentials or DNS records were changed. Health and readiness for this backend remain local at `http://127.0.0.1:8080/healthz` and `/readyz`; the public hostname's existing health routes still belong to the other project.
+
+Start `./void-server` from the project directory, then run the tunnel in another terminal:
+
+```bash
+cloudflared tunnel --config "$HOME/.cloudflared/config.yml" --no-autoupdate --metrics 127.0.0.1:20241 run void0000-main
+```
+
+Both processes must remain running; no autostart service was installed. API clients should send a descriptive `User-Agent`, such as `VOIDCHATS/2.0`. The current Cloudflare configuration returned error 1010 for Python's default client header; requests with `VOIDCHATS/2.0` passed. See [Cloudflare's error 1010 guidance](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/). Through this local tunnel, all clients currently share the backend's per-IP rate limit because forwarding headers are ignored.
+
 ## Database connection
 
 The backend uses the existing connection chosen by the owner. Startup requires `SELECT` access to `void_id`, `username`, and `created_at`, and `INSERT` access to `void_id`, `username`, and `auth_public_key`. Additional privileges, ownership, and administrative role flags do not block startup. It never creates roles, grants permissions, or repairs the schema. The current connection uses `postgres`, as explicitly requested. Earlier administrative changes and authorized corrections are recorded in [DATABASE_CHANGES.md](DATABASE_CHANGES.md).
@@ -31,7 +56,7 @@ The backend uses the existing connection chosen by the owner. Startup requires `
 
 All POST requests require `Content-Type: application/json`. Fields must be exactly those specified below. Nulls, duplicate or unknown fields, trailing JSON, noncanonical base64, and oversized bodies are rejected. Keys/signatures use padded standard base64; challenge IDs use unpadded base64url.
 
-1. `POST /v1/registration/challenges`
+1. `POST /dm9pZG5vdGhpbmduZXNz/challenges`
 
    ```json
    {"username":"alice","auth_public_key":"<base64 of the 32-byte Ed25519 public key>"}
@@ -56,7 +81,7 @@ All POST requests require `Content-Type: application/json`. Fields must be exact
 
    Clients should also verify the message's `VOID-NOTHINGNESS:register:v1` domain and the expected username/public-key binding before signing, and use a trusted server connection. Private keys stay on the client; the API accepts no private-key field.
 
-3. `POST /v1/accounts`
+3. `POST /dm9pZG5vdGhpbmduZXNz/accounts`
 
    ```json
    {"challenge_id":"<opaque token>","signature":"<base64 of the 64-byte signature>"}

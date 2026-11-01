@@ -30,7 +30,7 @@ func (b *observedBody) Read(p []byte) (int, error) {
 }
 
 func TestStalledBodyReleasesAdmissionAtRequestDeadline(t *testing.T) {
-	for _, endpoint := range []string{"/v1/registration/challenges", "/v1/accounts"} {
+	for _, endpoint := range []string{"/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts"} {
 		t.Run(endpoint, func(t *testing.T) {
 			var serviceCalls atomic.Int64
 			service := stubService{
@@ -137,7 +137,7 @@ func TestBodyTimeoutBeforeContextTimerReturnsSafeTimeout(t *testing.T) {
 		t.Run(fmt.Sprintf("context_canceled=%v", cancelOnRead), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			request := httptest.NewRequest(http.MethodPost, "/v1/accounts", nil).WithContext(ctx)
+			request := httptest.NewRequest(http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", nil).WithContext(ctx)
 			request.Header.Set("Content-Type", "application/json")
 			body := failedBody{err: fmt.Errorf("private connection diagnostic: %w", os.ErrDeadlineExceeded)}
 			if cancelOnRead {

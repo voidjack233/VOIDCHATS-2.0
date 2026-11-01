@@ -179,7 +179,7 @@ type registrationProof struct {
 
 func (c *registrationClient) proof(t *testing.T, username string, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey) registrationProof {
 	t.Helper()
-	response, err := c.post("/v1/registration/challenges", map[string]string{
+	response, err := c.post("/dm9pZG5vdGhpbmduZXNz/challenges", map[string]string{
 		"username":        username,
 		"auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	})
@@ -268,7 +268,7 @@ func TestHTTPRegistrationPersistsRequestedIdentityAndRejectsReplay(t *testing.T)
 	// Discard the caller's mutable input after challenge creation. Persistence
 	// must retain the original key to which the proof was bound.
 	clear(publicKey)
-	response, err := client.post("/v1/accounts", proof)
+	response, err := client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestHTTPRegistrationPersistsRequestedIdentityAndRejectsReplay(t *testing.T)
 		t.Fatal("registration did not persist exactly the requested username and key")
 	}
 	expectPublicAccount(t, response, rows[0])
-	response, err = client.post("/v1/accounts", proof)
+	response, err = client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestHTTPConcurrentFreshProofsEnforceAuthenticationKeyUniqueness(t *testing.
 	completed := make(chan outcome, len(proofs))
 	for _, proof := range proofs {
 		go func() {
-			response, err := client.post("/v1/accounts", proof)
+			response, err := client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
 			completed <- outcome{response: response, err: err}
 		}()
 	}
@@ -363,7 +363,7 @@ func TestHTTPFailedPersistenceConsumesProofAndFreshProofCanRecover(t *testing.T)
 	client := newClient(t, repo)
 	publicKey, privateKey := keyPair(t)
 	proof := client.proof(t, "retry-user", publicKey, privateKey)
-	response, err := client.post("/v1/accounts", proof)
+	response, err := client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestHTTPFailedPersistenceConsumesProofAndFreshProofCanRecover(t *testing.T)
 	if strings.Contains(string(response.body), diagnostic) || len(repo.rows()) != 0 || repo.attempts.Load() != 1 {
 		t.Fatal("failed insert leaked a repository diagnostic or persisted an account")
 	}
-	response, err = client.post("/v1/accounts", proof)
+	response, err = client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestHTTPFailedPersistenceConsumesProofAndFreshProofCanRecover(t *testing.T)
 	if fresh.ChallengeID == proof.ChallengeID {
 		t.Fatal("recovery reused a consumed challenge")
 	}
-	response, err = client.post("/v1/accounts", fresh)
+	response, err = client.post("/dm9pZG5vdGhpbmduZXNz/accounts", fresh)
 	if err != nil {
 		t.Fatal(err)
 	}

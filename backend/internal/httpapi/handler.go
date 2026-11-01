@@ -78,7 +78,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/healthz", "/readyz":
 		method = http.MethodGet
-	case "/v1/registration/challenges", "/v1/accounts":
+	case "/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts":
 		method = http.MethodPost
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "Endpoint not found.")
@@ -126,7 +126,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, account.ErrUnavailable)
 		return
 	}
-	if r.URL.Path == "/v1/registration/challenges" {
+	if r.URL.Path == "/dm9pZG5vdGhpbmduZXNz/challenges" {
 		fields, requestErr := readFields(w, r, "username", "auth_public_key")
 		if err := ctx.Err(); err != nil && (requestErr == nil || requestErr.status != http.StatusGatewayTimeout) {
 			writeServiceError(w, err)

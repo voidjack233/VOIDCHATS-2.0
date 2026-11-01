@@ -75,7 +75,7 @@ func TestChallengeAndRegistrationResponses(t *testing.T) {
 		},
 	}
 	h := New(service, nil, Options{})
-	w := serve(h, http.MethodPost, "/v1/registration/challenges", challengeBody())
+	w := serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", challengeBody())
 	if w.Code != http.StatusCreated || !challengeCalled {
 		t.Fatalf("challenge: status %d body %s", w.Code, w.Body.String())
 	}
@@ -83,7 +83,7 @@ func TestChallengeAndRegistrationResponses(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &challenge); err != nil || challenge.Message != "c2lnbiBtZQ==" || challenge.ChallengeID != "challenge" {
 		t.Fatalf("invalid challenge response: %s", w.Body.String())
 	}
-	w = serve(h, http.MethodPost, "/v1/accounts", registrationBody())
+	w = serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", registrationBody())
 	if w.Code != http.StatusCreated || !registrationCalled {
 		t.Fatalf("registration: status %d body %s", w.Code, w.Body.String())
 	}
@@ -123,14 +123,14 @@ func TestStrictJSONRejectsAmbiguousOrUnexpectedInput(t *testing.T) {
 				t.Fatal("invalid request reached service")
 				return account.Challenge{}, nil
 			}}, nil, Options{})
-			w := serve(h, http.MethodPost, "/v1/registration/challenges", tt.body)
+			w := serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", tt.body)
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status %d, expected 400; body %s", w.Code, w.Body.String())
 			}
 		})
 	}
 	for _, body := range []string{`null`, `{"challenge_id":"x","signature":null}`, registrationBody() + `{}`, `{"challenge_id":"x","challenge_id":"y","signature":"AA=="}`} {
-		w := serve(New(stubService{}, nil, Options{}), http.MethodPost, "/v1/accounts", body)
+		w := serve(New(stubService{}, nil, Options{}), http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", body)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("registration accepted ambiguous JSON %q: %d", body, w.Code)
 		}
@@ -140,9 +140,9 @@ func TestStrictJSONRejectsAmbiguousOrUnexpectedInput(t *testing.T) {
 func TestBase64MustBeCanonicalStandardEncoding(t *testing.T) {
 	for _, value := range []string{"not-base64", "AQ", "AQ_+", "AR==", "AQ==\n", " AQ=="} {
 		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
-			for _, endpoint := range []string{"/v1/registration/challenges", "/v1/accounts"} {
+			for _, endpoint := range []string{"/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts"} {
 				body := fmt.Sprintf(`{"username":"Alice","auth_public_key":%q}`, value)
-				if endpoint == "/v1/accounts" {
+				if endpoint == "/dm9pZG5vdGhpbmduZXNz/accounts" {
 					body = fmt.Sprintf(`{"challenge_id":"challenge","signature":%q}`, value)
 				}
 				w := serve(New(stubService{}, nil, Options{}), http.MethodPost, endpoint, body)
@@ -156,14 +156,14 @@ func TestBase64MustBeCanonicalStandardEncoding(t *testing.T) {
 
 func TestBoundedBodiesAndContentType(t *testing.T) {
 	h := New(stubService{}, nil, Options{})
-	for _, endpoint := range []string{"/v1/registration/challenges", "/v1/accounts"} {
+	for _, endpoint := range []string{"/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts"} {
 		w := serve(h, http.MethodPost, endpoint, strings.Repeat(" ", maxBodyBytes+1))
 		if w.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("oversized %s body: %d", endpoint, w.Code)
 		}
 	}
 	for _, contentType := range []string{"", "text/plain", "application/json; broken"} {
-		r := httptest.NewRequest(http.MethodPost, "/v1/registration/challenges", strings.NewReader(challengeBody()))
+		r := httptest.NewRequest(http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", strings.NewReader(challengeBody()))
 		r.Header.Set("Content-Type", contentType)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -171,7 +171,7 @@ func TestBoundedBodiesAndContentType(t *testing.T) {
 			t.Fatalf("Content-Type %q status %d", contentType, w.Code)
 		}
 	}
-	r := httptest.NewRequest(http.MethodPost, "/v1/registration/challenges", strings.NewReader(challengeBody()))
+	r := httptest.NewRequest(http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", strings.NewReader(challengeBody()))
 	r.Header.Set("Content-Type", "application/json; charset=utf-8")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -191,8 +191,8 @@ func TestRoutingMethodsAndSecurityHeaders(t *testing.T) {
 		{http.MethodGet, "/readyz", 200, ""},
 		{http.MethodPost, "/healthz", 405, "GET"},
 		{http.MethodHead, "/healthz", 405, "GET"},
-		{http.MethodGet, "/v1/registration/challenges", 405, "POST"},
-		{http.MethodDelete, "/v1/accounts", 405, "POST"},
+		{http.MethodGet, "/dm9pZG5vdGhpbmduZXNz/challenges", 405, "POST"},
+		{http.MethodDelete, "/dm9pZG5vdGhpbmduZXNz/accounts", 405, "POST"},
 		{http.MethodGet, "/unknown", 404, ""},
 		{http.MethodGet, "/healthz/", 404, ""},
 	} {
@@ -203,6 +203,35 @@ func TestRoutingMethodsAndSecurityHeaders(t *testing.T) {
 		if w.Header().Get("Content-Type") != "application/json" || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("missing response headers for %s %s: %v", tt.method, tt.path, w.Header())
 		}
+	}
+}
+
+func TestObsoleteRoutesAreNotExposed(t *testing.T) {
+	service := stubService{
+		challenge: func(string, []byte) (account.Challenge, error) {
+			t.Fatal("obsolete challenge route reached service")
+			return account.Challenge{}, nil
+		},
+		register: func(context.Context, string, []byte) (account.Account, error) {
+			t.Fatal("obsolete registration route reached service")
+			return account.Account{}, nil
+		},
+	}
+	h := New(service, nil, Options{})
+	for _, route := range []struct {
+		path, body string
+	}{
+		{"/v1/registration/challenges", challengeBody()},
+		{"/v1/accounts", registrationBody()},
+		{"/registration/challenges", challengeBody()},
+		{"/accounts", registrationBody()},
+	} {
+		t.Run(route.path, func(t *testing.T) {
+			w := serve(h, http.MethodPost, route.path, route.body)
+			if w.Code != http.StatusNotFound || w.Header().Get("Allow") != "" {
+				t.Fatalf("obsolete route returned status %d Allow %q", w.Code, w.Header().Get("Allow"))
+			}
+		})
 	}
 }
 
@@ -228,7 +257,7 @@ func TestSafeErrorMapping(t *testing.T) {
 			service := stubService{register: func(context.Context, string, []byte) (account.Account, error) {
 				return account.Account{}, fmt.Errorf("%s: %w", secret, tt.err)
 			}}
-			w := serve(New(service, nil, Options{}), http.MethodPost, "/v1/accounts", registrationBody())
+			w := serve(New(service, nil, Options{}), http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", registrationBody())
 			if w.Code != tt.status || !strings.Contains(w.Body.String(), `"code":"`+tt.code+`"`) {
 				t.Fatalf("status %d body %s", w.Code, w.Body.String())
 			}
@@ -266,7 +295,7 @@ func TestReadinessAndRequestDeadlines(t *testing.T) {
 		return account.Account{}, ctx.Err()
 	}}
 	h := New(service, nil, Options{RequestTimeout: 10 * time.Millisecond})
-	w := serve(h, http.MethodPost, "/v1/accounts", registrationBody())
+	w := serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", registrationBody())
 	if w.Code != http.StatusGatewayTimeout {
 		t.Fatalf("request timeout status %d body %s", w.Code, w.Body.String())
 	}
@@ -279,7 +308,7 @@ func TestCanceledRequestDoesNotReachService(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	r := httptest.NewRequest(http.MethodPost, "/v1/accounts", strings.NewReader(registrationBody())).WithContext(ctx)
+	r := httptest.NewRequest(http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", strings.NewReader(registrationBody())).WithContext(ctx)
 	w := httptest.NewRecorder()
 	New(service, nil, Options{}).ServeHTTP(w, r)
 	if w.Code != http.StatusRequestTimeout {
@@ -301,7 +330,7 @@ func (b *interruptedBody) Close() error { return nil }
 
 func TestInterruptedBodyDoesNotCreateChallengeOrRegister(t *testing.T) {
 	for _, timedOut := range []bool{false, true} {
-		for _, endpoint := range []string{"/v1/registration/challenges", "/v1/accounts"} {
+		for _, endpoint := range []string{"/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts"} {
 			t.Run(fmt.Sprintf("%s/timeout=%v", endpoint, timedOut), func(t *testing.T) {
 				service := stubService{
 					challenge: func(string, []byte) (account.Challenge, error) {
@@ -320,7 +349,7 @@ func TestInterruptedBodyDoesNotCreateChallengeOrRegister(t *testing.T) {
 				}
 				defer cancel()
 				body := challengeBody()
-				if endpoint == "/v1/accounts" {
+				if endpoint == "/dm9pZG5vdGhpbmduZXNz/accounts" {
 					body = registrationBody()
 				}
 				r := httptest.NewRequest(http.MethodPost, endpoint, nil).WithContext(ctx)
@@ -349,7 +378,7 @@ func TestInterruptedBodyDoesNotCreateChallengeOrRegister(t *testing.T) {
 func TestRateLimitIgnoresForwardingHeadersAndKeepsLivenessAvailable(t *testing.T) {
 	h := New(stubService{}, nil, Options{RatePerMinute: 1, RateBurst: 2})
 	for i := 0; i < 3; i++ {
-		r := httptest.NewRequest(http.MethodPost, "/v1/registration/challenges", strings.NewReader(challengeBody()))
+		r := httptest.NewRequest(http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", strings.NewReader(challengeBody()))
 		r.RemoteAddr = fmt.Sprintf("192.0.2.1:%d", 1000+i)
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
@@ -380,13 +409,13 @@ func TestConcurrencyAdmissionDoesNotQueueAndProtectsReadiness(t *testing.T) {
 		return nil
 	}, Options{MaxConcurrentRequests: 1})
 	completed := make(chan *httptest.ResponseRecorder, 1)
-	go func() { completed <- serve(h, http.MethodPost, "/v1/accounts", registrationBody()) }()
+	go func() { completed <- serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", registrationBody()) }()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("first request did not start")
 	}
-	for _, path := range []string{"/v1/accounts", "/readyz"} {
+	for _, path := range []string{"/dm9pZG5vdGhpbmduZXNz/accounts", "/readyz"} {
 		method, body := http.MethodPost, registrationBody()
 		if path == "/readyz" {
 			method, body = http.MethodGet, ""

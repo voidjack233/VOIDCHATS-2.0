@@ -258,7 +258,7 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 		}
 		return response.StatusCode, data
 	}
-	status, data := post("/v1/registration/challenges", map[string]string{
+	status, data := post("/dm9pZG5vdGhpbmduZXNz/challenges", map[string]string{
 		"username": "http-integration", "auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	})
 	if status != http.StatusCreated {
@@ -276,7 +276,7 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 		"challenge_id": challenge.ChallengeID,
 		"signature":    base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, message)),
 	}
-	status, data = post("/v1/accounts", registration)
+	status, data = post("/dm9pZG5vdGhpbmduZXNz/accounts", registration)
 	if status != http.StatusCreated {
 		t.Fatalf("registration status %d: %s", status, data)
 	}
@@ -296,10 +296,10 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 	if err := app.QueryRow(context.Background(), "SELECT username FROM public.accounts WHERE void_id = $1", id).Scan(&username); err != nil || username != registered.Username {
 		t.Fatal("HTTP registration did not persist")
 	}
-	if status, _ := post("/v1/accounts", registration); status != http.StatusUnauthorized {
+	if status, _ := post("/dm9pZG5vdGhpbmduZXNz/accounts", registration); status != http.StatusUnauthorized {
 		t.Fatalf("replayed challenge returned status %d", status)
 	}
-	status, data = post("/v1/registration/challenges", map[string]string{
+	status, data = post("/dm9pZG5vdGhpbmduZXNz/challenges", map[string]string{
 		"username": "same-key", "auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	})
 	if status != http.StatusCreated {
@@ -312,7 +312,7 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, _ = post("/v1/accounts", map[string]string{
+	status, _ = post("/dm9pZG5vdGhpbmduZXNz/accounts", map[string]string{
 		"challenge_id": challenge.ChallengeID,
 		"signature":    base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, message)),
 	})
