@@ -1,67 +1,155 @@
-# VOID-E2EE 2.0
+# VOID-NOTHINGNESS
 
-Native React Native and TypeScript Android application for VOID, with encrypted local records and protected native OpenMLS persistence. A native Go account-registration backend is available in `backend/`; mobile registration integration and network message delivery remain unfinished.
+A native Go modular monolith for account initialization on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects.
 
-## Run
+## Run locally
 
-Install dependencies with `npm install`. OpenMLS requires a custom native Android development build; Expo Go cannot load the Rust module. Configure the Android SDK, NDK **27.1.12297006**, **JDK 17** (`JAVA_HOME`) and rustup, then follow [native setup and verification](native/openmls/README.md).
+Run the commands below from the repository root on the `backend` branch of VOIDCHATS-2.0. The real `.env` is excluded from Git. For a new checkout, create your local `.env` from the settings in `.env.example` using an existing owner-approved connection; preserve an existing environment file.
 
-Run `npm start` for Metro and `npm run android` to build and install on a connected physical Android phone with USB debugging enabled. The Android command uses that Metro server instead of launching another with the Expo preview configuration. Use `adb reverse tcp:8081 tcp:8081` for Metro over USB. `npm run android:build` builds an APK without requiring an emulator or phone. `npm run crypto:test` tests Rust; `npm run crypto:bridgecheck` tests generated Kotlin bindings against the actual host Rust library. In the phone's React Native DevTools console, `await globalThis.voidMlsSelfTest()` runs the native bridge diagnostic.
-
-The existing Expo setup remains available for UI preview with `npx expo start` and Expo Go. Cryptographic calls in Expo Go fail with an explicit unavailable error. The Android custom build uses `native-entry.js` and `metro.native.config.js`, preserving the same startup UI and theme. Expo's entry and Metro configuration remain available for Expo Go.
-
-On macOS, install the iOS native dependencies with `bundle install` and `cd ios && bundle exec pod install`, then run `npm run ios` from the project root.
-
-Use `npm run typecheck` for TypeScript validation and `npm run lint` for linting.
-
-## Go registration backend
-
-`backend/` contains the native Go account-initialization API, Ed25519 registration challenges, Snowflake VOID-IDs, PostgreSQL persistence, and health endpoints. It uses an existing PostgreSQL database and never provisions database objects or credentials automatically. Configure `backend/.env` with an owner-approved existing connection; real environment files and compiled binaries are excluded from Git.
-
-From the repository root:
+Go 1.26.5 and PostgreSQL 18 are required. The owner chose the existing `postgres` login in `.env` and database `void2-0e2ee`. The backend accepts that configured login and checks the access needed for registration. The existing username and password have not been changed. See [DATABASE_CHANGES.md](DATABASE_CHANGES.md) for the record of database/environment changes, including the explicitly authorized removal of `void_accounts_app`.
 
 ```bash
-cd backend
 go build ./cmd/void-server
 ./void-server
+curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8080/readyz
 ```
 
-See [backend API, configuration, and verification](backend/README.md). The mobile application is not yet wired to this API.
+The default listener is `127.0.0.1:8080`. `SIGINT` or `SIGTERM` stops accepting connections and allows up to 10 seconds for active requests. Startup reports safe, separate errors for a missing database, rejected credentials, schema mismatch, and missing required access. Readiness repeats these read-only checks; liveness does not depend on PostgreSQL. The application performs no database administration. Database and `.env` credential changes require the owner's explicit approval of the exact proposed commands or edits.
 
-## Source layout
+`.env.example` documents the available settings; configuration and credential changes belong to the owner. The application reads literal `KEY=VALUE` assignments (optional matching quotes), never shell commands or interpolation. Process environment overrides the file. `-env-file /path/to/file` selects another file; `-env-file ''` uses process environment alone. `DATABASE_URL`, if set, takes precedence over the `PG*` connection fields. Connection strings and database diagnostics are never logged.
+
+Settings and defaults are listed in `.env.example`. Connection pooling defaults to 8 connections. HTTP bodies are limited to 4096 bytes, headers to 8192 bytes, concurrent registration/readiness handlers to 64, pending challenges to 4096, and tracked rate-limit clients to 4096. Header/body/idle deadlines and database statement/lock/connect timeouts bound stalled operations. Request contexts reach PostgreSQL and ID generation.
+
+## Cloudflared
+
+The existing `void0000-main` tunnel exposes these two endpoints over HTTPS:
+
+- `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/challenges`
+- `POST https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/accounts`
+
+The following ingress rule is installed in `~/.cloudflared/config.yml`, before the existing routes for `api.voidchats.xyz`:
+
+```yaml
+- hostname: api.voidchats.xyz
+  path: ^/dm9pZG5vdGhpbmduZXNz/(accounts|challenges)$
+  service: http://127.0.0.1:8080
+```
+
+All 31 previous ingress rules are preserved. The original configuration is backed up at `~/.cloudflared/config.yml.before-backend`. No tunnel credentials or DNS records were changed. Health and readiness for this backend remain local at `http://127.0.0.1:8080/healthz` and `/readyz`; the public hostname's existing health routes still belong to the other project.
+
+Start `./void-server` from the project directory, then run the tunnel in another terminal:
+
+```bash
+cloudflared tunnel --config "$HOME/.cloudflared/config.yml" --no-autoupdate --metrics 127.0.0.1:20241 run void0000-main
+```
+
+Both processes must remain running; no autostart service was installed. API clients should send a descriptive `User-Agent`, such as `VOIDCHATS/2.0`. The current Cloudflare configuration returned error 1010 for Python's default client header; requests with `VOIDCHATS/2.0` passed. See [Cloudflare's error 1010 guidance](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/). Through this local tunnel, all clients currently share the backend's per-IP rate limit because forwarding headers are ignored.
+
+## Database connection
+
+The backend uses the existing connection chosen by the owner. Startup requires `SELECT` access to `void_id`, `username`, and `created_at`, and `INSERT` access to `void_id`, `username`, and `auth_public_key`. Additional privileges, ownership, and administrative role flags do not block startup. It never creates roles, grants permissions, or repairs the schema. The current connection uses `postgres`, as explicitly requested. Earlier administrative changes and authorized corrections are recorded in [DATABASE_CHANGES.md](DATABASE_CHANGES.md).
+
+`id` is omitted from every insert, so PostgreSQL's `uuidv7()` default creates it. The server returns only public fields. Username uniqueness is deliberately not required by the existing schema.
+
+## Registration API
+
+All POST requests require `Content-Type: application/json`. Fields must be exactly those specified below. Nulls, duplicate or unknown fields, trailing JSON, noncanonical base64, and oversized bodies are rejected. Keys/signatures use padded standard base64; challenge IDs use unpadded base64url.
+
+1. `POST /dm9pZG5vdGhpbmduZXNz/challenges`
+
+   ```json
+   {"username":"alice","auth_public_key":"<base64 of the 32-byte Ed25519 public key>"}
+   ```
+
+   Returns `201`:
+
+   ```json
+   {"challenge_id":"<opaque token>","message":"<base64 of exact bytes to sign>","expires_at":"2026-11-01T09:00:00Z"}
+   ```
+
+   Usernames must be valid UTF-8, 1–32 Unicode code points, have no surrounding whitespace, and contain no control/format characters. Keys must be canonical, nonidentity prime-order Ed25519 points. Challenges contain 256-bit random tokens plus independent 256-bit nonces and expire after two minutes by default. The domain-separated signed message binds the token, expiry, public key, username, and nonce.
+
+2. Locally decode `message` and sign those bytes with the corresponding Ed25519 private key. For a Go client:
+
+   ```go
+   message, err := base64.StdEncoding.DecodeString(challenge.Message)
+   if err != nil { /* handle error */ }
+   signature := ed25519.Sign(privateKey, message)
+   encodedSignature := base64.StdEncoding.EncodeToString(signature)
+   ```
+
+   Clients should also verify the message's `VOID-NOTHINGNESS:register:v1` domain and the expected username/public-key binding before signing, and use a trusted server connection. Private keys stay on the client; the API accepts no private-key field.
+
+3. `POST /dm9pZG5vdGhpbmduZXNz/accounts`
+
+   ```json
+   {"challenge_id":"<opaque token>","signature":"<base64 of the 64-byte signature>"}
+   ```
+
+   Returns `201`:
+
+   ```json
+   {"void_id":"110559210000000000","username":"alice","created_at":"2026-11-01T08:58:12.123456Z"}
+   ```
+
+   `void_id` is a positive signed 64-bit integer represented as a decimal JSON string. The timestamp comes from PostgreSQL. Registration creates no authenticated session, cookie, or token. VOID-IDs are public identifiers and never authentication secrets.
+
+Challenges are atomically consumed before signature verification and database access. Well-formed invalid signatures, expired challenges, concurrent replay, database failures, and interrupted in-flight registrations cannot reuse them. Obtain a fresh challenge after a failure. A disconnected client can miss a successful commit; retrying with a fresh proof then returns `409` if that key was registered. There is no account lookup/recovery or session flow in this phase.
+
+Errors have the shape `{"error":{"code":"invalid_proof","message":"Registration proof is invalid or expired."}}`.
+
+| Status | Meaning |
+| --- | --- |
+| 400 | Invalid input or malformed JSON |
+| 401 | Missing, expired, consumed challenge, or invalid signature |
+| 409 | Public key already registered |
+| 413 / 415 | Body too large / unsupported content type |
+| 429 | IP rate limit or pending-challenge capacity; see `Retry-After` |
+| 503 | Database/ID generation unavailable, readiness failure, or concurrency limit |
+| 408 / 504 | Request canceled / deadline exceeded |
+
+Both POST endpoints share a per-IP token bucket: 30 requests/minute with burst 10 by default. `RemoteAddr` determines the IP; forwarding headers are ignored. `GET /healthz` returns `200 {"status":"ok"}`. `GET /readyz` returns `200 {"status":"ready"}` or a safe `503` error.
+
+## Snowflake IDs and deployment limits
+
+IDs use 41 timestamp milliseconds, 10 worker bits, and 12 sequence bits. `VOID_WORKER_ID` is 0–1023 and `VOID_SNOWFLAKE_EPOCH` defaults to `2026-01-01T00:00:00Z`. The generator is concurrency safe, waits with cancellation on sequence exhaustion, detects backward clocks, rejects nonpositive IDs and timestamp overflow, and leaves state intact on failure. PostgreSQL uniqueness is the final guard; the service retries at most five VOID-ID conflicts and never overwrites an account.
+
+Before running multiple generators, assign a unique worker ID to every simultaneously active process sharing the ID namespace, keep one immutable epoch, and coordinate worker reuse after restart. A restarted generator has no durable high-water mark: do not reuse a worker while a previous process can still run or before its last emitted wall time has passed. Clock rollback or collisions can temporarily stop registration. The 41-bit timestamp range lasts approximately 69 years from the epoch.
+
+Challenges and limits are bounded, process-local memory. Restarting invalidates outstanding challenges. Multiple replicas would need challenge routing to their originating process and coordinated abuse controls before deployment. Basic in-process limits do not handle distributed traffic floods. Behind a proxy, all callers share the proxy's IP bucket unless a separately designed trusted-proxy policy is added.
+
+The listener is plain HTTP for local development. Configure TLS termination before exposing it beyond loopback, and use `PGSSLMODE=verify-full` with a trusted certificate for a remote database. The original administrative credential backup is sensitive; keep it private and separate from the application process. This implementation has automated security tests, but has not had an external security audit.
+
+## Project layout and verification
 
 ```text
-src/
-  app/             app bootstrap, providers, navigation composition
-  startup/         welcome, identity guidance, acknowledgments, initialization boundary
-  onboarding/      future entry flow UI
-  conversations/   conversation list UI and reusable display model
-  chat/            conversation detail UI
-  crypto/          typed native OpenMLS interface, independent of screens
-  storage/         typed local repositories, storage lifecycle and data hooks
-  requests/        message requests UI
-  contacts/        contacts and VOID-ID discovery UI
-  profile/         profile UI
-  settings/        settings UI
-  ui/              shared interface primitives
-  theme/           semantic dark theme and typography/spacing tokens
+cmd/void-server/        executable, HTTP timeouts and graceful shutdown
+internal/account/      input/key validation, challenges and registration
+internal/config/       literal environment loading and validated settings
+internal/httpapi/      routing, strict JSON, limits and safe responses
+internal/postgres/     pooled parameterized inserts and schema/role checks
+internal/snowflake/    concurrency-safe public ID generator
+tests/registration/    HTTP/service/Snowflake flow with an in-memory repository
+tests/integration/     explicit disposable PostgreSQL integration tests
+scripts/               earlier integration runner (disabled without explicit opt-in)
 ```
 
-First-launch startup progresses through Welcome, How VOID Works, Protect Your Identity, Terms of Service, and the account-initialization boundary. The development-only **Preview VOID** action opens the messenger. In Settings, explicit local storage setup creates an unregistered device identity and an empty encrypted store. Subsequent debug launches restore that identity and local preview; missing or damaged state never silently creates a replacement.
+Application dependencies are `pgx/v5` (PostgreSQL driver/pool) and `filippo.io/edwards25519` (public-key group validation). Signature verification uses Go's `crypto/ed25519`; no custom curve arithmetic or signing implementation is used. The latter library provides the point operations used to reject degenerate public keys ([API documentation](https://pkg.go.dev/filippo.io/edwards25519)); UUID generation stays in [PostgreSQL 18](https://www.postgresql.org/docs/18/functions-uuid.html).
 
-Conversations, chat history, contacts, and requests read persisted local records and preserve empty states when none exist. Message composition and VOID-ID lookup remain disabled. Opening storage does not initialize an account or contact a remote service. See [local storage architecture, lifecycle and verification](docs/local-storage.md).
+```bash
+go fmt ./...
+go vet ./...
+go test ./...
+go test -race ./...
+go build ./cmd/void-server
+```
 
-## Native MLS
+The current workflow uses unit tests and mocks only. PostgreSQL integration tests explicitly skip unless `VOID_RUN_POSTGRES_INTEGRATION=1` and a disposable `VOID_TEST_DATABASE_URL` are provided after the owner's permission. They require the `void_test_` database prefix and matching app/admin database names. No existing development database is used for tests.
 
-`native/openmls/` implements official OpenMLS **0.9.1** with RustCrypto and the RFC 9420 X25519/AES-128-GCM/SHA-256/Ed25519 ciphersuite. UniFFI generates the Android Kotlin bindings; private keys and MLS state remain in Rust. The typed `src/crypto/` interface is not connected to messaging screens. Alice/Bob diagnostics use real OpenMLS operations and do not create application accounts.
+The earlier Python integration runner is preserved for review. It refuses even to connect unless explicitly opted into database administration. Do not invoke its administration opt-in without the owner's separate permission; database creation, roles, grants, and cleanup belong to the owner.
 
-The Android storage coordinator persists complete native MLS checkpoints and application records in SQLCipher, with its database key wrapped by Android Keystore. Checkpoints and crypto-event records commit before cryptographic results reach JavaScript. Identity binding to future VOID-ID registration, public authentication and messaging transport remain future work. See [local storage boundaries](docs/local-storage.md) and [security findings](docs/openmls-security.md); the dependency audit does not make VOID audited.
+Tests cover proof binding, invalid/degenerate keys, expiration, replay, concurrent consumption, duplicate keys/IDs, retry limits, cancellation, strict JSON/body limits, bounded admission/rate limiting, clock rollback/overflow/sequence handling, and concurrent Snowflake uniqueness. Registration flow tests compose the real HTTP handler, account service, and Snowflake generator with an in-memory repository: they verify public response fields, concurrent duplicate proofs, failed-persistence consumption, and fresh-proof recovery without connecting to PostgreSQL. A deterministic rate-limit regression test verifies concurrent requests cannot count the same refill interval twice. Opt-in PostgreSQL tests verify UUIDv7/default timestamps, persisted HTTP registration, privilege denial, conflicts, and a blocked insert canceled before persistence.
 
-See [verification results and remaining device checks](docs/openmls-verification.md) for the Rust and native binding test results and platform limitations.
-
-## Current scope
-
-This repository contains the mobile application, native OpenMLS integration, encrypted on-device storage, and the Go account-initialization backend in `backend/`.
-
-The backend implements account registration. Mobile registration integration, remote key exchange, and network message transport remain unfinished. UI preview and local storage remain independent of a server.
+Before the stop instruction, PostgreSQL 18.6 integration runs passed with and without the race detector, and startup/readiness/shutdown were checked using the temporarily configured restricted role. Those are historical results. Current automated verification uses unit tests and mocks and skips database integration cases; startup and health checks against the owner's existing connection are read-only.
 

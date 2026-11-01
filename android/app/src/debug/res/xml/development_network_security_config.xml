@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-    <!-- Debug-only HTTP support for the React Native Metro development server; release remains HTTPS-only. -->
-    <base-config cleartextTrafficPermitted="true" />
-</network-security-config>
