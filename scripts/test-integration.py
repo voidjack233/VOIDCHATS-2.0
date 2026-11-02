@@ -95,8 +95,6 @@ def main():
             CREATE TABLE public.accounts (
                 id UUID PRIMARY KEY DEFAULT uuidv7(),
                 void_id BIGINT NOT NULL UNIQUE CHECK (void_id > 0),
-                username VARCHAR(128) CHECK (
-                    char_length(username) BETWEEN 1 AND 32 AND username = btrim(username)),
                 auth_public_key BYTEA NOT NULL UNIQUE CHECK (octet_length(auth_public_key) = 32),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );

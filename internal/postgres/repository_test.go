@@ -50,8 +50,14 @@ func TestAccountInsertUsesOnlyIdentityAndKey(t *testing.T) {
 	}
 }
 
-func TestAccountSchemaRequiresOnlyUsernameNullable(t *testing.T) {
+func TestAccountSchemaRequiresIdentityColumns(t *testing.T) {
+	if len(expectedAccountColumns) != 4 {
+		t.Fatal("account schema must contain exactly four columns")
+	}
 	for name, column := range expectedAccountColumns {
+		if !column.notNull {
+			t.Errorf("identity column permits null values: %s", name)
+		}
 		if !validAccountColumn(name, column.typ, column.def, column.modifier, column.notNull, false) {
 			t.Errorf("approved column rejected: %s", name)
 		}
@@ -62,16 +68,30 @@ func TestAccountSchemaRequiresOnlyUsernameNullable(t *testing.T) {
 			t.Errorf("generated identity data accepted: %s", name)
 		}
 	}
-	if expectedAccountColumns["username"].notNull || !expectedAccountColumns["auth_public_key"].notNull || !expectedAccountColumns["void_id"].notNull {
-		t.Fatal("optional username relaxed permanent identity/key requirements")
+	if validAccountColumn("username", "varchar", "", 132, false, false) {
+		t.Fatal("legacy username column accepted")
 	}
 	if validAccountColumn("unexpected", "text", "", -1, false, false) {
 		t.Fatal("unknown account column accepted")
 	}
 }
 
+func TestAccountSchemaRejectsChangedTypesAndDefaults(t *testing.T) {
+	for name, column := range expectedAccountColumns {
+		if validAccountColumn(name, "text", column.def, column.modifier, column.notNull, false) {
+			t.Errorf("changed type accepted: %s", name)
+		}
+		if validAccountColumn(name, column.typ, "unexpected()", column.modifier, column.notNull, false) {
+			t.Errorf("changed default accepted: %s", name)
+		}
+		if validAccountColumn(name, column.typ, column.def, column.modifier+1, column.notNull, false) {
+			t.Errorf("changed type modifier accepted: %s", name)
+		}
+	}
+}
+
 func TestRequiredColumnAccessAllowsConfiguredLoginPrivileges(t *testing.T) {
-	for _, column := range []string{"id", "void_id", "username", "auth_public_key", "created_at"} {
+	for _, column := range []string{"id", "void_id", "auth_public_key", "created_at"} {
 		t.Run(column, func(t *testing.T) {
 			// A table owner or superuser has both permissions on every column.
 			// These extra privileges must not reject the configured login.
@@ -92,9 +112,6 @@ func TestRequiredColumnAccessMatchesRegistrationAndAuthentication(t *testing.T) 
 		{"void_id", false, false, false},
 		{"void_id", false, true, false},
 		{"void_id", true, false, false},
-		{"username", false, false, true},
-		{"username", false, true, true},
-		{"username", true, false, true},
 		{"auth_public_key", false, true, false},
 		{"auth_public_key", false, false, false},
 		{"auth_public_key", true, false, false},

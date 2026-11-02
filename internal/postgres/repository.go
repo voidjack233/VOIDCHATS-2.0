@@ -73,7 +73,6 @@ type accountColumn struct {
 var expectedAccountColumns = map[string]accountColumn{
 	"id":              {"uuid", "uuidv7()", -1, true},
 	"void_id":         {"int8", "", -1, true},
-	"username":        {"varchar", "", 132, false},
 	"auth_public_key": {"bytea", "", -1, true},
 	"created_at":      {"timestamptz", "now()", -1, true},
 }
@@ -199,9 +198,8 @@ func (r *Repository) Validate(ctx context.Context) error {
 		return classifyValidationError(ctx, err)
 	}
 	checks := map[string]bool{
-		"void_id>0": false,
-		"char_lengthusername>=1andchar_lengthusername<=32andusername=btrimusername": false,
-		"octet_lengthauth_public_key=32":                                            false,
+		"void_id>0":                      false,
+		"octet_lengthauth_public_key=32": false,
 	}
 	var idConstraint, keyConstraint string
 	var primary bool

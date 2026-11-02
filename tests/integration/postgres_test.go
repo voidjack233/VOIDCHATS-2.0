@@ -131,16 +131,12 @@ func TestPostgresPersistenceAndUniqueness(t *testing.T) {
 	var internalID string
 	var savedKey []byte
 	var savedCreated time.Time
-	var usernameNull bool
-	if err := admin.QueryRow(ctx, "SELECT id::text, auth_public_key, created_at, username IS NULL FROM public.accounts WHERE void_id = $1", id).
-		Scan(&internalID, &savedKey, &savedCreated, &usernameNull); err != nil {
+	if err := admin.QueryRow(ctx, "SELECT id::text, auth_public_key, created_at FROM public.accounts WHERE void_id = $1", id).
+		Scan(&internalID, &savedKey, &savedCreated); err != nil {
 		t.Fatal("could not inspect persisted account")
 	}
 	if len(internalID) != 36 || internalID[14] != '7' || !bytes.Equal(savedKey, key) || !savedCreated.Equal(result.CreatedAt) {
 		t.Fatal("PostgreSQL did not persist UUIDv7, public key, and default creation timestamp correctly")
-	}
-	if !usernameNull {
-		t.Fatal("new registration populated the legacy username column")
 	}
 }
 
@@ -153,9 +149,8 @@ func TestPostgresRuntimePrivileges(t *testing.T) {
 	}
 	queries := []string{
 		"SELECT id FROM public.accounts LIMIT 1",
-		"SELECT username FROM public.accounts LIMIT 1",
 		"SELECT * FROM public.accounts LIMIT 1",
-		"UPDATE public.accounts SET username = 'forbidden' WHERE false",
+		"UPDATE public.accounts SET auth_public_key = auth_public_key WHERE false",
 		"DELETE FROM public.accounts WHERE false",
 		"INSERT INTO public.accounts (id, void_id, auth_public_key) VALUES (uuidv7(), 1, decode(repeat('00', 32), 'hex'))",
 		"INSERT INTO public.accounts (void_id, auth_public_key, created_at) VALUES (1, decode(repeat('00', 32), 'hex'), now())",
@@ -333,12 +328,8 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 	}
 	if admin != nil {
 		var internalID string
-		var usernameNull bool
-		if err := admin.QueryRow(context.Background(), "SELECT id::text, username IS NULL FROM public.accounts WHERE void_id = $1", id).Scan(&internalID, &usernameNull); err != nil || len(internalID) != 36 || internalID[14] != '7' {
+		if err := admin.QueryRow(context.Background(), "SELECT id::text FROM public.accounts WHERE void_id = $1", id).Scan(&internalID); err != nil || len(internalID) != 36 || internalID[14] != '7' {
 			t.Fatal("HTTP registration did not use PostgreSQL's UUIDv7 default")
-		}
-		if !usernameNull {
-			t.Fatal("HTTP registration populated the legacy username column")
 		}
 	}
 }
