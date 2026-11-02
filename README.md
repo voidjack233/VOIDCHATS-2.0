@@ -2,7 +2,9 @@
 
 A native Go modular monolith for account initialization and durable one-to-one opaque messaging on Ubuntu 24.04 and PostgreSQL 18. The server preserves the existing `public.accounts` table and never performs schema administration at startup. See [WEBSOCKET.md](WEBSOCKET.md) for the earlier online-only relay, which is disabled in durable messaging mode.
 
-Durable messaging provides short-lived bearer sessions, exact VOID-ID discovery, public MLS KeyPackage publication/claims, invitations, acceptance/decline/blocks, opaque messages, and ordered offline sync with durable acknowledgments and duplicate-safe retries. See the [exact API contract and examples](docs/MESSAGING_API.md) and [migration/deployment instructions](docs/MESSAGING_DEPLOYMENT.md). On 2026-11-02 the owner approved the migrations and activation; source commit `bad8a72` is running with messaging enabled. Fresh installations still default to **disabled** until their SQL is reviewed/applied and the mode is explicitly selected. The server never runs migrations itself.
+Durable messaging provides short-lived bearer sessions, exact VOID-ID discovery, public MLS KeyPackage publication/claims, invitations, acceptance/decline/blocks, opaque messages, and ordered offline sync with durable acknowledgments and duplicate-safe retries. See the [exact API contract and examples](docs/MESSAGING_API.md) and [migration/deployment instructions](docs/MESSAGING_DEPLOYMENT.md). On 2026-11-02 the owner approved the migrations and activation; source commit `bad8a72` was the initial durable messaging deployment. Fresh installations still default to **disabled** until their SQL is reviewed/applied and the mode is explicitly selected. The server never runs migrations itself.
+
+The current build uses the owner-approved table names `accounts`, `sessions`, `key_packages`, `message_requests`, `conversations`, `blocks`, `messages`, `sync_cursors`, `sync_events` and `messaging_schema`. Existing durable messaging installations need migration [003_clear_table_names.sql](migrations/003_clear_table_names.sql) together with this build. It renames existing tables and their constraints/indexes, preserving data, account identities and grants; API paths and fields are unchanged. Fresh installations apply schemas 001 and 002, their historical privilege files, then 003. See the deployment instructions for the exact order and coordinated backend restart.
 
 ## Run locally
 
@@ -44,7 +46,7 @@ The following ingress rule is installed in `~/.cloudflared/config.yml`, before t
 
 All 31 previous ingress rules are preserved. The original configuration is backed up at `~/.cloudflared/config.yml.before-backend`. No tunnel credentials or DNS records were changed. Health and readiness for this backend remain local at `http://127.0.0.1:8080/healthz` and `/readyz`; the public hostname's existing health routes still belong to the other project.
 
-Start `./void-server` from the project directory, then run the tunnel in another terminal:
+For the migrated durable backend, start `./scripts/run-messaging-server.sh` from the project directory, then run the tunnel in another terminal:
 
 ```bash
 cloudflared tunnel --config "$HOME/.cloudflared/config.yml" --no-autoupdate --metrics 127.0.0.1:20241 run void0000-main
@@ -101,7 +103,7 @@ All POST requests require `Content-Type: application/json`. Fields must be exact
 
    `void_id` is a positive signed 64-bit integer represented as a decimal JSON string. The timestamp comes from PostgreSQL. Registration creates no authenticated session, cookie, or token. VOID-IDs are public identifiers and never authentication secrets.
 
-Registration challenges are atomically consumed before signature verification and database access. Well-formed invalid signatures, expired challenges, concurrent replay, database failures, and interrupted in-flight registrations cannot reuse them. Obtain a fresh challenge after a failure. A disconnected client can miss a successful commit; retrying with a fresh proof then returns `409` if that key was registered. Registration issues no session; returning users authenticate through [the separate WebSocket handshake](WEBSOCKET.md). Account recovery remains outside scope.
+Registration challenges are atomically consumed before signature verification and database access. Well-formed invalid signatures, expired challenges, concurrent replay, database failures, and interrupted in-flight registrations cannot reuse them. Obtain a fresh challenge after a failure. A disconnected client can miss a successful commit; retrying with a fresh proof then returns `409` if that key was registered. Registration issues no session; returning users authenticate through the [HTTP challenge/session flow](docs/MESSAGING_API.md) in durable mode, or the [WebSocket handshake](WEBSOCKET.md) in legacy relay mode. Account recovery remains outside scope.
 
 Errors have the shape `{"error":{"code":"invalid_proof","message":"Registration proof is invalid or expired."}}`.
 

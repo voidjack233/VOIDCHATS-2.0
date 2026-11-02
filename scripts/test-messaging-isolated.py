@@ -209,7 +209,8 @@ def main():
                 SELECT (void_id, username, auth_public_key, created_at) ON public.accounts TO {role};
         ''')
         for migration in ("001_messaging.sql", "002_sessions.sql",
-                          "001_messaging_privileges.sql", "002_sessions_privileges.sql"):
+                          "001_messaging_privileges.sql", "002_sessions_privileges.sql",
+                          "003_clear_table_names.sql"):
             psql(state, env, migration=migration, runtime_role=role)
             print("Applied " + migration + " to private disposable database", flush=True)
         go_tests(state, env, race=False)

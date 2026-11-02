@@ -133,7 +133,7 @@ func TestSessionFindRevokeAndValidateUseBoundHashesAndSafeErrors(t *testing.T) {
 	secret := errors.New("secret connection password")
 	for _, fault := range []error{nil, pgx.ErrNoRows, secret} {
 		db := sessionTestDB{query: func(_ context.Context, q string, args ...any) pgx.Row {
-			if q != `SELECT void_id, created_at, expires_at FROM public.void_sessions WHERE token_hash = $1` || len(args) != 1 || !bytes.Equal(args[0].([]byte), r.TokenHash[:]) {
+			if q != `SELECT void_id, created_at, expires_at FROM public.sessions WHERE token_hash = $1` || len(args) != 1 || !bytes.Equal(args[0].([]byte), r.TokenHash[:]) {
 				t.Fatal("find did not bind token hash")
 			}
 			return sessionRow(func(dest ...any) error {
@@ -164,7 +164,7 @@ func TestSessionFindRevokeAndValidateUseBoundHashesAndSafeErrors(t *testing.T) {
 	}
 	for _, fault := range []error{nil, secret} {
 		db := sessionTestDB{exec: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
-			if q != `DELETE FROM public.void_sessions WHERE token_hash = $1` || len(args) != 1 || !bytes.Equal(args[0].([]byte), r.TokenHash[:]) {
+			if q != `DELETE FROM public.sessions WHERE token_hash = $1` || len(args) != 1 || !bytes.Equal(args[0].([]byte), r.TokenHash[:]) {
 				t.Fatal("revoke did not bind token hash")
 			}
 			return pgconn.NewCommandTag("DELETE 0"), fault

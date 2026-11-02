@@ -121,7 +121,7 @@ func TestPostgresMessagingSessionRestartAndRevocation(t *testing.T) {
 	hash := sha256.Sum256([]byte(token.AccessToken))
 	var storedHash []byte
 	var storedID int64
-	if err := app.QueryRow(ctx, `SELECT token_hash, void_id FROM public.void_sessions WHERE token_hash = $1`, hash[:]).Scan(&storedHash, &storedID); err != nil || string(storedHash) != string(hash[:]) || strconv.FormatInt(storedID, 10) != id.id {
+	if err := app.QueryRow(ctx, `SELECT token_hash, void_id FROM public.sessions WHERE token_hash = $1`, hash[:]).Scan(&storedHash, &storedID); err != nil || string(storedHash) != string(hash[:]) || strconv.FormatInt(storedID, 10) != id.id {
 		t.Fatal("session did not persist the expected token hash/account binding")
 	}
 	restarted, err := session.New(postgres.New(app), postgres.NewSessionStore(app), "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz")

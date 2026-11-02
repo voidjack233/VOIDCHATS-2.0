@@ -1,12 +1,20 @@
 # Durable messaging: review and deployment
 
 The owner approved isolated PostgreSQL verification, the additive migrations and
-activation. On 2026-11-02 (Asia/Manila), both migrations were applied and source
+activation. On 2026-11-02 (Asia/Manila), migrations 001 and 002 were applied and source
 commit `bad8a72` was activated with durable messaging enabled. Existing account
 rows, key bindings, columns/defaults/checks/indexes, login and real `.env` bytes
 were preserved. Local health/readiness are 200 and all 15 messaging endpoints
 respond publicly with their expected unauthenticated behavior. See
 [the exact verification and deployment record](MESSAGING_VALIDATION.md).
+
+The owner subsequently approved clearer table names. This build requires
+[003_clear_table_names.sql](../migrations/003_clear_table_names.sql), which renames
+the existing messaging tables, constraints and indexes in one transaction. The
+current names are `accounts`, `sessions`, `key_packages`, `message_requests`,
+`conversations`, `blocks`, `messages`, `sync_cursors`, `sync_events` and
+`messaging_schema`. The migration preserves rows, account identities, foreign
+keys and grants. API paths, request/response fields and ciphertext are unchanged.
 
 The database policy in [DATABASE_CHANGES.md](../DATABASE_CHANGES.md) and
 [README.md](../README.md) keeps schema administration with the owner. Review the
@@ -23,13 +31,16 @@ VOID-IDs; no re-registration or identity replacement is necessary. Keep real
 
 Before applying reviewed changes, take and verify an owner-managed database
 backup, record the current server executable/configuration, and back up the
-Cloudflare configuration. SQL changes are additive. Rolling back the executable
-must preserve the new tables and queued ciphertext so it can be recovered;
-dropping messaging tables is destructive and is not a rollback instruction.
+Cloudflare configuration. Migrations 001 and 002 add tables; migration 003 renames
+them without recreating or clearing them. Preserve the tables and queued
+ciphertext during recovery. Dropping messaging tables is destructive and is not
+a rollback instruction. After migration 003, an older executable that expects
+the original table names cannot run against the renamed schema; coordinate any
+rollback of table names and executable, preserving the stored rows.
 
-## Exact additive SQL to review
+## Exact SQL and application order
 
-Review these files in order:
+For a fresh installation, review and apply these files in order:
 
 1. [001_messaging.sql](../migrations/001_messaging.sql) creates
    `void_messaging_schema`, `void_key_packages`, `void_requests`,
@@ -45,11 +56,38 @@ Review these files in order:
    supply parameterized grants for the existing runtime role. The schema
    transactions do not apply those grants automatically. An existing superuser
    already has the necessary privileges; keep the owner's selected login.
+4. [003_clear_table_names.sql](../migrations/003_clear_table_names.sql) renames
+   the tables and their constraints/indexes. Apply the historical privilege files
+   before this migration because those files reference the original table names.
+   PostgreSQL preserves the grants when the tables are renamed.
+
+For an existing installation that already applied 001 and 002 and has the needed
+runtime grants, apply only 003. Do not replay the earlier schema or privilege
+files against the renamed tables. Stop the old backend, apply 003, then start the
+new build and check readiness before restoring traffic. The old and new builds
+expect different physical table names, so they cannot overlap this cutover.
+
+The exact rename mapping is:
+
+| Original name | Current name |
+| --- | --- |
+| `accounts` | `accounts` (unchanged) |
+| `void_sessions` | `sessions` |
+| `void_key_packages` | `key_packages` |
+| `void_requests` | `message_requests` |
+| `void_conversations` | `conversations` |
+| `void_blocks` | `blocks` |
+| `void_messages` | `messages` |
+| `void_event_counters` | `sync_cursors` |
+| `void_events` | `sync_events` |
+| `void_messaging_schema` | `messaging_schema` |
 
 Each schema migration is an explicit transaction and deliberately fails if its
-table names already exist. Do not rerun it blindly, add `IF NOT EXISTS` to hide
-an incomplete migration, or grant administrative privileges to satisfy startup.
-The required runtime privileges are:
+expected source tables are missing or its destination names already exist. Do
+not rerun it blindly, add `IF NOT EXISTS` to hide an incomplete migration, or
+grant administrative privileges to satisfy startup. After 003, the required
+runtime privileges are shown below. These commands describe the renamed schema;
+they do not replace the fresh-install ordering above.
 
 ```sql
 -- Review-only commands: replace through psql -v runtime_role=EXISTING_ROLE.
@@ -57,18 +95,18 @@ GRANT SELECT (void_id, username, auth_public_key, created_at),
       INSERT (void_id, username, auth_public_key)
 ON TABLE public.accounts TO :"runtime_role";
 
-GRANT SELECT ON TABLE public.void_messaging_schema TO :"runtime_role";
+GRANT SELECT ON TABLE public.messaging_schema TO :"runtime_role";
 GRANT SELECT, INSERT, UPDATE ON TABLE
-    public.void_key_packages,
-    public.void_requests,
-    public.void_conversations,
-    public.void_blocks,
-    public.void_messages,
-    public.void_event_counters,
-    public.void_events
+    public.key_packages,
+    public.message_requests,
+    public.conversations,
+    public.blocks,
+    public.messages,
+    public.sync_cursors,
+    public.sync_events
 TO :"runtime_role";
 
-GRANT SELECT, INSERT, DELETE ON TABLE public.void_sessions TO :"runtime_role";
+GRANT SELECT, INSERT, DELETE ON TABLE public.sessions TO :"runtime_role";
 ```
 
 The existing database `CONNECT` and `public` schema `USAGE` permissions remain

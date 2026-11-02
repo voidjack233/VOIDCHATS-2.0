@@ -35,7 +35,7 @@ func TestMessagingReceiptDecrementUpdatesExistingCounter(t *testing.T) {
 	if e := tx.ReserveReceipt("9223372036854775807", -1); e != nil {
 		t.Fatal(e)
 	}
-	if !strings.HasPrefix(db.sql, "UPDATE public.void_event_counters") || strings.Contains(db.sql, "INSERT") {
+	if !strings.HasPrefix(db.sql, "UPDATE public.sync_cursors") || strings.Contains(db.sql, "INSERT") {
 		t.Fatalf("decrement must UPDATE: %s", db.sql)
 	}
 	if db.args[0] != (pgtype.Int8{Int64: 9223372036854775807, Valid: true}) || db.args[1] != -1 {
@@ -52,7 +52,7 @@ func TestMessagingReceiptIncrementUpsertsPositiveCounter(t *testing.T) {
 	if e := tx.ReserveReceipt("101", 1); e != nil {
 		t.Fatal(e)
 	}
-	if !strings.HasPrefix(db.sql, "INSERT INTO public.void_event_counters") || db.args[1] != 1 {
+	if !strings.HasPrefix(db.sql, "INSERT INTO public.sync_cursors") || db.args[1] != 1 {
 		t.Fatal(db.sql, db.args)
 	}
 }

@@ -19,7 +19,7 @@ type sessionDatabase interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
-// SessionStore uses only additive public.void_sessions schema objects. Creation
+// SessionStore uses only additive public.sessions schema objects. Creation
 // and grants are owner-reviewed SQL; constructing this store never migrates.
 type SessionStore struct{ db sessionDatabase }
 
@@ -38,21 +38,22 @@ func (s *SessionStore) Persist(ctx context.Context, record session.Record, maxPe
 		return session.ErrUnavailable
 	}
 	defer tx.Rollback(ctx)
-	// A namespaced bigint advisory lock avoids modifying or locking accounts.
+	// Keep the existing lock namespace stable across physical table renames.
+	// This per-account lock avoids modifying or locking accounts.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(pg_catalog.hashtextextended('void_sessions:' || $1::bigint::text, 0))`, voidID); err != nil {
 		return session.ErrUnavailable
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM public.void_sessions WHERE void_id = $1 AND expires_at <= $2`, voidID, record.CreatedAt); err != nil {
+	if _, err = tx.Exec(ctx, `DELETE FROM public.sessions WHERE void_id = $1 AND expires_at <= $2`, voidID, record.CreatedAt); err != nil {
 		return session.ErrUnavailable
 	}
 	var count int
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM public.void_sessions WHERE void_id = $1`, voidID).Scan(&count); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM public.sessions WHERE void_id = $1`, voidID).Scan(&count); err != nil {
 		return session.ErrUnavailable
 	}
 	if count >= maxPerAccount {
 		return session.ErrCapacity
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO public.void_sessions (token_hash, void_id, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
+	if _, err = tx.Exec(ctx, `INSERT INTO public.sessions (token_hash, void_id, created_at, expires_at) VALUES ($1, $2, $3, $4)`,
 		record.TokenHash[:], voidID, record.CreatedAt, record.ExpiresAt); err != nil {
 		return session.ErrUnavailable
 	}
@@ -65,7 +66,7 @@ func (s *SessionStore) Persist(ctx context.Context, record session.Record, maxPe
 func (s *SessionStore) Find(ctx context.Context, hash [sha256.Size]byte) (session.Record, error) {
 	var r session.Record
 	var voidID int64
-	err := s.db.QueryRow(ctx, `SELECT void_id, created_at, expires_at FROM public.void_sessions WHERE token_hash = $1`, hash[:]).Scan(&voidID, &r.CreatedAt, &r.ExpiresAt)
+	err := s.db.QueryRow(ctx, `SELECT void_id, created_at, expires_at FROM public.sessions WHERE token_hash = $1`, hash[:]).Scan(&voidID, &r.CreatedAt, &r.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return session.Record{}, session.ErrAuthentication
 	}
@@ -78,7 +79,7 @@ func (s *SessionStore) Find(ctx context.Context, hash [sha256.Size]byte) (sessio
 }
 
 func (s *SessionStore) Revoke(ctx context.Context, hash [sha256.Size]byte) error {
-	if _, err := s.db.Exec(ctx, `DELETE FROM public.void_sessions WHERE token_hash = $1`, hash[:]); err != nil {
+	if _, err := s.db.Exec(ctx, `DELETE FROM public.sessions WHERE token_hash = $1`, hash[:]); err != nil {
 		return session.ErrUnavailable
 	}
 	return nil
@@ -114,7 +115,7 @@ func (s *SessionStore) Validate(ctx context.Context) error {
 		      regexp_replace(pg_catalog.pg_get_expr(k.conbin, k.conrelid), '[()[:space:]]', '', 'g')
 		      IN ('octet_lengthtoken_hash=32', 'expires_at>created_at'))
 		      FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'c')
-		  FROM pg_catalog.pg_class c WHERE c.oid = pg_catalog.to_regclass('public.void_sessions')
+		  FROM pg_catalog.pg_class c WHERE c.oid = pg_catalog.to_regclass('public.sessions')
 		), false)`).Scan(&ready)
 	if err != nil || !ready {
 		return session.ErrUnavailable
