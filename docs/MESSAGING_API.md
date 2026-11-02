@@ -1,8 +1,8 @@
 # Durable one-to-one messaging API
 
-This describes the implementation in this checkout. It does not assert that the
-running service or Cloudflare tunnel has been updated. See
-[the deployment instructions](MESSAGING_DEPLOYMENT.md) before enabling it.
+This describes the durable API deployed from source commit `bad8a72`. See
+[the verification record](MESSAGING_VALIDATION.md) for the exact live checks and
+[the deployment instructions](MESSAGING_DEPLOYMENT.md) for operation and restarts.
 
 The canonical production API audience is
 `https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz`. Paths below are relative to that

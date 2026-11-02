@@ -80,3 +80,42 @@ implementation. Normal startup performs only read-only schema/access validation;
 enabling messaging requires the owner-reviewed migrations first. Database tests
 remain separately opted in against an approved disposable `void_test_` database.
 See [deployment instructions](docs/MESSAGING_DEPLOYMENT.md).
+
+## Owner-approved durable messaging application: 2026-11-02
+
+The owner answered **"yes i approve"** to isolated PostgreSQL verification,
+application of the reviewed additive SQL and activation only after tests pass.
+The subsequent "continue" retained that approval. Verification ran in a private,
+Unix-socket-only PostgreSQL 18 cluster, never against existing accounts.
+
+Real PostgreSQL testing found an ambiguous unary-minus parameter in the receipt
+reservation update. An explicit integer cast fixed it in source commit
+`bad8a72`; all nine database integration cases and the real HTTP/backend plus
+PostgreSQL restart test then passed, including race checks.
+
+A full custom-format backup was created at
+`/home/void0000/.local/state/void-backend/deployments/20261102T084024+0800/database.before.dump`
+and restored into a separate database in the private test cluster. Account data
+matched exactly. The restored username CHECK differs only by flattened
+associative AND parentheses; the remaining account catalog lines matched.
+
+The following approved files were applied sequentially with `psql -X
+--no-password -v ON_ERROR_STOP=1 -f <file>`, using the existing configured login
+without exposing connection credentials:
+
+- `migrations/001_messaging.sql`
+- `migrations/002_sessions.sql`
+
+These added nine messaging/session tables. The existing `postgres` login
+already has the required privileges, so neither privilege script was needed;
+no role, password, grant or credential changes were made. The real `.env` bytes
+and permissions were left intact. Account data, columns, defaults, existing
+checks and unique indexes matched their exact pre-application digests; both
+existing accounts and their key bindings were preserved. New foreign-key
+references and their internal dependencies are expected additive objects.
+
+The new tables' column/default/constraint/index catalog digest matches the
+tested isolated migration catalog. Source commit `bad8a72` is running with
+durable messaging enabled through `scripts/run-messaging-server.sh`; the
+ordinary application still performs no automatic migrations. See
+[the deployment evidence](docs/MESSAGING_VALIDATION.md).

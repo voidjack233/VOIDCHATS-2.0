@@ -1,8 +1,8 @@
 # VOID-NOTHINGNESS
 
-A native Go modular monolith for account initialization, returning-user WebSocket authentication, and online opaque message relay on Ubuntu 24.04 and PostgreSQL 18. The server uses the existing `public.accounts` table; it never creates, replaces, or migrates development database objects. See [WEBSOCKET.md](WEBSOCKET.md) for the Phase 2 handshake, frame formats, limits, demo, and deployment status.
+A native Go modular monolith for account initialization and durable one-to-one opaque messaging on Ubuntu 24.04 and PostgreSQL 18. The server preserves the existing `public.accounts` table and never performs schema administration at startup. See [WEBSOCKET.md](WEBSOCKET.md) for the earlier online-only relay, which is disabled in durable messaging mode.
 
-The checkout also implements durable one-to-one messaging: short-lived bearer sessions, exact VOID-ID discovery, public MLS KeyPackage publication/claims, invitations, acceptance/decline/blocks, opaque messages, and ordered offline sync with durable acknowledgments and duplicate-safe retries. See the [exact API contract and examples](docs/MESSAGING_API.md) and [migration/deployment instructions](docs/MESSAGING_DEPLOYMENT.md). This feature defaults to **disabled** until the additive SQL has been reviewed and applied. The server never runs migrations itself. Enabling it removes the older WebSocket relay so conversation authorization and blocks cannot be bypassed.
+Durable messaging provides short-lived bearer sessions, exact VOID-ID discovery, public MLS KeyPackage publication/claims, invitations, acceptance/decline/blocks, opaque messages, and ordered offline sync with durable acknowledgments and duplicate-safe retries. See the [exact API contract and examples](docs/MESSAGING_API.md) and [migration/deployment instructions](docs/MESSAGING_DEPLOYMENT.md). On 2026-11-02 the owner approved the migrations and activation; source commit `bad8a72` is running with messaging enabled. Fresh installations still default to **disabled** until their SQL is reviewed/applied and the mode is explicitly selected. The server never runs migrations itself.
 
 ## Run locally
 
@@ -12,7 +12,7 @@ Go 1.26.5 and PostgreSQL 18 are required. The owner chose the existing `postgres
 
 ```bash
 go build ./cmd/void-server
-./void-server
+./scripts/run-messaging-server.sh
 curl --fail http://127.0.0.1:8080/healthz
 curl --fail http://127.0.0.1:8080/readyz
 ```
@@ -32,7 +32,7 @@ The existing `void0000-main` tunnel forwards the `/dm9pZG5vdGhpbmduZXNz` namespa
 - `GET wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws` (WebSocket upgrade; requires the Phase 2 backend)
 - The durable HTTP APIs in [MESSAGING_API.md](docs/MESSAGING_API.md), after reviewed migrations and deployment with `VOID_MESSAGING_ENABLED=true`; that mode removes the older `/ws` endpoint.
 
-The owner-approved `/ws` route was added on 2026-11-02. The later durable-messaging handoff authorized expanding it to the complete API prefix; that one-line change was backed up, validated and applied on the same client date, and Cloudflared was restarted. The Go backend process remains unchanged on Phase 1. New public messaging paths currently return the backend's JSON `404`; routing does not activate the implementation. See [the verification/deployment record](docs/MESSAGING_VALIDATION.md).
+The owner-approved `/ws` route was added on 2026-11-02. The later durable-messaging handoff expanded it to the complete API prefix; that one-line change was backed up, validated and applied, and Cloudflared was restarted. After isolated PostgreSQL and full process-restart verification passed, the owner-approved migrations and durable backend were activated. New protected public messaging routes return JSON `401` without a bearer token; the earlier `/ws` returns `404` in this mode. See [the verification/deployment record](docs/MESSAGING_VALIDATION.md).
 
 The following ingress rule is installed in `~/.cloudflared/config.yml`, before the existing routes for `api.voidchats.xyz`:
 
@@ -151,11 +151,11 @@ go test -race ./...
 go build ./cmd/void-server
 ```
 
-The current workflow uses unit tests and mocks only. PostgreSQL integration tests explicitly skip unless `VOID_RUN_POSTGRES_INTEGRATION=1` and a disposable `VOID_TEST_DATABASE_URL` are provided after the owner's permission. They require the `void_test_` database prefix and matching app/admin database names. No existing development database is used for tests.
+Default tests use unit tests and mocks; PostgreSQL cases skip unless explicitly opted in against a disposable `void_test_` database. After the owner's approval, `python3 scripts/test-messaging-isolated.py --keep-running` provisioned a private PostgreSQL 18 cluster with Unix-socket access only, applied the migrations and restricted runtime grants, and passed all nine PostgreSQL integration cases with and without the race detector. It never reads the real `.env` or connects to the existing database. See the [verification record](docs/MESSAGING_VALIDATION.md) for the separate real-process restart check and reproducible commands.
 
 The earlier Python integration runner is preserved for review. It refuses even to connect unless explicitly opted into database administration. Do not invoke its administration opt-in without the owner's separate permission; database creation, roles, grants, and cleanup belong to the owner.
 
 Tests cover proof binding, invalid/degenerate keys, expiration, replay, concurrent consumption, duplicate keys/IDs, retry limits, cancellation, strict JSON/body limits, bounded admission/rate limiting, clock rollback/overflow/sequence handling, and concurrent Snowflake uniqueness. Registration flow tests compose the real HTTP handler, account service, and Snowflake generator with an in-memory repository: they verify public response fields, concurrent duplicate proofs, failed-persistence consumption, and fresh-proof recovery without connecting to PostgreSQL. A deterministic rate-limit regression test verifies concurrent requests cannot count the same refill interval twice. Opt-in PostgreSQL tests verify UUIDv7/default timestamps, persisted HTTP registration, privilege denial, conflicts, and a blocked insert canceled before persistence.
 
-Before the stop instruction, PostgreSQL 18.6 integration runs passed with and without the race detector, and startup/readiness/shutdown were checked using the temporarily configured restricted role. Those are historical results. Current automated verification uses unit tests and mocks and skips database integration cases; startup and health checks against the owner's existing connection are read-only.
+Earlier PostgreSQL results predate the stop instruction. The current approved verification also runs messaging and registration against the isolated cluster and restarts the actual test backend and PostgreSQL processes. Live verification uses non-mutating health, routing and authorization probes; no synthetic account or message is inserted into the owner's database.
 

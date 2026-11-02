@@ -1,10 +1,11 @@
 # Durable messaging: review and deployment
 
-The durable APIs are implemented in this checkout and remain disabled by default.
-No live migration has been applied, and the running Go backend is unchanged.
-On 2026-11-02 (Asia/Manila), the authorized one-line Cloudflare prefix expansion
-was backed up, validated and applied, and the tunnel was restarted. Public new
-API paths still return the old backend's JSON `404`. See
+The owner approved isolated PostgreSQL verification, the additive migrations and
+activation. On 2026-11-02 (Asia/Manila), both migrations were applied and source
+commit `bad8a72` was activated with durable messaging enabled. Existing account
+rows, key bindings, columns/defaults/checks/indexes, login and real `.env` bytes
+were preserved. Local health/readiness are 200 and all 15 messaging endpoints
+respond publicly with their expected unauthenticated behavior. See
 [the exact verification and deployment record](MESSAGING_VALIDATION.md).
 
 The database policy in [DATABASE_CHANGES.md](../DATABASE_CHANGES.md) and
@@ -88,6 +89,18 @@ VOID_MESSAGING_ENABLED=true
 VOID_API_AUDIENCE=https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz
 VOID_HTTP_ADDR=127.0.0.1:8080
 ```
+
+On this installation, start the reviewed mode with:
+
+```bash
+./scripts/run-messaging-server.sh
+```
+
+The launcher selects durable mode in the process environment and reads the
+existing literal `.env` through the server; it never sources or edits that file.
+Starting `./void-server` directly without the feature variable selects the old
+mode. Use the launcher for routine restarts. The running process is manual;
+no autostart service was installed.
 
 The default is `VOID_MESSAGING_ENABLED=false`; merely replacing the executable
 does not activate the APIs. With messaging enabled the server requires a
