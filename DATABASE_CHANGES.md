@@ -119,3 +119,33 @@ tested isolated migration catalog. Source commit `bad8a72` is running with
 durable messaging enabled through `scripts/run-messaging-server.sh`; the
 ordinary application still performs no automatic migrations. See
 [the deployment evidence](docs/MESSAGING_VALIDATION.md).
+
+
+## Owner-approved table renaming: 2026-11-02
+
+The owner requested clearer database table names and explicitly selected the
+recommended mapping. Applied only `migrations/003_clear_table_names.sql`, after
+isolated seeded-data/collision tests, all nine real PostgreSQL integration cases
+(including race checks), the real HTTP/backend plus PostgreSQL process-restart
+test, and a full restore/rename rehearsal of the live backup passed.
+
+Renamed `void_sessions` to `sessions`, `void_key_packages` to `key_packages`,
+`void_requests` to `message_requests`, `void_conversations` to `conversations`,
+`void_blocks` to `blocks`, `void_messages` to `messages`, `void_event_counters` to
+`sync_cursors`, `void_events` to `sync_events`, and `void_messaging_schema` to
+`messaging_schema`, together with their matching constraint/index names. The
+existing `accounts` table and every column name remain unchanged. No table was
+recreated and no row was inserted, deleted or updated for this change.
+
+The private backup and audit directory is:
+`/home/void0000/.local/state/void-backend/deployments/20261102T092143+0800-table-renames`.
+All ten tables' row digests, table/row-type/constraint/index OIDs, column metadata,
+physical table/index identities, owners, ACLs and foreign-key definitions were
+identical before and after live application. Both accounts and keys were
+preserved; the exact account schema and real `.env` content digests matched.
+The configured login, roles, grants, credentials and Cloudflare routing were
+preserved. Historical migrations and grants were not rewritten or reapplied.
+
+Source `0a7c73f5e40fb47127783d98d7c382575429c518` is running with the renamed tables
+and durable messaging enabled. Local health/readiness, all 38 local/public API
+probes and tunnel readiness passed. See [verification evidence](docs/MESSAGING_VALIDATION.md).
