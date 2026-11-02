@@ -313,7 +313,7 @@ func (t *messagingTx) ReceiptReservations(owner string) (n int, err error) {
 }
 func (t *messagingTx) ReserveReceipt(owner string, delta int) error {
 	if delta < 0 {
-		tag, e := t.tx.Exec(t.ctx, `UPDATE public.void_event_counters SET receipt_reservations=receipt_reservations+$2 WHERE owner_void_id=$1 AND receipt_reservations>=(-$2)`, pgInt(owner), delta)
+		tag, e := t.tx.Exec(t.ctx, `UPDATE public.void_event_counters SET receipt_reservations=receipt_reservations+$2::integer WHERE owner_void_id=$1 AND receipt_reservations>=(-$2::integer)`, pgInt(owner), delta)
 		if e != nil {
 			return e
 		}
