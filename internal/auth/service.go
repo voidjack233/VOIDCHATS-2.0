@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,10 +32,11 @@ type KeyLookup interface {
 }
 
 type Service struct {
-	lookup KeyLookup
-	ttl    time.Duration
-	now    func() time.Time
-	rand   io.Reader
+	lookup   KeyLookup
+	ttl      time.Duration
+	audience string
+	now      func() time.Time
+	rand     io.Reader
 }
 
 // Challenge is the public challenge envelope plus its private, single-use state.
@@ -64,6 +67,24 @@ func NewService(lookup KeyLookup, ttl time.Duration) (*Service, error) {
 		return nil, errors.New("invalid authentication service configuration")
 	}
 	return &Service{lookup: lookup, ttl: ttl, now: time.Now, rand: rand.Reader}, nil
+}
+
+// NewServiceForAudience binds every connection proof to this deployment's
+// canonical HTTPS API audience, existing identity key, and a fresh nonce. The
+// legacy constructor retains v1 framing for compatibility; production uses v2.
+func NewServiceForAudience(lookup KeyLookup, ttl time.Duration, audience string) (*Service, error) {
+	u, err := url.Parse(audience)
+	if err != nil || len(audience) > 2048 || u.Scheme != "https" || u.Hostname() == "" ||
+		u.User != nil || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || strings.HasSuffix(audience, "/") ||
+		u.String() != audience || strings.ContainsAny(audience, "\r\n\t ") {
+		return nil, errors.New("invalid authentication audience")
+	}
+	s, err := NewService(lookup, ttl)
+	if err != nil {
+		return nil, err
+	}
+	s.audience = audience
+	return s, nil
 }
 
 // ValidVoidID accepts the canonical decimal representation of a positive int64.
@@ -113,6 +134,11 @@ func (s *Service) Begin(ctx context.Context, voidID string) (*Challenge, error) 
 	expiresAt := s.now().Add(s.ttl).UTC()
 	message := []byte("VOID-NOTHINGNESS:authenticate:v1\n" + challengeID + "\n" + voidID + "\n" +
 		expiresAt.Format(time.RFC3339Nano) + "\n" + nonce + "\n")
+	if s.audience != "" {
+		message = []byte("VOID-NOTHINGNESS:authenticate:v2\n" + challengeID + "\n" + voidID + "\n" +
+			base64.StdEncoding.EncodeToString(key) + "\n" + expiresAt.Format(time.RFC3339Nano) + "\n" +
+			base64.StdEncoding.EncodeToString([]byte(s.audience)) + "\n" + nonce + "\n")
+	}
 	return &Challenge{
 		ChallengeID: challengeID,
 		Message:     base64.StdEncoding.EncodeToString(message),

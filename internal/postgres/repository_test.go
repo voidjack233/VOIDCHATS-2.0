@@ -1,16 +1,80 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"void-nothingness/internal/account"
 )
+
+type accountInsertQuery func(context.Context, string, ...any) pgx.Row
+
+func (q accountInsertQuery) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return q(ctx, sql, args...)
+}
+
+type accountInsertRow struct {
+	id       int64
+	username string
+	created  time.Time
+}
+
+func (row accountInsertRow) Scan(dest ...any) error {
+	*dest[0].(*int64) = row.id
+	*dest[1].(*string) = row.username
+	*dest[2].(*time.Time) = row.created
+	return nil
+}
+
+func TestAccountInsertPreservesKeyAndOptionalName(t *testing.T) {
+	key := bytes.Repeat([]byte{42}, 32)
+	created := time.Unix(1234, 0).UTC()
+	for _, name := range []string{"", "Existing Name"} {
+		t.Run(fmt.Sprintf("name=%q", name), func(t *testing.T) {
+			writer := accountInsertQuery(func(_ context.Context, sql string, args ...any) pgx.Row {
+				if len(args) != 3 || args[0] != int64(9223372036854775807) || args[1] != name || !bytes.Equal(args[2].([]byte), key) {
+					t.Fatal("insertion changed account identity, provided name, or public key")
+				}
+				if !strings.Contains(sql, "NULLIF($2, '')") || !strings.Contains(sql, "COALESCE(username, '')") {
+					t.Fatal("optional username must persist as NULL and return as an omitted empty string")
+				}
+				return accountInsertRow{id: 9223372036854775807, username: name, created: created}
+			})
+			got, err := insertAccount(context.Background(), writer, 9223372036854775807, name, key)
+			if err != nil || got.VoidID != "9223372036854775807" || got.Username != name || !got.CreatedAt.Equal(created) {
+				t.Fatalf("insert result: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestAccountSchemaRequiresOnlyUsernameNullable(t *testing.T) {
+	for name, column := range expectedAccountColumns {
+		if !validAccountColumn(name, column.typ, column.def, column.modifier, column.notNull, false) {
+			t.Errorf("approved column rejected: %s", name)
+		}
+		if validAccountColumn(name, column.typ, column.def, column.modifier, !column.notNull, false) {
+			t.Errorf("changed nullability accepted: %s", name)
+		}
+		if validAccountColumn(name, column.typ, column.def, column.modifier, column.notNull, true) {
+			t.Errorf("generated identity data accepted: %s", name)
+		}
+	}
+	if expectedAccountColumns["username"].notNull || !expectedAccountColumns["auth_public_key"].notNull || !expectedAccountColumns["void_id"].notNull {
+		t.Fatal("optional username relaxed permanent identity/key requirements")
+	}
+	if validAccountColumn("unexpected", "text", "", -1, false, false) {
+		t.Fatal("unknown account column accepted")
+	}
+}
 
 func TestRequiredColumnAccessAllowsConfiguredLoginPrivileges(t *testing.T) {
 	for _, column := range []string{"id", "void_id", "username", "auth_public_key", "created_at"} {

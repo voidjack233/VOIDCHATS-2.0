@@ -1,3 +1,5 @@
+> Historical record for the previous backend. The current two-table relay source is not deployed by this record; see [current deployment review](MESSAGING_DEPLOYMENT.md). Old API/database test runners named below belong to those historical commits.
+
 # Durable messaging verification and live deployment
 
 Verified on 2026-11-02 (Asia/Manila). Integration branch: `backend`.

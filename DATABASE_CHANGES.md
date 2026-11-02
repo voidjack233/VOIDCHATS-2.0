@@ -149,3 +149,40 @@ preserved. Historical migrations and grants were not rewritten or reapplied.
 Source `0a7c73f5e40fb47127783d98d7c382575429c518` is running with the renamed tables
 and durable messaging enabled. Local health/readiness, all 38 local/public API
 probes and tunnel readiness passed. See [verification evidence](docs/MESSAGING_VALIDATION.md).
+
+## Proposed architecture correction; administration paused: 2026-11-02
+
+The owner explicitly paused live messaging tests and further feature development,
+permitting source changes and SQL preparation only. This supersedes any previous
+authorization to apply migrations or run database/live tests for this correction.
+The previously deployed backend and existing database have not been changed.
+
+Prepared [004_decouple_message_requests.sql](migrations/004_decouple_message_requests.sql)
+for review. Its only schema change is:
+
+```sql
+ALTER TABLE public.message_requests
+    ALTER COLUMN key_package_id DROP NOT NULL;
+```
+
+The file includes a transaction and bounded lock/statement timeouts. No existing
+record or object is removed. Existing request/package UNIQUE and foreign-key
+constraints, the nullable reverse package/request foreign key, accounts,
+conversations, ciphertext, delivery/ACK state, schema version, grants, roles and
+credentials are preserved. No data backfill is proposed. The revised backend
+checks this nullable column read-only before activation.
+
+Verification is limited to synthetic in-memory/mock/local HTTP tests. No real
+`.env`, existing PostgreSQL database, account, Cloudflared configuration or
+frontend project has been inspected or modified for this correction. Migration
+004 has **not** been applied. Review and explicit approval are required before
+database application, database testing or live verification. See
+[the exact proposal and preservation effects](docs/ARCHITECTURE_CORRECTION.md).
+
+## Approved two-table relay implementation: 2026-11-02
+
+The owner approved the adjusted design and authorized implementation: server-controlled creation/expiry timestamps, exactly 30-day queue retention, recipient ACK deletion, basic forwarding/reconnect behavior, and deferred advanced retries and sender-facing receipts. This authorization is implemented in Go source and proposed SQL only. The existing database, real environment, credentials, installed executable, Cloudflared and network configuration have not been changed for this task.
+
+Prepared `migrations/004_temporary_relay_queue.sql` and a separate parameterized privilege file for exact review before application. The migration locks the expected legacy tables and refuses to proceed if any old messaging/session/block/package data exists; it does not automatically delete or convert existing records. With an empty legacy data set, it replaces the nine legacy messaging tables with one six-column temporary messages queue, removes the internal version marker, and makes only accounts.username nullable. It preserves all account rows, UUIDs, VOID-IDs, keys, timestamps and username values. There is no username-column removal or identity re-registration.
+
+The previously paused request-decoupling draft was preserved privately before reconciliation; its unapplied004 proposal was superseded. No existing migration001–003 was rewritten or replayed. No PostgreSQL migration, database test or live messaging test has been executed for this implementation. Verification is restricted to mocks, in-memory stores and synthetic loopback HTTP/WebSocket fixtures. See [current architecture](docs/ARCHITECTURE_CORRECTION.md) and [exact migration review](docs/MESSAGING_DEPLOYMENT.md).

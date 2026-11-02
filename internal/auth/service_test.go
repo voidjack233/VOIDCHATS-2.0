@@ -110,6 +110,88 @@ func TestChallengeMessageAndJSON(t *testing.T) {
 	}
 }
 
+func TestAudienceBoundAuthenticationMessageAndProof(t *testing.T) {
+	legacy, public, private := testService(t)
+	const audience = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz"
+	s, err := NewServiceForAudience(legacy.lookup, 15*time.Second, audience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 2, 0, 0, 0, 123, time.UTC)
+	s.now = func() time.Time { return now }
+	c, signature := signedChallenge(t, s, "42", private)
+	message, _ := base64.StdEncoding.Strict().DecodeString(c.Message)
+	parts := strings.Split(string(message), "\n")
+	if len(parts) != 8 || parts[0] != "VOID-NOTHINGNESS:authenticate:v2" || parts[1] != c.ChallengeID || parts[2] != "42" ||
+		parts[3] != base64.StdEncoding.EncodeToString(public) || parts[4] != now.Add(s.ttl).Format(time.RFC3339Nano) ||
+		parts[5] != base64.StdEncoding.EncodeToString([]byte(audience)) || parts[7] != "" {
+		t.Fatalf("invalid audience-bound framing: %q", message)
+	}
+	if nonce, err := base64.RawURLEncoding.Strict().DecodeString(parts[6]); err != nil || len(nonce) != 32 {
+		t.Fatal("authentication nonce must retain 256 random bits")
+	}
+	if id, err := c.Verify(c.ChallengeID, signature); err != nil || id != "42" {
+		t.Fatalf("audience-bound proof: %q %v", id, err)
+	}
+	if _, err = c.Verify(c.ChallengeID, signature); err != ErrAuthentication {
+		t.Fatalf("v2 proof replay: %v", err)
+	}
+}
+
+func TestAudienceAndProtocolSubstitutionAreRejected(t *testing.T) {
+	legacy, _, private := testService(t)
+	now := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for _, otherAudience := range []string{"https://other.example/relay", ""} {
+		t.Run(otherAudience, func(t *testing.T) {
+			production, err := NewServiceForAudience(legacy.lookup, 15*time.Second, "https://api.example/relay")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var other *Service
+			if otherAudience == "" {
+				other, err = NewService(legacy.lookup, 15*time.Second)
+			} else {
+				other, err = NewServiceForAudience(legacy.lookup, 15*time.Second, otherAudience)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Keep every random byte and timestamp equal so only the bound
+			// audience/protocol differs between these two connection challenges.
+			for _, s := range []*Service{production, other} {
+				s.now = func() time.Time { return now }
+				s.rand = bytes.NewReader(bytes.Repeat([]byte{42}, 64))
+			}
+			challenge, err := production.Begin(context.Background(), "42")
+			if err != nil {
+				t.Fatal(err)
+			}
+			foreign, signature := signedChallenge(t, other, "42", private)
+			if foreign.ChallengeID != challenge.ChallengeID {
+				t.Fatal("substitution fixture failed to hold challenge ID constant")
+			}
+			if _, err = challenge.Verify(challenge.ChallengeID, signature); err != ErrAuthentication {
+				t.Fatalf("cross-audience/protocol proof accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestAudienceConstructorRequiresCanonicalHTTPS(t *testing.T) {
+	legacy, _, _ := testService(t)
+	for _, audience := range []string{"", "http://api.example/relay", "https:///relay", "https://user:pass@api.example/relay", "https://api.example/relay/", "https://api.example/relay?", "https://api.example/relay?q=1", "https://api.example/relay#fragment", "https://api.example/relay\n", " https://api.example/relay", strings.Repeat("x", 2049)} {
+		if _, err := NewServiceForAudience(legacy.lookup, time.Second, audience); err == nil {
+			t.Errorf("invalid audience accepted: %q", audience)
+		}
+	}
+	if _, err := NewServiceForAudience(nil, time.Second, "https://api.example/relay"); err == nil {
+		t.Fatal("nil identity lookup accepted")
+	}
+	if _, err := NewServiceForAudience(legacy.lookup, 31*time.Second, "https://api.example/relay"); err == nil {
+		t.Fatal("unbounded authentication lifetime accepted")
+	}
+}
+
 func TestInvalidProofConsumesChallenge(t *testing.T) {
 	for _, test := range []string{"wrong key", "modified signature", "empty signature", "short signature", "long signature", "empty ID", "wrong ID"} {
 		t.Run(test, func(t *testing.T) {

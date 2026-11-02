@@ -22,6 +22,7 @@ import (
 	"github.com/coder/websocket"
 
 	"void-nothingness/internal/auth"
+	"void-nothingness/internal/queue"
 )
 
 type keyLookup map[int64]ed25519.PublicKey
@@ -41,6 +42,7 @@ type fixture struct {
 	server *Server
 	http   *httptest.Server
 	keys   map[string]ed25519.PrivateKey
+	store  *queue.MemoryStore
 }
 
 func newFixture(t *testing.T, opts Options, count int) *fixture {
@@ -62,13 +64,24 @@ func newFixture(t *testing.T, opts Options, count int) *fixture {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	people := make([]queue.Person, 0, count)
+	for id, key := range private {
+		people = append(people, queue.Person{VoidID: id, AuthPublicKey: base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey))})
+	}
+	store := queue.NewMemoryStore(people)
+	if opts.Queue == nil {
+		opts.Queue, err = queue.New(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	server, err := New(authenticator, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	httpServer := httptest.NewServer(server)
 	t.Cleanup(func() { _ = server.Close(); httpServer.Close() })
-	return &fixture{server: server, http: httpServer, keys: private}
+	return &fixture{server: server, http: httpServer, keys: private, store: store}
 }
 
 func (f *fixture) dial(t *testing.T) *websocket.Conn {
@@ -79,6 +92,7 @@ func (f *fixture) dial(t *testing.T) *websocket.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
+	conn.SetReadLimit(DefaultMaxFrameBytes)
 	t.Cleanup(func() { _ = conn.CloseNow() })
 	return conn
 }
@@ -163,7 +177,7 @@ func (f *fixture) authenticate(t *testing.T, id string) *websocket.Conn {
 }
 
 func send(id, recipient, payload string) map[string]string {
-	return map[string]string{"type": "send", "request_id": id, "recipient_id": recipient, "payload": payload}
+	return map[string]string{"type": "relay_online", "exchange_id": id, "to_void_id": recipient, "payload_base64": payload}
 }
 
 func eventually(t *testing.T, description string, predicate func() bool) {
@@ -193,12 +207,12 @@ func TestAuthenticatedRelayAndOfflineRecipient(t *testing.T) {
 	opaque := []byte{0, 255, 9, 18, 0, 33, 128}
 	payload := base64.StdEncoding.EncodeToString(opaque)
 	write(t, alice, send("opaque:001", "2", payload))
-	assertFields(t, read(t, bob), map[string]string{"type": "message", "request_id": "opaque:001", "sender_id": "1", "payload": payload})
-	assertFields(t, read(t, alice), map[string]string{"type": "result", "request_id": "opaque:001", "status": "forwarded"})
+	assertFields(t, read(t, bob), map[string]string{"type": "online_event", "exchange_id": "opaque:001", "from_void_id": "1", "payload_base64": payload})
+	assertFields(t, read(t, alice), map[string]string{"type": "online_result", "exchange_id": "opaque:001", "status": "forwarded"})
 	_ = bob.CloseNow()
 	eventually(t, "disconnected recipient remained registered", func() bool { return f.server.ActiveCount() == 1 })
 	write(t, alice, send("offline:002", "2", payload))
-	assertFields(t, read(t, alice), map[string]string{"type": "result", "request_id": "offline:002", "status": "unavailable"})
+	assertFields(t, read(t, alice), map[string]string{"type": "online_result", "exchange_id": "offline:002", "status": "unavailable"})
 	_ = alice.CloseNow()
 	eventually(t, "session cleanup failed", func() bool { return f.server.ActiveCount() == 0 && connectionCount(f.server) == 0 })
 }
@@ -208,7 +222,7 @@ func TestUnauthorizedAndFailedAuthentication(t *testing.T) {
 	t.Run("unauthenticated send", func(t *testing.T) {
 		conn := f.dial(t)
 		write(t, conn, send("attempt", "2", "AQ=="))
-		assertFields(t, read(t, conn), map[string]string{"type": "error", "code": "unauthorized"})
+		assertFields(t, read(t, conn), map[string]string{"type": "error", "code": "invalid_frame"})
 	})
 	t.Run("wrong private key", func(t *testing.T) {
 		conn := f.dial(t)
@@ -242,24 +256,24 @@ func TestStrictFramesAndSenderImpersonation(t *testing.T) {
 		name, body string
 		binary     bool
 	}{
-		{"sender impersonation", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AQ==","sender_id":"2"}`, false},
-		{"unknown field", `{"type":"send","request_id":"x","recipient_id":"2","other":"AQ=="}`, false},
-		{"duplicate field", `{"type":"send","request_id":"x","recipient_id":"2","recipient_id":"1"}`, false},
-		{"null field", `{"type":"send","request_id":"x","recipient_id":"2","payload":null}`, false},
-		{"multiple values", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AQ=="} {}`, false},
-		{"field case", `{"Type":"send","request_id":"x","recipient_id":"2","payload":"AQ=="}`, false},
+		{"sender impersonation", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQ==","from_void_id":"2"}`, false},
+		{"unknown field", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","other":"AQ=="}`, false},
+		{"duplicate field", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","to_void_id":"1"}`, false},
+		{"null field", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":null}`, false},
+		{"multiple values", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQ=="} {}`, false},
+		{"field case", `{"Type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQ=="}`, false},
 		{"unknown type", `{"type":"ack"}`, false},
 		{"not object", `[]`, false},
 		{"invalid utf8", "{\"type\":\"\xff\"}", false},
-		{"binary", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AQ=="}`, true},
-		{"over payload", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AQIDBAU="}`, false},
-		{"unpadded base64", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AQ"}`, false},
-		{"base64 whitespace", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AQ==\n"}`, false},
-		{"noncanonical base64", `{"type":"send","request_id":"x","recipient_id":"2","payload":"AR=="}`, false},
-		{"empty payload", `{"type":"send","request_id":"x","recipient_id":"2","payload":""}`, false},
-		{"invalid recipient", `{"type":"send","request_id":"x","recipient_id":"02","payload":"AQ=="}`, false},
-		{"invalid request id", `{"type":"send","request_id":"has space","recipient_id":"2","payload":"AQ=="}`, false},
-		{"long request id", fmt.Sprintf(`{"type":"send","request_id":%q,"recipient_id":"2","payload":"AQ=="}`, strings.Repeat("a", 65)), false},
+		{"binary", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQ=="}`, true},
+		{"over payload", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQIDBAU="}`, false},
+		{"unpadded base64", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQ"}`, false},
+		{"base64 whitespace", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AQ==\n"}`, false},
+		{"noncanonical base64", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":"AR=="}`, false},
+		{"empty payload", `{"type":"relay_online","exchange_id":"x","to_void_id":"2","payload_base64":""}`, false},
+		{"invalid recipient", `{"type":"relay_online","exchange_id":"x","to_void_id":"02","payload_base64":"AQ=="}`, false},
+		{"invalid request id", `{"type":"relay_online","exchange_id":"has space","to_void_id":"2","payload_base64":"AQ=="}`, false},
+		{"long request id", fmt.Sprintf(`{"type":"relay_online","exchange_id":%q,"to_void_id":"2","payload_base64":"AQ=="}`, strings.Repeat("a", 65)), false},
 		{"second authentication", `{"type":"auth_begin","void_id":"1"}`, false},
 	}
 	for _, test := range cases {
@@ -287,8 +301,8 @@ func TestNewSuccessfulSessionReplacesOldAndStaleCleanupIsSafe(t *testing.T) {
 	prove(t, failed, challenge, f.keys["2"])
 	assertFields(t, read(t, failed), map[string]string{"type": "error", "code": "authentication_failed"})
 	write(t, bob, send("old-remains", "1", "AQ=="))
-	assertFields(t, read(t, old), map[string]string{"type": "message", "request_id": "old-remains", "sender_id": "2", "payload": "AQ=="})
-	assertFields(t, read(t, bob), map[string]string{"type": "result", "request_id": "old-remains", "status": "forwarded"})
+	assertFields(t, read(t, old), map[string]string{"type": "online_event", "exchange_id": "old-remains", "from_void_id": "2", "payload_base64": "AQ=="})
+	assertFields(t, read(t, bob), map[string]string{"type": "online_result", "exchange_id": "old-remains", "status": "forwarded"})
 	newest := f.authenticate(t, "1")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -303,8 +317,8 @@ func TestNewSuccessfulSessionReplacesOldAndStaleCleanupIsSafe(t *testing.T) {
 		t.Fatalf("stale sender forwarded: %s", status)
 	}
 	write(t, bob, send("replacement", "1", "Ag=="))
-	assertFields(t, read(t, newest), map[string]string{"type": "message", "request_id": "replacement", "sender_id": "2", "payload": "Ag=="})
-	assertFields(t, read(t, bob), map[string]string{"type": "result", "request_id": "replacement", "status": "forwarded"})
+	assertFields(t, read(t, newest), map[string]string{"type": "online_event", "exchange_id": "replacement", "from_void_id": "2", "payload_base64": "Ag=="})
+	assertFields(t, read(t, bob), map[string]string{"type": "online_result", "exchange_id": "replacement", "status": "forwarded"})
 }
 
 func TestAuthenticationTimeoutAndFrameLimit(t *testing.T) {
@@ -420,7 +434,7 @@ func TestConcurrentClientsForwardWithoutLosingEnvelopes(t *testing.T) {
 				errors <- err
 				return
 			}
-			if result["status"] != "forwarded" || result["request_id"] != requestID {
+			if result["status"] != "forwarded" || result["exchange_id"] != requestID {
 				errors <- fmt.Errorf("result = %#v", result)
 			}
 		}()
@@ -428,10 +442,10 @@ func TestConcurrentClientsForwardWithoutLosingEnvelopes(t *testing.T) {
 	seen := make(map[string]bool, count)
 	for i := 0; i < count; i++ {
 		message := read(t, recipient)
-		if message["type"] != "message" || message["payload"] != "AAECAw==" || seen[message["sender_id"]] {
+		if message["type"] != "online_event" || message["payload_base64"] != "AAECAw==" || seen[message["from_void_id"]] {
 			t.Fatalf("bad concurrent envelope: %#v", message)
 		}
-		seen[message["sender_id"]] = true
+		seen[message["from_void_id"]] = true
 	}
 	workers.Wait()
 	close(errors)
@@ -455,11 +469,15 @@ func TestConfigurationAndHTTPMethod(t *testing.T) {
 		t.Fatal("method restriction failed")
 	}
 	for _, opts := range []Options{{MaxConnections: -1}, {QueueSize: -1}, {MaxPayloadBytes: DefaultMaxPayloadBytes + 1}, {MaxFrameBytes: DefaultMaxFrameBytes + 1}, {AuthTimeout: 11 * time.Second}, {WriteTimeout: -time.Second}} {
+		opts.Queue = f.server.opts.Queue
 		if _, err := New(f.server.auth, opts); err == nil {
 			t.Errorf("invalid configuration accepted: %+v", opts)
 		}
 	}
 	if _, err := New(nil, Options{}); err == nil {
 		t.Fatal("nil authenticator accepted")
+	}
+	if _, err := New(f.server.auth, Options{}); err == nil {
+		t.Fatal("nil delivery queue accepted")
 	}
 }

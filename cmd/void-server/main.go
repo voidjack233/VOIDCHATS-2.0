@@ -17,11 +17,9 @@ import (
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/config"
 	"void-nothingness/internal/httpapi"
-	"void-nothingness/internal/messaging"
-	"void-nothingness/internal/messagingapi"
 	"void-nothingness/internal/postgres"
+	"void-nothingness/internal/queue"
 	"void-nothingness/internal/relay"
-	"void-nothingness/internal/session"
 	"void-nothingness/internal/snowflake"
 )
 
@@ -54,98 +52,73 @@ func run() error {
 	poolCfg.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
 	poolCfg.ConnConfig.RuntimeParams["lock_timeout"] = "2000"
 	poolCfg.ConnConfig.RuntimeParams["search_path"] = "pg_catalog"
+	// Keep catalog constraint rendering deterministic for read-only validation.
+	poolCfg.ConnConfig.RuntimeParams["intervalstyle"] = "postgres"
 	startup, cancel := context.WithTimeout(root, 10*time.Second)
+	defer cancel()
 	pool, err := pgxpool.NewWithConfig(startup, poolCfg)
 	if err != nil {
-		cancel()
 		return errors.New("database pool initialization failed")
 	}
 	defer pool.Close()
 	repo := postgres.New(pool)
-	err = repo.Validate(startup)
-	cancel()
-	if err != nil {
-		return err
+	queueStore := postgres.NewQueueStore(pool)
+	ready := func(ctx context.Context) error {
+		if err := repo.Ready(ctx); err != nil {
+			return err
+		}
+		return queueStore.Validate(ctx)
 	}
+	if err = ready(startup); err != nil {
+		return errors.New("reviewed two-table relay schema or account access unavailable; startup never applies migrations")
+	}
+	cancel()
 	ids, err := snowflake.New(cfg.WorkerID, cfg.Epoch)
 	if err != nil {
 		return errors.New("invalid Snowflake configuration")
 	}
-	service, err := account.NewService(repo, ids, account.Options{ChallengeTTL: cfg.ChallengeTTL, MaxChallenges: cfg.MaxChallenges})
+	registration, err := account.NewService(repo, ids, account.Options{ChallengeTTL: cfg.ChallengeTTL, MaxChallenges: cfg.MaxChallenges})
 	if err != nil {
 		return err
 	}
-	ready := repo.Ready
-	var durableHandler http.Handler
-	var sockets *relay.Server
-	if cfg.MessagingEnabled {
-		messageStore := postgres.NewMessagingStore(pool)
-		sessionStore := postgres.NewSessionStore(pool)
-		check := func(ctx context.Context) error {
-			if err := repo.Ready(ctx); err != nil {
-				return err
-			}
-			if err := messageStore.Validate(ctx); err != nil {
-				return err
-			}
-			return sessionStore.Validate(ctx)
-		}
-		ctx, cancel := context.WithTimeout(root, 10*time.Second)
-		err = check(ctx)
-		cancel()
-		if err != nil {
-			return errors.New("messaging schema or privileges unavailable; review and apply the additive migrations before enabling messaging")
-		}
-		sessions, err := session.New(repo, sessionStore, cfg.APIAudience)
-		if err != nil {
-			return errors.New("invalid messaging session configuration")
-		}
-		messages, err := messaging.NewService(messageStore)
-		if err != nil {
-			return errors.New("invalid messaging configuration")
-		}
-		durableHandler = messagingapi.New(sessions, messages, messagingapi.Options{})
-		ready = check
-	} else {
-		authentication, err := auth.NewService(repo, cfg.WSAuthTimeout)
-		if err != nil {
-			return errors.New("invalid authentication configuration")
-		}
-		sockets, err = relay.New(authentication, relay.Options{
-			AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
-			QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
-			MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048),
-		})
-		if err != nil {
-			return errors.New("invalid WebSocket configuration")
-		}
-		defer sockets.Close()
+	queued, err := queue.New(queueStore)
+	if err != nil {
+		return err
 	}
-	handler := httpapi.New(service, ready, httpapi.Options{RequestTimeout: cfg.RequestTimeout, RatePerMinute: cfg.RatePerMinute, RateBurst: cfg.RateBurst, MaxRateClients: cfg.MaxRateClients, MaxConcurrentRequests: cfg.MaxConcurrentRequests})
+	authentication, err := auth.NewServiceForAudience(repo, cfg.WSAuthTimeout, cfg.APIAudience)
+	if err != nil {
+		return errors.New("invalid WebSocket authentication configuration")
+	}
+	sockets, err := relay.New(authentication, relay.Options{
+		AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
+		QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
+		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048), Queue: queued,
+	})
+	if err != nil {
+		return errors.New("invalid WebSocket configuration")
+	}
+	defer sockets.Close()
 	routes := http.NewServeMux()
-	// WebSockets own their authentication/heartbeat deadlines. Mount outside
-	// the short registration request timeout without changing existing routes.
-	if durableHandler != nil {
-		messagingapi.Mount(routes, durableHandler)
-	} else {
-		routes.Handle("/dm9pZG5vdGhpbmduZXNz/ws", sockets)
-	}
-	routes.Handle("/", handler)
-	writeTimeout := cfg.RequestTimeout + time.Second
-	if cfg.MessagingEnabled {
-		writeTimeout = max(writeTimeout, 11*time.Second)
-	}
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: routes, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	// Upgraded sockets own their deadlines, outside registration's short timeout.
+	routes.Handle("/dm9pZG5vdGhpbmduZXNz/ws", sockets)
+	routes.Handle("/", httpapi.New(registration, ready, httpapi.Options{
+		RequestTimeout: cfg.RequestTimeout, RatePerMinute: cfg.RatePerMinute,
+		RateBurst: cfg.RateBurst, MaxRateClients: cfg.MaxRateClients,
+		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
+	}))
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: routes, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: cfg.RequestTimeout + time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return errors.New("cannot listen on configured HTTP address")
 	}
-	// Also cancel active handlers if Serve exits unexpectedly, before closing
-	// their database pool. Close is harmless after a successful Shutdown.
 	defer server.Close()
+	cleanupCtx, cleanupCancel := context.WithCancel(root)
+	cleanupDone := make(chan struct{})
+	go func() { defer close(cleanupDone); maintainQueue(cleanupCtx, queued) }()
+	defer func() { cleanupCancel(); <-cleanupDone }()
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(listener) }()
-	slog.Info("VOID-NOTHINGNESS listening", "address", listener.Addr().String(), "durable_messaging", cfg.MessagingEnabled)
+	slog.Info("VOID-NOTHINGNESS listening", "address", listener.Addr().String(), "messaging", "temporary_websocket_relay")
 	select {
 	case err := <-serverErr:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -154,11 +127,7 @@ func run() error {
 		return nil
 	case <-root.Done():
 	}
-	// http.Server.Shutdown does not close hijacked WebSocket connections.
-	// Close both authenticated and pending sockets before draining HTTP.
-	if sockets != nil {
-		_ = sockets.Close()
-	}
+	_ = sockets.Close()
 	shutdown, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(shutdown); err != nil {
@@ -167,4 +136,32 @@ func run() error {
 	}
 	slog.Info("VOID-NOTHINGNESS stopped")
 	return nil
+}
+
+// Cleanup uses the same process and store, with short bounded batches. Expiry is
+// also checked by every queue read; a cleanup delay never permits old delivery.
+func maintainQueue(ctx context.Context, service *queue.Service) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		for batch := 0; batch < 10; batch++ {
+			n, err := service.Cleanup(batchCtx, 1000)
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Warn("temporary queue cleanup unavailable")
+				}
+				break
+			}
+			if n < 1000 {
+				break
+			}
+		}
+		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

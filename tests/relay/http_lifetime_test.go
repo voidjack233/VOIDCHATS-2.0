@@ -20,6 +20,7 @@ import (
 	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/httpapi"
+	"void-nothingness/internal/queue"
 	"void-nothingness/internal/relay"
 )
 
@@ -64,7 +65,14 @@ func TestAuthenticatedWebSocketsOutliveHTTPDeadlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	connections, err := relay.New(authentication, relay.Options{AuthTimeout: 3 * time.Second})
+	messages, err := queue.New(queue.NewMemoryStore([]queue.Person{
+		{VoidID: "1", AuthPublicKey: base64.StdEncoding.EncodeToString(alicePublic)},
+		{VoidID: "2", AuthPublicKey: base64.StdEncoding.EncodeToString(bobPublic)},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections, err := relay.New(authentication, relay.Options{AuthTimeout: 3 * time.Second, Queue: messages})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,25 +105,36 @@ func TestAuthenticatedWebSocketsOutliveHTTPDeadlines(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	payload := base64.StdEncoding.EncodeToString([]byte("SIMULATED-CIPHERTEXT:after-http-deadline"))
-	lifetimeWrite(t, ctx, alice, map[string]string{"type": "send", "request_id": "after-deadline", "recipient_id": "2", "payload": payload})
+	const eventID = "00000000-0000-4000-8000-000000000001"
+	lifetimeWrite(t, ctx, alice, map[string]string{"type": "send", "event_id": eventID, "to_void_id": "2", "payload_base64": payload})
 	var message struct {
-		Type      string `json:"type"`
-		RequestID string `json:"request_id"`
-		SenderID  string `json:"sender_id"`
-		Payload   string `json:"payload"`
+		Type     string `json:"type"`
+		EventID  string `json:"event_id"`
+		SenderID string `json:"from_void_id"`
+		Payload  string `json:"payload_base64"`
 	}
 	lifetimeRead(t, ctx, bob, &message)
-	if message.Type != "message" || message.RequestID != "after-deadline" || message.SenderID != "1" || message.Payload != payload {
+	if message.Type != "event" || message.EventID != eventID || message.SenderID != "1" || message.Payload != payload {
 		t.Fatalf("unexpected message after HTTP deadlines: %+v", message)
 	}
 	var result struct {
-		Type      string `json:"type"`
-		RequestID string `json:"request_id"`
-		Status    string `json:"status"`
+		Type      string    `json:"type"`
+		EventID   string    `json:"event_id"`
+		CreatedAt time.Time `json:"created_at"`
+		ExpiresAt time.Time `json:"expires_at"`
 	}
 	lifetimeRead(t, ctx, alice, &result)
-	if result.Type != "result" || result.RequestID != "after-deadline" || result.Status != "forwarded" {
+	if result.Type != "accepted" || result.EventID != eventID || result.CreatedAt.IsZero() || !result.ExpiresAt.Equal(result.CreatedAt.Add(queue.Retention)) {
 		t.Fatalf("unexpected result after HTTP deadlines: %+v", result)
+	}
+	lifetimeWrite(t, ctx, bob, map[string]string{"type": "ack", "sender_void_id": "1", "event_id": eventID})
+	var ack map[string]string
+	lifetimeRead(t, ctx, bob, &ack)
+	if ack["type"] != "ack_ok" || ack["event_id"] != eventID || ack["sender_void_id"] != "1" {
+		t.Fatalf("unexpected ACK after HTTP deadlines: %+v", ack)
+	}
+	if pending, err := messages.Pending(ctx, "2", 100); err != nil || len(pending) != 0 {
+		t.Fatalf("ACK did not delete queued ciphertext: %d events, %v", len(pending), err)
 	}
 
 	healthRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/healthz", nil)

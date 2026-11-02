@@ -9,7 +9,7 @@ import (
 
 // parseStringObject deliberately rejects duplicate keys, nulls, unknown fields
 // and multiple JSON values, which ordinary struct unmarshaling accepts.
-func parseStringObject(body []byte, required []string) (map[string]string, error) {
+func parseStringObject(body []byte, required []string, optional ...string) (map[string]string, error) {
 	invalid := errors.New("invalid JSON object")
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	token, err := decoder.Token()
@@ -18,6 +18,9 @@ func parseStringObject(body []byte, required []string) (map[string]string, error
 	}
 	allowed := make(map[string]bool, len(required))
 	for _, field := range required {
+		allowed[field] = true
+	}
+	for _, field := range optional {
 		allowed[field] = true
 	}
 	fields := make(map[string]string, len(required))
@@ -43,8 +46,13 @@ func parseStringObject(body []byte, required []string) (map[string]string, error
 		}
 		fields[key] = value
 	}
-	if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(fields) != len(required) {
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
 		return nil, invalid
+	}
+	for _, field := range required {
+		if _, exists := fields[field]; !exists {
+			return nil, invalid
+		}
 	}
 	if _, err = decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, invalid

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -74,9 +75,55 @@ func TestRegistrationAndReplay(t *testing.T) {
 	}
 }
 
+func TestRegistrationWithoutUsernameRetainsIdentityProof(t *testing.T) {
+	var storedKey []byte
+	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, name string, key []byte) (Account, error) {
+		if name != "" {
+			t.Fatalf("optional username replaced with %q", name)
+		}
+		storedKey = append([]byte(nil), key...)
+		return Account{VoidID: strconv.FormatInt(id, 10), CreatedAt: time.Now().UTC()}, nil
+	}))
+	c, err := s.Challenge("", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := base64.StdEncoding.DecodeString(c.Message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(message), "\n")
+	if len(parts) != 7 || parts[0] != "VOID-NOTHINGNESS:register:v1" || parts[1] != c.ChallengeID || parts[3] != base64.StdEncoding.EncodeToString(pub) || parts[4] != "" || parts[5] == "" || parts[6] != "" {
+		t.Fatalf("empty username changed proof framing: %q", message)
+	}
+	a, err := s.Register(context.Background(), c.ChallengeID, ed25519.Sign(priv, message))
+	if err != nil || a.VoidID != "1" || a.Username != "" || string(storedKey) != string(pub) {
+		t.Fatalf("username-free registration: %+v %v", a, err)
+	}
+	encoded, err := json.Marshal(a)
+	if err != nil || strings.Contains(string(encoded), "username") {
+		t.Fatalf("absent username should be omitted: %s %v", encoded, err)
+	}
+	if _, err = s.Register(context.Background(), c.ChallengeID, ed25519.Sign(priv, message)); !errors.Is(err, ErrInvalidChallenge) {
+		t.Fatalf("username-free proof replay: %v", err)
+	}
+	wrong, err := s.Challenge("", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongMessage, _ := base64.StdEncoding.DecodeString(wrong.Message)
+	_, wrongPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Register(context.Background(), wrong.ChallengeID, ed25519.Sign(wrongPrivate, wrongMessage)); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("missing username bypassed key ownership: %v", err)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	s, pub, _ := testService(t, nil)
-	for _, name := range []string{"", " leading", "trailing ", "\nvoid", "a\x00b", strings.Repeat("界", 33), "a\u202eb", string([]byte{0xff})} {
+	for _, name := range []string{" ", " leading", "trailing ", "\nvoid", "a\x00b", strings.Repeat("界", 33), "a\u202eb", string([]byte{0xff})} {
 		if _, err := s.Challenge(name, pub); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("accepted invalid username %q: %v", name, err)
 		}

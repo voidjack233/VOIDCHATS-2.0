@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -34,21 +35,52 @@ func New(pool *pgxpool.Pool) *Repository {
 }
 
 func (r *Repository) Insert(ctx context.Context, voidID int64, username string, publicKey []byte) (account.Account, error) {
-	var result account.Account
-	var storedID int64
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO public.accounts (void_id, username, auth_public_key)
-		VALUES ($1, $2, $3)
-		RETURNING void_id, username, created_at`, voidID, username, publicKey).
-		Scan(&storedID, &result.Username, &result.CreatedAt)
+	result, err := insertAccount(ctx, r.pool, voidID, username, publicKey)
 	if err != nil {
 		r.mu.RLock()
 		idConstraint, keyConstraint := r.idConstraint, r.keyConstraint
 		r.mu.RUnlock()
 		return account.Account{}, classifyError(ctx, err, idConstraint, keyConstraint)
 	}
+	return result, nil
+}
+
+type accountWriter interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func insertAccount(ctx context.Context, writer accountWriter, voidID int64, username string, publicKey []byte) (account.Account, error) {
+	var result account.Account
+	var storedID int64
+	err := writer.QueryRow(ctx, `
+		INSERT INTO public.accounts (void_id, username, auth_public_key)
+		VALUES ($1, NULLIF($2, ''), $3)
+		RETURNING void_id, COALESCE(username, ''), created_at`, voidID, username, publicKey).
+		Scan(&storedID, &result.Username, &result.CreatedAt)
+	if err != nil {
+		return account.Account{}, err
+	}
 	result.VoidID = strconv.FormatInt(storedID, 10)
 	return result, nil
+}
+
+type accountColumn struct {
+	typ, def string
+	modifier int32
+	notNull  bool
+}
+
+var expectedAccountColumns = map[string]accountColumn{
+	"id":              {"uuid", "uuidv7()", -1, true},
+	"void_id":         {"int8", "", -1, true},
+	"username":        {"varchar", "", 132, false},
+	"auth_public_key": {"bytea", "", -1, true},
+	"created_at":      {"timestamptz", "now()", -1, true},
+}
+
+func validAccountColumn(name, typ, def string, modifier int32, notNull, generated bool) bool {
+	want, exists := expectedAccountColumns[name]
+	return exists && typ == want.typ && modifier == want.modifier && notNull == want.notNull && !generated && def == want.def
 }
 
 func classifyError(ctx context.Context, err error, idConstraint, keyConstraint string) error {
@@ -125,17 +157,6 @@ func (r *Repository) Validate(ctx context.Context) error {
 	if err != nil {
 		return classifyValidationError(ctx, err)
 	}
-	type column struct {
-		typ, def string
-		modifier int32
-	}
-	expected := map[string]column{
-		"id":              {"uuid", "uuidv7()", -1},
-		"void_id":         {"int8", "", -1},
-		"username":        {"varchar", "", 132},
-		"auth_public_key": {"bytea", "", -1},
-		"created_at":      {"timestamptz", "now()", -1},
-	}
 	var mismatch, privilegeMismatch bool
 	count := 0
 	for rows.Next() {
@@ -146,8 +167,8 @@ func (r *Repository) Validate(ctx context.Context) error {
 			rows.Close()
 			return classifyValidationError(ctx, err)
 		}
-		want, exists := expected[name]
-		if !exists || typ != want.typ || modifier != want.modifier || !notNull || generated || def != want.def {
+		_, exists := expectedAccountColumns[name]
+		if !validAccountColumn(name, typ, def, modifier, notNull, generated) {
 			mismatch = true
 		}
 		if exists && !hasRequiredColumnAccess(name, selectable, insertable) {
@@ -160,7 +181,7 @@ func (r *Repository) Validate(ctx context.Context) error {
 	if err != nil {
 		return classifyValidationError(ctx, err)
 	}
-	if mismatch || count != len(expected) {
+	if mismatch || count != len(expectedAccountColumns) {
 		return ErrSchemaMismatch
 	}
 	if privilegeMismatch {

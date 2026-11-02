@@ -27,6 +27,7 @@ import (
 	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/httpapi"
+	"void-nothingness/internal/queue"
 	"void-nothingness/internal/relay"
 )
 
@@ -35,6 +36,9 @@ const (
 	// These bytes are a fixed demonstration fixture, not an encryption format.
 	simulatedCiphertext = "SIMULATED-CIPHERTEXT:alice-to-bob:opaque-demo-bytes"
 	replyCiphertext     = "SIMULATED-CIPHERTEXT:bob-to-alice:opaque-reply-bytes"
+	forwardEventID      = "00000000-0000-4000-8000-000000000001"
+	replyEventID        = "00000000-0000-4000-8000-000000000002"
+	offlineEventID      = "00000000-0000-4000-8000-000000000003"
 )
 
 type storedAccount struct {
@@ -104,23 +108,26 @@ type authEnvelope struct {
 }
 
 type relayEnvelope struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id"`
-	SenderID  string `json:"sender_id,omitempty"`
-	Payload   string `json:"payload,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Code      string `json:"code,omitempty"`
+	Type         string    `json:"type"`
+	EventID      string    `json:"event_id"`
+	FromVoidID   string    `json:"from_void_id,omitempty"`
+	SenderVoidID string    `json:"sender_void_id,omitempty"`
+	Payload      string    `json:"payload_base64,omitempty"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	Code         string    `json:"code,omitempty"`
 }
 
 // demoReport retains observations from actual network exchanges for the test.
 // Keys, signatures, and challenge material are deliberately excluded.
 type demoReport struct {
-	Alice, Bob         account.Account
-	Active             int
-	Forward, Reverse   relayEnvelope
-	Forwarded, Replied relayEnvelope
-	Offline            relayEnvelope
-	FinalActive        int
+	Alice, Bob           account.Account
+	Active               int
+	Forward, Reverse     relayEnvelope
+	Forwarded, Replied   relayEnvelope
+	Offline, Reconnected relayEnvelope
+	FinalActive          int
+	FinalPending         int
 }
 
 func main() {
@@ -150,17 +157,10 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 	if err != nil {
 		return report, fmt.Errorf("initialize authentication: %w", err)
 	}
-	relayServer, err := relay.New(authentication, relay.Options{})
-	if err != nil {
-		return report, fmt.Errorf("initialize relay: %w", err)
-	}
 	mux := http.NewServeMux()
-	mux.Handle(apiPrefix+"/ws", relayServer)
 	mux.Handle("/", httpapi.New(registration, func(context.Context) error { return nil }, httpapi.Options{}))
 	server := httptest.NewServer(mux)
 	defer server.Close()
-	// Upgraded connections outlive HTTP requests; close the relay before HTTP.
-	defer relayServer.Close()
 	client := server.Client()
 	client.Timeout = 5 * time.Second
 	defer client.CloseIdleConnections()
@@ -177,6 +177,23 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 	if alice.account.VoidID == bob.account.VoidID {
 		return report, errors.New("registration returned duplicate account identities")
 	}
+	// Only these two synthetic identities exist in this demonstration queue.
+	// This setup runs after HTTP registration, without changing production APIs.
+	messageStore := queue.NewMemoryStore([]queue.Person{
+		{VoidID: alice.account.VoidID, AuthPublicKey: base64.StdEncoding.EncodeToString(alice.privateKey.Public().(ed25519.PublicKey))},
+		{VoidID: bob.account.VoidID, AuthPublicKey: base64.StdEncoding.EncodeToString(bob.privateKey.Public().(ed25519.PublicKey))},
+	})
+	messages, err := queue.New(messageStore)
+	if err != nil {
+		return report, fmt.Errorf("initialize temporary queue: %w", err)
+	}
+	relayServer, err := relay.New(authentication, relay.Options{Queue: messages})
+	if err != nil {
+		return report, fmt.Errorf("initialize relay: %w", err)
+	}
+	mux.Handle(apiPrefix+"/ws", relayServer)
+	// Upgraded connections outlive HTTP requests; close the relay before HTTP.
+	defer relayServer.Close()
 	log.stage("Registered two disposable accounts through the existing HTTP registration handlers.")
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + apiPrefix + "/ws"
 	aliceConn, err := connectUser(ctx, wsURL, alice)
@@ -197,19 +214,19 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 	report.Active = relayServer.ActiveCount()
 	log.stage("Both authenticated WebSocket connections are active.")
 
-	report.Forward, report.Forwarded, err = exchange(ctx, aliceConn, bobConn, alice.account.VoidID, bob.account.VoidID, "demo-alice-1", simulatedCiphertext)
+	report.Forward, report.Forwarded, err = exchange(ctx, aliceConn, bobConn, alice.account.VoidID, bob.account.VoidID, forwardEventID, simulatedCiphertext)
 	if err != nil {
 		return report, fmt.Errorf("Alice to Bob exchange: %w", err)
 	}
 	log.envelope("Bob received simulated ciphertext", report.Forward)
-	log.envelope("Alice received transport result", report.Forwarded)
-	report.Reverse, report.Replied, err = exchange(ctx, bobConn, aliceConn, bob.account.VoidID, alice.account.VoidID, "demo-bob-1", replyCiphertext)
+	log.envelope("Alice received queue acceptance", report.Forwarded)
+	report.Reverse, report.Replied, err = exchange(ctx, bobConn, aliceConn, bob.account.VoidID, alice.account.VoidID, replyEventID, replyCiphertext)
 	if err != nil {
 		return report, fmt.Errorf("Bob to Alice exchange: %w", err)
 	}
 	log.envelope("Alice received simulated ciphertext", report.Reverse)
-	log.envelope("Bob received transport result", report.Replied)
-	log.stage("forwarded means transport forwarding completed; it does not acknowledge recipient processing or guarantee delivery.")
+	log.envelope("Bob received queue acceptance", report.Replied)
+	log.stage("accepted means the temporary queue stored an event; recipient ACK separately deletes it. This demo uses memory, not durable PostgreSQL.")
 
 	if err := bobConn.Close(websocket.StatusNormalClosure, "demo recipient disconnect"); err != nil {
 		return report, fmt.Errorf("disconnect Bob: %w", err)
@@ -219,18 +236,46 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 	}
 	log.stage("Bob disconnected; his authenticated connection was removed.")
 	if err := writeFrame(ctx, aliceConn, map[string]string{
-		"type": "send", "request_id": "demo-offline-1", "recipient_id": bob.account.VoidID,
-		"payload": base64.StdEncoding.EncodeToString([]byte(simulatedCiphertext)),
+		"type": "send", "event_id": offlineEventID, "to_void_id": bob.account.VoidID,
+		"payload_base64": base64.StdEncoding.EncodeToString([]byte(simulatedCiphertext)),
 	}); err != nil {
 		return report, fmt.Errorf("send to disconnected recipient: %w", err)
 	}
 	if err := readFrame(ctx, aliceConn, &report.Offline); err != nil {
-		return report, fmt.Errorf("read unavailable result: %w", err)
+		return report, fmt.Errorf("read offline queue acceptance: %w", err)
 	}
-	if report.Offline.Type != "result" || report.Offline.RequestID != "demo-offline-1" || report.Offline.Status != "unavailable" {
-		return report, errors.New("disconnected recipient did not produce the expected unavailable result")
+	if report.Offline.Type != "accepted" || report.Offline.EventID != offlineEventID {
+		return report, errors.New("event for disconnected recipient was not accepted into the queue")
 	}
-	log.envelope("Alice received offline-recipient result", report.Offline)
+	log.envelope("Alice received acceptance while Bob was offline", report.Offline)
+	reconnected, err := connectUser(ctx, wsURL, bob)
+	if err != nil {
+		return report, fmt.Errorf("reconnect Bob: %w", err)
+	}
+	defer reconnected.CloseNow()
+	if err = readFrame(ctx, reconnected, &report.Reconnected); err != nil {
+		return report, fmt.Errorf("read queued event after reconnect: %w", err)
+	}
+	if report.Reconnected.Type != "event" || report.Reconnected.EventID != offlineEventID || report.Reconnected.FromVoidID != alice.account.VoidID || report.Reconnected.Payload != base64.StdEncoding.EncodeToString([]byte(simulatedCiphertext)) {
+		return report, errors.New("queued event changed while recipient was offline")
+	}
+	if err = acknowledge(ctx, reconnected, report.Reconnected); err != nil {
+		return report, fmt.Errorf("acknowledge reconnect delivery: %w", err)
+	}
+	log.envelope("Bob received and acknowledged the queued event after reconnect", report.Reconnected)
+	for _, id := range []string{alice.account.VoidID, bob.account.VoidID} {
+		pending, err := messages.Pending(ctx, id, 100)
+		if err != nil {
+			return report, err
+		}
+		report.FinalPending += len(pending)
+	}
+	if report.FinalPending != 0 {
+		return report, errors.New("acknowledged ciphertext remained in the temporary queue")
+	}
+	if err = reconnected.Close(websocket.StatusNormalClosure, "demo complete"); err != nil {
+		return report, fmt.Errorf("disconnect reconnected Bob: %w", err)
+	}
 	if err := aliceConn.Close(websocket.StatusNormalClosure, "demo complete"); err != nil {
 		return report, fmt.Errorf("disconnect Alice: %w", err)
 	}
@@ -238,7 +283,7 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 		return report, err
 	}
 	report.FinalActive = relayServer.ActiveCount()
-	log.stage("All simulated clients disconnected; no active sessions remain and no offline messages were queued.")
+	log.stage("All simulated clients disconnected; recipient ACKs removed every queued event and no active sessions remain.")
 	return report, log.err
 }
 
@@ -372,7 +417,7 @@ func connectUser(ctx context.Context, url string, user demoUser) (*websocket.Con
 	return conn, nil
 }
 
-func exchange(ctx context.Context, sender, recipient *websocket.Conn, senderID, recipientID, requestID, opaque string) (relayEnvelope, relayEnvelope, error) {
+func exchange(ctx context.Context, sender, recipient *websocket.Conn, senderID, recipientID, eventID, opaque string) (relayEnvelope, relayEnvelope, error) {
 	// Read the recipient concurrently with the sender's result. Every goroutine
 	// exits before this function returns, including on a failed write or read.
 	readCtx, cancel := context.WithCancel(ctx)
@@ -390,7 +435,7 @@ func exchange(ctx context.Context, sender, recipient *websocket.Conn, senderID, 
 	encoded := base64.StdEncoding.EncodeToString([]byte(opaque))
 	var result relayEnvelope
 	err := writeFrame(ctx, sender, map[string]string{
-		"type": "send", "request_id": requestID, "recipient_id": recipientID, "payload": encoded,
+		"type": "send", "event_id": eventID, "to_void_id": recipientID, "payload_base64": encoded,
 	})
 	if err == nil {
 		err = readFrame(ctx, sender, &result)
@@ -400,20 +445,37 @@ func exchange(ctx context.Context, sender, recipient *websocket.Conn, senderID, 
 		<-incoming
 		return relayEnvelope{}, result, err
 	}
-	if result.Type != "result" || result.RequestID != requestID || result.Status != "forwarded" {
+	if result.Type != "accepted" || result.EventID != eventID || result.CreatedAt.IsZero() || !result.ExpiresAt.Equal(result.CreatedAt.Add(queue.Retention)) {
 		cancel()
 		<-incoming
-		return relayEnvelope{}, result, errors.New("server did not report transport forwarding")
+		return relayEnvelope{}, result, errors.New("server did not acknowledge temporary queue storage")
 	}
 	receivedMessage := <-incoming
 	if receivedMessage.err != nil {
 		return receivedMessage.frame, result, receivedMessage.err
 	}
 	message := receivedMessage.frame
-	if message.Type != "message" || message.RequestID != requestID || message.SenderID != senderID || message.Payload != encoded {
+	if message.Type != "event" || message.EventID != eventID || message.FromVoidID != senderID || message.Payload != encoded || !message.CreatedAt.Equal(result.CreatedAt) || !message.ExpiresAt.Equal(result.ExpiresAt) {
 		return message, result, errors.New("recipient envelope or opaque ciphertext changed in transit")
 	}
+	if err := acknowledge(ctx, recipient, message); err != nil {
+		return message, result, err
+	}
 	return message, result, nil
+}
+
+func acknowledge(ctx context.Context, recipient *websocket.Conn, message relayEnvelope) error {
+	if err := writeFrame(ctx, recipient, map[string]string{"type": "ack", "sender_void_id": message.FromVoidID, "event_id": message.EventID}); err != nil {
+		return err
+	}
+	var result relayEnvelope
+	if err := readFrame(ctx, recipient, &result); err != nil {
+		return err
+	}
+	if result.Type != "ack_ok" || result.EventID != message.EventID || result.SenderVoidID != message.FromVoidID {
+		return errors.New("recipient acknowledgment was not confirmed")
+	}
+	return nil
 }
 
 func writeFrame(ctx context.Context, conn *websocket.Conn, value any) error {

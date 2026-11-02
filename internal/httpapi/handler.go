@@ -127,7 +127,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/dm9pZG5vdGhpbmduZXNz/challenges" {
-		fields, requestErr := readFields(w, r, "username", "auth_public_key")
+		fields, requestErr := readFields(w, r, []string{"auth_public_key"}, "username")
 		if err := ctx.Err(); err != nil && (requestErr == nil || requestErr.status != http.StatusGatewayTimeout) {
 			writeServiceError(w, err)
 			return
@@ -149,7 +149,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, result)
 		return
 	}
-	fields, requestErr := readFields(w, r, "challenge_id", "signature")
+	fields, requestErr := readFields(w, r, []string{"challenge_id", "signature"})
 	if err := ctx.Err(); err != nil && (requestErr == nil || requestErr.status != http.StatusGatewayTimeout) {
 		writeServiceError(w, err)
 		return
@@ -176,7 +176,7 @@ type requestError struct {
 	code, message string
 }
 
-func readFields(w http.ResponseWriter, r *http.Request, required ...string) (map[string]string, *requestError) {
+func readFields(w http.ResponseWriter, r *http.Request, required []string, optional ...string) (map[string]string, *requestError) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return nil, &requestError{http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json."}
@@ -209,7 +209,7 @@ func readFields(w http.ResponseWriter, r *http.Request, required ...string) (map
 	if !utf8.Valid(body) {
 		return nil, invalidJSON()
 	}
-	fields, err := parseStringObject(body, required)
+	fields, err := parseStringObject(body, required, optional...)
 	if err != nil {
 		return nil, invalidJSON()
 	}
@@ -217,7 +217,7 @@ func readFields(w http.ResponseWriter, r *http.Request, required ...string) (map
 }
 
 func invalidJSON() *requestError {
-	return &requestError{http.StatusBadRequest, "invalid_input", "Request must be a JSON object containing exactly the required string fields."}
+	return &requestError{http.StatusBadRequest, "invalid_input", "Request must be a JSON object containing the required string fields and only supported optional string fields."}
 }
 
 func decodeBase64(encoded string) ([]byte, error) {

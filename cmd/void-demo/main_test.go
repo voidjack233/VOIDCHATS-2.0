@@ -26,25 +26,28 @@ func TestDemoRegistersAuthenticatesRelaysAndDisconnects(t *testing.T) {
 		t.Fatalf("active connections: during exchange=%d after cleanup=%d", report.Active, report.FinalActive)
 	}
 	for _, exchange := range []struct {
-		name, sender, requestID, ciphertext string
-		message, result                     relayEnvelope
+		name, sender, eventID, ciphertext string
+		message, result                   relayEnvelope
 	}{
-		{"Alice to Bob", report.Alice.VoidID, "demo-alice-1", simulatedCiphertext, report.Forward, report.Forwarded},
-		{"Bob to Alice", report.Bob.VoidID, "demo-bob-1", replyCiphertext, report.Reverse, report.Replied},
+		{"Alice to Bob", report.Alice.VoidID, forwardEventID, simulatedCiphertext, report.Forward, report.Forwarded},
+		{"Bob to Alice", report.Bob.VoidID, replyEventID, replyCiphertext, report.Reverse, report.Replied},
 	} {
-		if exchange.message.Type != "message" || exchange.message.RequestID != exchange.requestID || exchange.message.SenderID != exchange.sender {
+		if exchange.message.Type != "event" || exchange.message.EventID != exchange.eventID || exchange.message.FromVoidID != exchange.sender {
 			t.Errorf("%s: wrong authenticated sender or request metadata: %+v", exchange.name, exchange.message)
 		}
 		payload, err := base64.StdEncoding.Strict().DecodeString(exchange.message.Payload)
 		if err != nil || string(payload) != exchange.ciphertext {
 			t.Errorf("%s: opaque payload changed in transit", exchange.name)
 		}
-		if exchange.result.Type != "result" || exchange.result.RequestID != exchange.requestID || exchange.result.Status != "forwarded" {
+		if exchange.result.Type != "accepted" || exchange.result.EventID != exchange.eventID || exchange.result.CreatedAt.IsZero() || exchange.result.ExpiresAt.IsZero() {
 			t.Errorf("%s: unexpected forwarding result: %+v", exchange.name, exchange.result)
 		}
 	}
-	if report.Offline.Type != "result" || report.Offline.RequestID != "demo-offline-1" || report.Offline.Status != "unavailable" {
+	if report.Offline.Type != "accepted" || report.Offline.EventID != offlineEventID {
 		t.Errorf("offline recipient result: %+v", report.Offline)
+	}
+	if report.Reconnected.Type != "event" || report.Reconnected.EventID != offlineEventID || report.Reconnected.FromVoidID != report.Alice.VoidID || report.FinalPending != 0 {
+		t.Errorf("offline queue delivery/deletion: event=%+v remaining=%d", report.Reconnected, report.FinalPending)
 	}
 	// The output exposes only explicitly simulated message fixtures and public
 	// routing metadata; handshake secrets and proofs must remain out of logs.

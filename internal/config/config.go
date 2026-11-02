@@ -30,7 +30,6 @@ type Config struct {
 	WSMaxConnections      int
 	WSQueueSize           int
 	WSMaxPayloadBytes     int
-	MessagingEnabled      bool
 	APIAudience           string
 }
 
@@ -96,21 +95,17 @@ func Load(path string) (Config, error) {
 	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
 		return Config{}, errors.New("invalid VOID_HTTP_ADDR")
 	}
-	c.MessagingEnabled, err = strconv.ParseBool(get("VOID_MESSAGING_ENABLED", "false"))
-	if err != nil {
-		return Config{}, errors.New("invalid VOID_MESSAGING_ENABLED")
-	}
 	c.APIAudience = get("VOID_API_AUDIENCE", "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz")
 	audience, err := url.Parse(c.APIAudience)
 	if err != nil || audience.Scheme != "https" || audience.Host == "" || audience.User != nil || audience.RawQuery != "" || audience.Fragment != "" || audience.RawPath != "" || strings.HasSuffix(audience.Path, "/") {
 		return Config{}, errors.New("invalid VOID_API_AUDIENCE")
 	}
-	if c.MessagingEnabled {
-		host, _, _ := net.SplitHostPort(c.ListenAddr)
-		ip := net.ParseIP(host)
-		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-			return Config{}, errors.New("messaging requires a loopback listener behind HTTPS termination")
-		}
+	// Relay authentication and encrypted events require HTTPS termination;
+	// preserve the existing loopback listener and owner-managed tunnel.
+	host, _, _ := net.SplitHostPort(c.ListenAddr)
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return Config{}, errors.New("relay requires a loopback listener behind HTTPS termination")
 	}
 	c.DatabaseURL = get("DATABASE_URL", "")
 	if c.DatabaseURL == "" {
@@ -157,7 +152,7 @@ func Load(path string) (Config, error) {
 		{"VOID_MAX_CONCURRENT_REQUESTS", 64, 1, 1024, &c.MaxConcurrentRequests},
 		{"VOID_WS_MAX_CONNECTIONS", 256, 1, 4096, &c.WSMaxConnections},
 		{"VOID_WS_QUEUE_SIZE", 16, 1, 256, &c.WSQueueSize},
-		{"VOID_WS_MAX_PAYLOAD_BYTES", 16384, 1, 16384, &c.WSMaxPayloadBytes},
+		{"VOID_WS_MAX_PAYLOAD_BYTES", 1048576, 1, 1048576, &c.WSMaxPayloadBytes},
 	}
 	for _, field := range fields {
 		n, err := integer(field.key, field.fallback, field.min, field.max)

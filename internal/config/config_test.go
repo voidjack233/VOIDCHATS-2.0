@@ -101,7 +101,7 @@ func TestWebSocketDefaultsAndBounds(t *testing.T) {
 	t.Setenv("PGUSER", "app")
 	t.Setenv("PGDATABASE", "void")
 	c, err := Load("")
-	if err != nil || c.WSAuthTimeout != 10*time.Second || c.WSMaxConnections != 256 || c.WSQueueSize != 16 || c.WSMaxPayloadBytes != 16384 {
+	if err != nil || c.WSAuthTimeout != 10*time.Second || c.WSMaxConnections != 256 || c.WSQueueSize != 16 || c.WSMaxPayloadBytes != 1048576 {
 		t.Fatalf("invalid WebSocket defaults: %v", err)
 	}
 	for _, tt := range []struct{ key, value string }{
@@ -111,7 +111,7 @@ func TestWebSocketDefaultsAndBounds(t *testing.T) {
 		{"VOID_WS_MAX_CONNECTIONS", "0"},
 		{"VOID_WS_QUEUE_SIZE", "257"},
 		{"VOID_WS_QUEUE_SIZE", "-1"},
-		{"VOID_WS_MAX_PAYLOAD_BYTES", "16385"},
+		{"VOID_WS_MAX_PAYLOAD_BYTES", "1048577"},
 		{"VOID_WS_MAX_PAYLOAD_BYTES", "0"},
 	} {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {
@@ -123,16 +123,14 @@ func TestWebSocketDefaultsAndBounds(t *testing.T) {
 	}
 }
 
-func TestMessagingRequiresExplicitEnablementAndPrivateListener(t *testing.T) {
+func TestRelayRequiresPrivateListenerAndValidAudience(t *testing.T) {
 	t.Setenv("PGUSER", "app")
 	t.Setenv("PGDATABASE", "void")
-	t.Setenv("VOID_MESSAGING_ENABLED", "false")
 	t.Setenv("VOID_API_AUDIENCE", "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz")
 	c, err := Load("")
-	if err != nil || c.MessagingEnabled || c.APIAudience != "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz" {
-		t.Fatalf("unexpected messaging defaults: %v", err)
+	if err != nil || c.APIAudience != "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz" {
+		t.Fatalf("unexpected relay defaults: %v", err)
 	}
-	t.Setenv("VOID_MESSAGING_ENABLED", "true")
 	if _, err := Load(""); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +138,7 @@ func TestMessagingRequiresExplicitEnablementAndPrivateListener(t *testing.T) {
 		t.Run(listener, func(t *testing.T) {
 			t.Setenv("VOID_HTTP_ADDR", listener)
 			if _, err := Load(""); err == nil {
-				t.Fatal("accepted public plaintext bearer listener")
+				t.Fatal("accepted public plaintext relay listener")
 			}
 		})
 	}

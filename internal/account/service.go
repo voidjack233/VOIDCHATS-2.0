@@ -33,7 +33,7 @@ var (
 
 type Account struct {
 	VoidID    string    `json:"void_id"`
-	Username  string    `json:"username"`
+	Username  string    `json:"username,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -81,6 +81,9 @@ func NewService(repo Repository, ids IDGenerator, opts Options) (*Service, error
 }
 
 func validUsername(username string) bool {
+	if username == "" {
+		return true // Optional public metadata; identity is the registered key.
+	}
 	if !utf8.ValidString(username) || strings.TrimSpace(username) != username {
 		return false
 	}

@@ -21,14 +21,14 @@ func decodeFrame(body []byte) (map[string]string, error) {
 	if token, err := dec.Token(); err != nil || token != json.Delim('{') {
 		return nil, errInvalidFrame
 	}
-	fields := make(map[string]string, 4)
+	fields := make(map[string]string, 8)
 	for dec.More() {
 		token, err := dec.Token()
 		if err != nil {
 			return nil, errInvalidFrame
 		}
 		key, ok := token.(string)
-		if !ok || len(fields) >= 4 {
+		if !ok || len(fields) >= 8 {
 			return nil, errInvalidFrame
 		}
 		if _, exists := fields[key]; exists {

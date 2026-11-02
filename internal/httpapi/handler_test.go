@@ -96,6 +96,42 @@ func TestChallengeAndRegistrationResponses(t *testing.T) {
 	}
 }
 
+func TestUsernameIsOptionalButNotNullable(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{42}, 32))
+	for _, body := range []string{
+		fmt.Sprintf(`{"auth_public_key":%q}`, key),
+		fmt.Sprintf(`{"username":"","auth_public_key":%q}`, key),
+	} {
+		called := false
+		h := New(stubService{challenge: func(name string, gotKey []byte) (account.Challenge, error) {
+			called = true
+			if name != "" || !bytes.Equal(gotKey, bytes.Repeat([]byte{42}, 32)) {
+				t.Fatalf("optional name/key changed: %q %x", name, gotKey)
+			}
+			return account.Challenge{ChallengeID: "challenge"}, nil
+		}}, nil, Options{})
+		w := serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", body)
+		if w.Code != http.StatusCreated || !called {
+			t.Fatalf("optional name rejected: %d %s", w.Code, w.Body.String())
+		}
+	}
+	w := serve(New(stubService{register: func(context.Context, string, []byte) (account.Account, error) {
+		return account.Account{VoidID: "42", CreatedAt: time.Unix(100, 0).UTC()}, nil
+	}}, nil, Options{}), http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", registrationBody())
+	var result map[string]json.RawMessage
+	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result) != 2 || result["void_id"] == nil || result["created_at"] == nil {
+		t.Fatalf("username-free account response: %d %s", w.Code, w.Body.String())
+	}
+	// Null remains an invalid supplied value; optional means omitted or empty.
+	w = serve(New(stubService{challenge: func(string, []byte) (account.Challenge, error) {
+		t.Fatal("null username reached service")
+		return account.Challenge{}, nil
+	}}, nil, Options{}), http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", fmt.Sprintf(`{"username":null,"auth_public_key":%q}`, key))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("nullable username accepted: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestStrictJSONRejectsAmbiguousOrUnexpectedInput(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{42}, 32))
 	tests := []struct {

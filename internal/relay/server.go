@@ -10,22 +10,25 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 
 	"void-nothingness/internal/auth"
+	"void-nothingness/internal/queue"
 )
 
 const (
-	DefaultMaxPayloadBytes = 16 * 1024
-	DefaultMaxFrameBytes   = 24 * 1024
+	DefaultMaxPayloadBytes = queue.MaxPayloadBytes
+	DefaultMaxFrameBytes   = ((DefaultMaxPayloadBytes + 2) / 3 * 4) + 2048
+	maxQueuedBytes         = 2 << 20
 )
 
 var errStopped = errors.New("relay session stopped")
 
 // Options uses safe defaults for zero values. Capacity and duration overrides
-// permit smaller deployments and deterministic tests; payloads remain <=16 KiB.
+// permit smaller deployments and deterministic tests; payloads remain <=1 MiB.
 type Options struct {
 	MaxConnections  int
 	QueueSize       int
@@ -37,6 +40,7 @@ type Options struct {
 	WriteTimeout    time.Duration
 	ForwardTimeout  time.Duration
 	Logger          *slog.Logger
+	Queue           *queue.Service
 }
 
 // Server is an HTTP handler for the WebSocket endpoint. Close must be called
@@ -48,6 +52,13 @@ type Server struct {
 	closed      bool
 	connections map[*session]struct{}
 	active      map[string]*session
+	rates       map[string]commandBucket
+	slots       chan struct{}
+}
+
+type commandBucket struct {
+	tokens float64
+	seen   time.Time
 }
 
 type session struct {
@@ -56,9 +67,15 @@ type session struct {
 	cancel context.CancelFunc
 	out    chan outbound
 	// conn is assigned after admission; shutdown may happen during the upgrade.
-	connMu sync.Mutex
-	conn   socket
-	voidID string // Set once at activation before publishing in the registry.
+	connMu         sync.Mutex
+	conn           socket
+	voidID         string // Set once at activation before publishing in the registry.
+	deliveryMu     sync.Mutex
+	inFlightSender string
+	inFlightID     string
+	inFlightExpiry time.Time
+	wake           chan struct{}
+	queuedBytes    atomic.Int64
 }
 
 // The transport contract also permits deterministic slow-write tests without
@@ -80,8 +97,8 @@ type outbound struct {
 // New creates a server with one active connection per VOID-ID. A new successful
 // authentication replaces the previous connection; failed attempts never do.
 func New(authenticator *auth.Service, opts Options) (*Server, error) {
-	if authenticator == nil {
-		return nil, errors.New("authentication service is required")
+	if authenticator == nil || opts.Queue == nil {
+		return nil, errors.New("authentication and delivery queue services are required")
 	}
 	if opts.MaxConnections == 0 {
 		opts.MaxConnections = 256
@@ -120,7 +137,7 @@ func New(authenticator *auth.Service, opts Options) (*Server, error) {
 		opts.PongTimeout <= 0 || opts.WriteTimeout <= 0 || opts.ForwardTimeout <= 0 {
 		return nil, errors.New("invalid relay configuration")
 	}
-	return &Server{auth: authenticator, opts: opts, connections: make(map[*session]struct{}), active: make(map[string]*session)}, nil
+	return &Server{auth: authenticator, opts: opts, connections: make(map[*session]struct{}), active: make(map[string]*session), rates: make(map[string]commandBucket), slots: make(chan struct{}, 64)}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +152,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A standalone context is required after HTTP hijacking; request contexts
 	// are not a reliable lifetime for upgraded connections.
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &session{server: s, ctx: ctx, cancel: cancel, out: make(chan outbound, s.opts.QueueSize)}
+	client := &session{server: s, ctx: ctx, cancel: cancel, out: make(chan outbound, s.opts.QueueSize), wake: make(chan struct{}, 1)}
 	s.mu.Lock()
 	if s.closed || len(s.connections) >= s.opts.MaxConnections {
 		s.mu.Unlock()
@@ -159,7 +176,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.CloseNow()
 		return
 	}
-	conn.SetReadLimit(s.opts.MaxFrameBytes)
+	// Authentication never needs a full ciphertext frame. Keep unproven
+	// connections on a smaller input budget until ownership is established.
+	conn.SetReadLimit(min(s.opts.MaxFrameBytes, 8*1024))
 	defer client.stop()
 	s.opts.Logger.Info("websocket connected")
 	defer func() { s.opts.Logger.Info("websocket disconnected", "void_id", client.voidID) }()
@@ -172,6 +191,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !client.authenticate() {
 		return
 	}
+	conn.SetReadLimit(s.opts.MaxFrameBytes)
+	workers.Add(1)
+	go func() { defer workers.Done(); client.deliveryLoop() }()
 	client.readLoop()
 }
 
@@ -224,6 +246,12 @@ func (s *Server) isCurrent(client *session) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return !s.closed && client.ctx.Err() == nil && s.active[client.voidID] == client
+}
+
+func (s *Server) canWrite(client *session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && client.ctx.Err() == nil && (client.voidID == "" || s.active[client.voidID] == client)
 }
 
 func (client *session) authenticate() bool {
@@ -295,9 +323,7 @@ func (client *session) authenticate() bool {
 		s.mu.Unlock()
 		return false
 	}
-	select {
-	case client.out <- item:
-	default:
+	if !client.enqueue(item) {
 		s.mu.Unlock()
 		return false
 	}
@@ -338,18 +364,7 @@ func (client *session) readLoop() {
 		if !client.server.isCurrent(client) {
 			return
 		}
-		if !exactFields(fields, "send", "request_id", "recipient_id", "payload") ||
-			!validRequestID(fields["request_id"]) || !auth.ValidVoidID(fields["recipient_id"]) {
-			client.sendError(client.ctx, "invalid_frame")
-			return
-		}
-		if _, err := decodeBase64(fields["payload"], client.server.opts.MaxPayloadBytes); err != nil {
-			client.sendError(client.ctx, "invalid_frame")
-			return
-		}
-		status := client.forward(fields)
-		client.server.opts.Logger.Info("websocket relay result", "sender_id", client.voidID, "recipient_id", fields["recipient_id"], "status", status)
-		if err := client.transmit(client.ctx, map[string]string{"type": "result", "request_id": fields["request_id"], "status": status}); err != nil {
+		if !client.handleCommand(fields) {
 			return
 		}
 	}
@@ -358,7 +373,7 @@ func (client *session) readLoop() {
 func (client *session) forward(fields map[string]string) string {
 	ctx, cancel := context.WithTimeout(client.ctx, client.server.opts.ForwardTimeout)
 	defer cancel()
-	body, _ := json.Marshal(map[string]string{"type": "message", "request_id": fields["request_id"], "sender_id": client.voidID, "payload": fields["payload"]})
+	body, _ := json.Marshal(map[string]string{"type": "online_event", "exchange_id": fields["exchange_id"], "from_void_id": client.voidID, "payload_base64": fields["payload_base64"]})
 	item := outbound{body: body, ctx: ctx, receipt: make(chan error, 1), source: client}
 	s := client.server
 	s.mu.Lock()
@@ -366,19 +381,17 @@ func (client *session) forward(fields map[string]string) string {
 		s.mu.Unlock()
 		return "failed"
 	}
-	recipient := s.active[fields["recipient_id"]]
+	recipient := s.active[fields["to_void_id"]]
 	if recipient == nil || recipient.ctx.Err() != nil {
 		s.mu.Unlock()
 		return "unavailable"
 	}
 	// Never block the shared registry on a slow recipient or a full queue.
-	select {
-	case recipient.out <- item:
-		s.mu.Unlock()
-	default:
+	if !recipient.enqueue(item) {
 		s.mu.Unlock()
 		return "overloaded"
 	}
+	s.mu.Unlock()
 	if waitReceipt(ctx, recipient.ctx, item.receipt) != nil {
 		return "failed"
 	}
@@ -409,13 +422,7 @@ func (client *session) transmit(ctx context.Context, value any) error {
 	ctx, cancel := context.WithTimeout(ctx, client.server.opts.WriteTimeout)
 	defer cancel()
 	item := outbound{body: body, ctx: ctx, receipt: make(chan error, 1)}
-	select {
-	case <-ctx.Done():
-		return errStopped
-	case <-client.ctx.Done():
-		return errStopped
-	case client.out <- item:
-	default:
+	if !client.enqueue(item) {
 		return errStopped
 	}
 	return waitReceipt(ctx, client.ctx, item.receipt)
@@ -431,19 +438,44 @@ func (client *session) writeLoop() {
 		case <-client.ctx.Done():
 			return
 		case item := <-client.out:
-			if item.ctx.Err() != nil || client.ctx.Err() != nil || item.source != nil && !client.server.isCurrent(item.source) {
+			if item.ctx.Err() != nil || !client.server.canWrite(client) || item.source != nil && !client.server.isCurrent(item.source) {
+				client.queuedBytes.Add(-int64(len(item.body)))
 				item.receipt <- errStopped
 				continue
 			}
 			ctx, cancel := context.WithTimeout(item.ctx, client.server.opts.WriteTimeout)
 			err := client.conn.Write(ctx, websocket.MessageText, item.body)
 			cancel()
+			client.queuedBytes.Add(-int64(len(item.body)))
 			item.receipt <- err
 			if err != nil {
 				client.stop()
 				return
 			}
 		}
+	}
+}
+
+func (client *session) enqueue(item outbound) bool {
+	if client.ctx.Err() != nil || item.ctx.Err() != nil {
+		return false
+	}
+	size := int64(len(item.body))
+	for {
+		previous := client.queuedBytes.Load()
+		if previous+size > maxQueuedBytes {
+			return false
+		}
+		if client.queuedBytes.CompareAndSwap(previous, previous+size) {
+			break
+		}
+	}
+	select {
+	case client.out <- item:
+		return true
+	default:
+		client.queuedBytes.Add(-size)
+		return false
 	}
 }
 

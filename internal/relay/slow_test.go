@@ -101,7 +101,7 @@ func (c *controlledSocket) CloseNow() error                { c.once.Do(func() { 
 func fakeSession(t *testing.T, s *Server, id string, conn socket) *session {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &session{server: s, ctx: ctx, cancel: cancel, out: make(chan outbound, s.opts.QueueSize), conn: conn, voidID: id}
+	client := &session{server: s, ctx: ctx, cancel: cancel, out: make(chan outbound, s.opts.QueueSize), wake: make(chan struct{}, 1), conn: conn, voidID: id}
 	s.mu.Lock()
 	s.connections[client] = struct{}{}
 	s.active[id] = client
