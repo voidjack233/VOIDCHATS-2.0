@@ -34,8 +34,8 @@ func (keys lifetimeKeys) AuthenticationKey(_ context.Context, id int64) ([]byte,
 	return bytes.Clone(key), nil
 }
 
-func (lifetimeKeys) Insert(_ context.Context, id int64, username string, _ []byte) (account.Account, error) {
-	return account.Account{VoidID: strconv.FormatInt(id, 10), Username: username, CreatedAt: time.Now().UTC()}, nil
+func (lifetimeKeys) Insert(_ context.Context, id int64, _ []byte) (account.Account, error) {
+	return account.Account{VoidID: strconv.FormatInt(id, 10), CreatedAt: time.Now().UTC()}, nil
 }
 
 type lifetimeIDs struct{}
@@ -150,7 +150,7 @@ func TestAuthenticatedWebSocketsOutliveHTTPDeadlines(t *testing.T) {
 	if health.StatusCode != http.StatusOK {
 		t.Fatalf("health status = %d", health.StatusCode)
 	}
-	body, err := json.Marshal(map[string]string{"username": "deadline-registration", "auth_public_key": base64.StdEncoding.EncodeToString(alicePublic)})
+	body, err := json.Marshal(map[string]string{"auth_public_key": base64.StdEncoding.EncodeToString(alicePublic)})
 	if err != nil {
 		t.Fatal(err)
 	}

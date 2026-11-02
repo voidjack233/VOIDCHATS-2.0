@@ -19,13 +19,13 @@ import (
 )
 
 type stubService struct {
-	challenge func(string, []byte) (account.Challenge, error)
+	challenge func([]byte) (account.Challenge, error)
 	register  func(context.Context, string, []byte) (account.Account, error)
 }
 
-func (s stubService) Challenge(username string, key []byte) (account.Challenge, error) {
+func (s stubService) Challenge(key []byte) (account.Challenge, error) {
 	if s.challenge != nil {
-		return s.challenge(username, key)
+		return s.challenge(key)
 	}
 	return account.Challenge{ChallengeID: "challenge", Message: "c2lnbiBtZQ==", ExpiresAt: time.Unix(100, 0).UTC()}, nil
 }
@@ -34,7 +34,7 @@ func (s stubService) Register(ctx context.Context, challengeID string, signature
 	if s.register != nil {
 		return s.register(ctx, challengeID, signature)
 	}
-	return account.Account{VoidID: "9223372036854775807", Username: "Alice", CreatedAt: time.Unix(100, 0).UTC()}, nil
+	return account.Account{VoidID: "9223372036854775807", CreatedAt: time.Unix(100, 0).UTC()}, nil
 }
 
 func serve(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -46,7 +46,7 @@ func serve(h http.Handler, method, path, body string) *httptest.ResponseRecorder
 }
 
 func challengeBody() string {
-	return fmt.Sprintf(`{"username":"Alice","auth_public_key":%q}`, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{42}, 32)))
+	return fmt.Sprintf(`{"auth_public_key":%q}`, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{42}, 32)))
 }
 
 func registrationBody() string {
@@ -56,9 +56,9 @@ func registrationBody() string {
 func TestChallengeAndRegistrationResponses(t *testing.T) {
 	var challengeCalled, registrationCalled bool
 	service := stubService{
-		challenge: func(username string, key []byte) (account.Challenge, error) {
+		challenge: func(key []byte) (account.Challenge, error) {
 			challengeCalled = true
-			if username != "Alice" || !bytes.Equal(key, bytes.Repeat([]byte{42}, 32)) {
+			if !bytes.Equal(key, bytes.Repeat([]byte{42}, 32)) {
 				t.Fatal("challenge received incorrect decoded inputs")
 			}
 			return account.Challenge{ChallengeID: "challenge", Message: "c2lnbiBtZQ==", ExpiresAt: time.Unix(100, 0).UTC()}, nil
@@ -71,7 +71,7 @@ func TestChallengeAndRegistrationResponses(t *testing.T) {
 			if _, ok := ctx.Deadline(); !ok {
 				t.Fatal("registration has no deadline")
 			}
-			return account.Account{VoidID: "9223372036854775807", Username: "Alice", CreatedAt: time.Unix(100, 0).UTC()}, nil
+			return account.Account{VoidID: "9223372036854775807", CreatedAt: time.Unix(100, 0).UTC()}, nil
 		},
 	}
 	h := New(service, nil, Options{})
@@ -88,7 +88,7 @@ func TestChallengeAndRegistrationResponses(t *testing.T) {
 		t.Fatalf("registration: status %d body %s", w.Code, w.Body.String())
 	}
 	var result map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result["void_id"] != "9223372036854775807" || len(result) != 3 {
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result["void_id"] != "9223372036854775807" || result["created_at"] != "1970-01-01T00:01:40Z" || len(result) != 2 {
 		t.Fatalf("account should expose only public identity fields: %s", w.Body.String())
 	}
 	if w.Header().Get("Set-Cookie") != "" || w.Header().Get("Authorization") != "" {
@@ -96,39 +96,20 @@ func TestChallengeAndRegistrationResponses(t *testing.T) {
 	}
 }
 
-func TestUsernameIsOptionalButNotNullable(t *testing.T) {
+func TestChallengeRejectsUsername(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{42}, 32))
-	for _, body := range []string{
-		fmt.Sprintf(`{"auth_public_key":%q}`, key),
-		fmt.Sprintf(`{"username":"","auth_public_key":%q}`, key),
-	} {
-		called := false
-		h := New(stubService{challenge: func(name string, gotKey []byte) (account.Challenge, error) {
-			called = true
-			if name != "" || !bytes.Equal(gotKey, bytes.Repeat([]byte{42}, 32)) {
-				t.Fatalf("optional name/key changed: %q %x", name, gotKey)
+	for _, username := range []string{`"Alice"`, `""`, `null`} {
+		t.Run(username, func(t *testing.T) {
+			h := New(stubService{challenge: func([]byte) (account.Challenge, error) {
+				t.Fatal("username reached service")
+				return account.Challenge{}, nil
+			}}, nil, Options{})
+			body := fmt.Sprintf(`{"username":%s,"auth_public_key":%q}`, username, key)
+			w := serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("username accepted: %d %s", w.Code, w.Body.String())
 			}
-			return account.Challenge{ChallengeID: "challenge"}, nil
-		}}, nil, Options{})
-		w := serve(h, http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", body)
-		if w.Code != http.StatusCreated || !called {
-			t.Fatalf("optional name rejected: %d %s", w.Code, w.Body.String())
-		}
-	}
-	w := serve(New(stubService{register: func(context.Context, string, []byte) (account.Account, error) {
-		return account.Account{VoidID: "42", CreatedAt: time.Unix(100, 0).UTC()}, nil
-	}}, nil, Options{}), http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/accounts", registrationBody())
-	var result map[string]json.RawMessage
-	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result) != 2 || result["void_id"] == nil || result["created_at"] == nil {
-		t.Fatalf("username-free account response: %d %s", w.Code, w.Body.String())
-	}
-	// Null remains an invalid supplied value; optional means omitted or empty.
-	w = serve(New(stubService{challenge: func(string, []byte) (account.Challenge, error) {
-		t.Fatal("null username reached service")
-		return account.Challenge{}, nil
-	}}, nil, Options{}), http.MethodPost, "/dm9pZG5vdGhpbmduZXNz/challenges", fmt.Sprintf(`{"username":null,"auth_public_key":%q}`, key))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("nullable username accepted: %d %s", w.Code, w.Body.String())
+		})
 	}
 }
 
@@ -140,22 +121,22 @@ func TestStrictJSONRejectsAmbiguousOrUnexpectedInput(t *testing.T) {
 		{"empty", ""},
 		{"null object", "null"},
 		{"array", "[]"},
-		{"unknown field", fmt.Sprintf(`{"username":"Alice","auth_public_key":%q,"private_key":"secret"}`, key)},
-		{"duplicate field", fmt.Sprintf(`{"username":"Alice","username":"Bob","auth_public_key":%q}`, key)},
-		{"escaped duplicate", fmt.Sprintf(`{"username":"Alice","\u0075sername":"Bob","auth_public_key":%q}`, key)},
-		{"missing field", `{"username":"Alice"}`},
-		{"null field", fmt.Sprintf(`{"username":null,"auth_public_key":%q}`, key)},
-		{"numeric field", fmt.Sprintf(`{"username":123,"auth_public_key":%q}`, key)},
-		{"nested field", fmt.Sprintf(`{"username":{},"auth_public_key":%q}`, key)},
+		{"unknown field", fmt.Sprintf(`{"auth_public_key":%q,"private_key":"secret"}`, key)},
+		{"duplicate field", fmt.Sprintf(`{"auth_public_key":%q,"auth_public_key":"AA=="}`, key)},
+		{"escaped duplicate", fmt.Sprintf(`{"auth_public_key":%q,"\u0061uth_public_key":"AA=="}`, key)},
+		{"missing field", `{}`},
+		{"null field", `{"auth_public_key":null}`},
+		{"numeric field", `{"auth_public_key":123}`},
+		{"nested field", `{"auth_public_key":{}}`},
 		{"trailing object", challengeBody() + `{}`},
 		{"trailing garbage", challengeBody() + `garbage`},
-		{"truncated object", `{"username":"Alice"`},
-		{"invalid UTF8", `{"username":"` + string([]byte{0xff}) + `","auth_public_key":"AA=="}`},
-		{"case variant field", fmt.Sprintf(`{"Username":"Alice","auth_public_key":%q}`, key)},
+		{"truncated object", `{"auth_public_key":"AA=="`},
+		{"invalid UTF8", `{"auth_public_key":"` + string([]byte{0xff}) + `"}`},
+		{"case variant field", fmt.Sprintf(`{"Auth_public_key":%q}`, key)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := New(stubService{challenge: func(string, []byte) (account.Challenge, error) {
+			h := New(stubService{challenge: func([]byte) (account.Challenge, error) {
 				t.Fatal("invalid request reached service")
 				return account.Challenge{}, nil
 			}}, nil, Options{})
@@ -177,7 +158,7 @@ func TestBase64MustBeCanonicalStandardEncoding(t *testing.T) {
 	for _, value := range []string{"not-base64", "AQ", "AQ_+", "AR==", "AQ==\n", " AQ=="} {
 		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
 			for _, endpoint := range []string{"/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts"} {
-				body := fmt.Sprintf(`{"username":"Alice","auth_public_key":%q}`, value)
+				body := fmt.Sprintf(`{"auth_public_key":%q}`, value)
 				if endpoint == "/dm9pZG5vdGhpbmduZXNz/accounts" {
 					body = fmt.Sprintf(`{"challenge_id":"challenge","signature":%q}`, value)
 				}
@@ -244,7 +225,7 @@ func TestRoutingMethodsAndSecurityHeaders(t *testing.T) {
 
 func TestObsoleteRoutesAreNotExposed(t *testing.T) {
 	service := stubService{
-		challenge: func(string, []byte) (account.Challenge, error) {
+		challenge: func([]byte) (account.Challenge, error) {
 			t.Fatal("obsolete challenge route reached service")
 			return account.Challenge{}, nil
 		},
@@ -369,7 +350,7 @@ func TestInterruptedBodyDoesNotCreateChallengeOrRegister(t *testing.T) {
 		for _, endpoint := range []string{"/dm9pZG5vdGhpbmduZXNz/challenges", "/dm9pZG5vdGhpbmduZXNz/accounts"} {
 			t.Run(fmt.Sprintf("%s/timeout=%v", endpoint, timedOut), func(t *testing.T) {
 				service := stubService{
-					challenge: func(string, []byte) (account.Challenge, error) {
+					challenge: func([]byte) (account.Challenge, error) {
 						t.Fatal("interrupted body created a challenge")
 						return account.Challenge{}, nil
 					},

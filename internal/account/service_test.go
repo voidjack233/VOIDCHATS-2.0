@@ -26,17 +26,17 @@ func (f idFunc) Next(ctx context.Context) (int64, error) { return f(ctx) }
 
 func (g *fakeIDs) Next(context.Context) (int64, error) { return g.n.Add(1), nil }
 
-type repositoryFunc func(context.Context, int64, string, []byte) (Account, error)
+type repositoryFunc func(context.Context, int64, []byte) (Account, error)
 
-func (f repositoryFunc) Insert(ctx context.Context, id int64, name string, key []byte) (Account, error) {
-	return f(ctx, id, name, key)
+func (f repositoryFunc) Insert(ctx context.Context, id int64, key []byte) (Account, error) {
+	return f(ctx, id, key)
 }
 
 func testService(t *testing.T, repo Repository) (*Service, ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	if repo == nil {
-		repo = repositoryFunc(func(_ context.Context, id int64, name string, _ []byte) (Account, error) {
-			return Account{VoidID: strconv.FormatInt(id, 10), Username: name, CreatedAt: time.Now().UTC()}, nil
+		repo = repositoryFunc(func(_ context.Context, id int64, _ []byte) (Account, error) {
+			return Account{VoidID: strconv.FormatInt(id, 10), CreatedAt: time.Now().UTC()}, nil
 		})
 	}
 	s, err := NewService(repo, &fakeIDs{}, Options{ChallengeTTL: time.Minute, MaxChallenges: 32})
@@ -52,7 +52,7 @@ func testService(t *testing.T, repo Repository) (*Service, ed25519.PublicKey, ed
 
 func signedChallenge(t *testing.T, s *Service, pub ed25519.PublicKey, priv ed25519.PrivateKey) (Challenge, []byte) {
 	t.Helper()
-	c, err := s.Challenge("void-user", pub)
+	c, err := s.Challenge(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestRegistrationAndReplay(t *testing.T) {
 	s, pub, priv := testService(t, nil)
 	c, sig := signedChallenge(t, s, pub, priv)
 	a, err := s.Register(context.Background(), c.ChallengeID, sig)
-	if err != nil || a.VoidID != "1" || a.Username != "void-user" || a.CreatedAt.IsZero() {
+	if err != nil || a.VoidID != "1" || a.CreatedAt.IsZero() {
 		t.Fatalf("registration: %+v %v", a, err)
 	}
 	if _, err = s.Register(context.Background(), c.ChallengeID, sig); !errors.Is(err, ErrInvalidChallenge) {
@@ -75,16 +75,13 @@ func TestRegistrationAndReplay(t *testing.T) {
 	}
 }
 
-func TestRegistrationWithoutUsernameRetainsIdentityProof(t *testing.T) {
+func TestRegistrationIdentityProof(t *testing.T) {
 	var storedKey []byte
-	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, name string, key []byte) (Account, error) {
-		if name != "" {
-			t.Fatalf("optional username replaced with %q", name)
-		}
+	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, key []byte) (Account, error) {
 		storedKey = append([]byte(nil), key...)
 		return Account{VoidID: strconv.FormatInt(id, 10), CreatedAt: time.Now().UTC()}, nil
 	}))
-	c, err := s.Challenge("", pub)
+	c, err := s.Challenge(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,20 +91,20 @@ func TestRegistrationWithoutUsernameRetainsIdentityProof(t *testing.T) {
 	}
 	parts := strings.Split(string(message), "\n")
 	if len(parts) != 7 || parts[0] != "VOID-NOTHINGNESS:register:v1" || parts[1] != c.ChallengeID || parts[3] != base64.StdEncoding.EncodeToString(pub) || parts[4] != "" || parts[5] == "" || parts[6] != "" {
-		t.Fatalf("empty username changed proof framing: %q", message)
+		t.Fatalf("reserved line changed proof framing: %q", message)
 	}
 	a, err := s.Register(context.Background(), c.ChallengeID, ed25519.Sign(priv, message))
-	if err != nil || a.VoidID != "1" || a.Username != "" || string(storedKey) != string(pub) {
-		t.Fatalf("username-free registration: %+v %v", a, err)
+	if err != nil || a.VoidID != "1" || string(storedKey) != string(pub) {
+		t.Fatalf("registration: %+v %v", a, err)
 	}
 	encoded, err := json.Marshal(a)
 	if err != nil || strings.Contains(string(encoded), "username") {
-		t.Fatalf("absent username should be omitted: %s %v", encoded, err)
+		t.Fatalf("account exposed a username: %s %v", encoded, err)
 	}
 	if _, err = s.Register(context.Background(), c.ChallengeID, ed25519.Sign(priv, message)); !errors.Is(err, ErrInvalidChallenge) {
-		t.Fatalf("username-free proof replay: %v", err)
+		t.Fatalf("proof replay: %v", err)
 	}
-	wrong, err := s.Challenge("", pub)
+	wrong, err := s.Challenge(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,22 +114,14 @@ func TestRegistrationWithoutUsernameRetainsIdentityProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = s.Register(context.Background(), wrong.ChallengeID, ed25519.Sign(wrongPrivate, wrongMessage)); !errors.Is(err, ErrInvalidSignature) {
-		t.Fatalf("missing username bypassed key ownership: %v", err)
+		t.Fatalf("registration bypassed key ownership: %v", err)
 	}
 }
 
 func TestValidation(t *testing.T) {
-	s, pub, _ := testService(t, nil)
-	for _, name := range []string{" ", " leading", "trailing ", "\nvoid", "a\x00b", strings.Repeat("界", 33), "a\u202eb", string([]byte{0xff})} {
-		if _, err := s.Challenge(name, pub); !errors.Is(err, ErrInvalidInput) {
-			t.Errorf("accepted invalid username %q: %v", name, err)
-		}
-	}
-	if _, err := s.Challenge(strings.Repeat("界", 32), pub); err != nil {
-		t.Fatal(err)
-	}
+	s, _, _ := testService(t, nil)
 	for _, n := range []int{0, 31, 33} {
-		if _, err := s.Challenge("valid", make([]byte, n)); !errors.Is(err, ErrInvalidInput) {
+		if _, err := s.Challenge(make([]byte, n)); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("key size %d: %v", n, err)
 		}
 	}
@@ -156,14 +145,14 @@ func TestSignatureBindingAndConsumption(t *testing.T) {
 	if _, err := s.Register(context.Background(), c2.ChallengeID, sig2); err != nil {
 		t.Fatal(err)
 	}
-	c, err := s.Challenge("original", pub)
+	c, err := s.Challenge(pub)
 	if err != nil {
 		t.Fatal(err)
 	}
 	message, _ := base64.StdEncoding.DecodeString(c.Message)
-	changed := strings.Replace(string(message), base64.StdEncoding.EncodeToString([]byte("original")), base64.StdEncoding.EncodeToString([]byte("modified")), 1)
+	changed := strings.Replace(string(message), "\n\n", "\n"+base64.StdEncoding.EncodeToString([]byte("modified"))+"\n", 1)
 	if _, err = s.Register(context.Background(), c.ChallengeID, ed25519.Sign(priv, []byte(changed))); !errors.Is(err, ErrInvalidSignature) {
-		t.Fatal("modified binding accepted", err)
+		t.Fatal("modified reserved line accepted", err)
 	}
 }
 
@@ -173,27 +162,27 @@ func TestExpiryAndCapacity(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 	c, sig := signedChallenge(t, s, pub, priv)
-	if _, err := s.Challenge("other", pub); !errors.Is(err, ErrCapacity) {
+	if _, err := s.Challenge(pub); !errors.Is(err, ErrCapacity) {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Minute)
 	if _, err := s.Register(context.Background(), c.ChallengeID, sig); !errors.Is(err, ErrInvalidChallenge) {
 		t.Fatal(err)
 	}
-	if _, err := s.Challenge("other", pub); err != nil {
+	if _, err := s.Challenge(pub); err != nil {
 		t.Fatal("capacity not reclaimed", err)
 	}
 	now = now.Add(time.Minute)
-	if _, err := s.Challenge("later", pub); err != nil {
+	if _, err := s.Challenge(pub); err != nil {
 		t.Fatal("expired challenges not pruned", err)
 	}
 }
 
 func TestConcurrentChallengeConsumption(t *testing.T) {
 	var inserts atomic.Int64
-	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, name string, _ []byte) (Account, error) {
+	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, _ []byte) (Account, error) {
 		inserts.Add(1)
-		return Account{VoidID: strconv.FormatInt(id, 10), Username: name}, nil
+		return Account{VoidID: strconv.FormatInt(id, 10)}, nil
 	}))
 	c, sig := signedChallenge(t, s, pub, priv)
 	var success atomic.Int64
@@ -227,7 +216,7 @@ func TestConflictsFailuresAndCancellation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
-			s, pub, priv := testService(t, repositoryFunc(func(context.Context, int64, string, []byte) (Account, error) { calls++; return Account{}, test.fail }))
+			s, pub, priv := testService(t, repositoryFunc(func(context.Context, int64, []byte) (Account, error) { calls++; return Account{}, test.fail }))
 			c, sig := signedChallenge(t, s, pub, priv)
 			_, err := s.Register(context.Background(), c.ChallengeID, sig)
 			if !errors.Is(err, test.want) || calls != test.calls {
@@ -242,12 +231,12 @@ func TestConflictsFailuresAndCancellation(t *testing.T) {
 		})
 	}
 	calls := 0
-	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, name string, _ []byte) (Account, error) {
+	s, pub, priv := testService(t, repositoryFunc(func(_ context.Context, id int64, _ []byte) (Account, error) {
 		calls++
 		if calls < 3 {
 			return Account{}, ErrIDCollision
 		}
-		return Account{VoidID: strconv.FormatInt(id, 10), Username: name}, nil
+		return Account{VoidID: strconv.FormatInt(id, 10)}, nil
 	}))
 	c, sig := signedChallenge(t, s, pub, priv)
 	if a, err := s.Register(context.Background(), c.ChallengeID, sig); err != nil || a.VoidID != "3" {
@@ -308,7 +297,7 @@ func TestRejectDegenerateAndNoncanonicalPublicKeys(t *testing.T) {
 	}
 	mixedOrder := new(edwards25519.Point).Add(point, torsion).Bytes()
 	for _, key := range [][]byte{identity, make([]byte, 32), noncanonical, orderTwo, mixedOrder} {
-		if _, err := s.Challenge("valid", key); !errors.Is(err, ErrInvalidInput) {
+		if _, err := s.Challenge(key); !errors.Is(err, ErrInvalidInput) {
 			t.Fatal("accepted unsafe public key", err)
 		}
 	}

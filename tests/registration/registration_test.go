@@ -51,7 +51,7 @@ func newRepository() *memoryRepository {
 	}
 }
 
-func (r *memoryRepository) Insert(ctx context.Context, id int64, username string, key []byte) (account.Account, error) {
+func (r *memoryRepository) Insert(ctx context.Context, id int64, key []byte) (account.Account, error) {
 	r.attempts.Add(1)
 	if r.entered != nil {
 		select {
@@ -83,7 +83,6 @@ func (r *memoryRepository) Insert(ctx context.Context, id int64, username string
 	}
 	result := account.Account{
 		VoidID:    strconv.FormatInt(id, 10),
-		Username:  username,
 		CreatedAt: time.Date(2026, time.November, 1, 0, 0, 0, 123456000, time.UTC),
 	}
 	r.byKey[string(key)] = persistedAccount{Account: result, id: id, publicKey: bytes.Clone(key)}
@@ -177,10 +176,9 @@ type registrationProof struct {
 	Signature   string `json:"signature"`
 }
 
-func (c *registrationClient) proof(t *testing.T, username string, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey) registrationProof {
+func (c *registrationClient) proof(t *testing.T, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey) registrationProof {
 	t.Helper()
 	response, err := c.post("/dm9pZG5vdGhpbmduZXNz/challenges", map[string]string{
-		"username":        username,
 		"auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	})
 	if err != nil {
@@ -198,11 +196,12 @@ func (c *registrationClient) proof(t *testing.T, username string, publicKey ed25
 		t.Fatalf("decode signing message: %v", err)
 	}
 	// A client signs only after checking the domain and the returned binding.
+	// The v1 reserved line stays empty so the signing format remains stable.
 	fields := strings.Split(string(message), "\n")
 	if len(fields) != 7 || fields[0] != "VOID-NOTHINGNESS:register:v1" ||
 		fields[1] != challenge.ChallengeID || fields[2] != challenge.ExpiresAt.UTC().Format(time.RFC3339Nano) ||
 		fields[3] != base64.StdEncoding.EncodeToString(publicKey) ||
-		fields[4] != base64.StdEncoding.EncodeToString([]byte(username)) || fields[5] == "" || fields[6] != "" {
+		fields[4] != "" || fields[5] == "" || fields[6] != "" {
 		t.Fatal("challenge signing message does not bind the requested identity")
 	}
 	return registrationProof{
@@ -236,8 +235,8 @@ func expectPublicAccount(t *testing.T, response apiResponse, persisted persisted
 	if err := json.Unmarshal(response.body, &fields); err != nil {
 		t.Fatalf("decode registration: %v", err)
 	}
-	if len(fields) != 3 || fields["void_id"] == nil || fields["username"] == nil || fields["created_at"] == nil {
-		t.Fatal("account response must contain only void_id, username, and created_at")
+	if len(fields) != 2 || fields["void_id"] == nil || fields["created_at"] == nil {
+		t.Fatal("account response must contain only void_id and created_at")
 	}
 	var result account.Account
 	if err := json.Unmarshal(response.body, &result); err != nil {
@@ -247,7 +246,7 @@ func expectPublicAccount(t *testing.T, response apiResponse, persisted persisted
 	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != result.VoidID || id != persisted.id {
 		t.Fatal("public VOID-ID is not the persisted positive int64 encoded as a decimal string")
 	}
-	if result.Username != persisted.Username || !result.CreatedAt.Equal(persisted.CreatedAt) || result.CreatedAt.IsZero() {
+	if !result.CreatedAt.Equal(persisted.CreatedAt) || result.CreatedAt.IsZero() {
 		t.Fatal("public account differs from persisted identity or creation timestamp")
 	}
 	if response.header.Get("Set-Cookie") != "" || response.header.Get("Authorization") != "" {
@@ -263,8 +262,7 @@ func TestHTTPRegistrationPersistsRequestedIdentityAndRejectsReplay(t *testing.T)
 	client := newClient(t, repo)
 	publicKey, privateKey := keyPair(t)
 	expectedKey := bytes.Clone(publicKey)
-	const username = "void-界"
-	proof := client.proof(t, username, publicKey, privateKey)
+	proof := client.proof(t, publicKey, privateKey)
 	// Discard the caller's mutable input after challenge creation. Persistence
 	// must retain the original key to which the proof was bound.
 	clear(publicKey)
@@ -273,8 +271,8 @@ func TestHTTPRegistrationPersistsRequestedIdentityAndRejectsReplay(t *testing.T)
 		t.Fatal(err)
 	}
 	rows := repo.rows()
-	if len(rows) != 1 || rows[0].Username != username || !bytes.Equal(rows[0].publicKey, expectedKey) {
-		t.Fatal("registration did not persist exactly the requested username and key")
+	if len(rows) != 1 || !bytes.Equal(rows[0].publicKey, expectedKey) {
+		t.Fatal("registration did not persist exactly the requested authentication key")
 	}
 	expectPublicAccount(t, response, rows[0])
 	response, err = client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
@@ -297,8 +295,8 @@ func TestHTTPConcurrentFreshProofsEnforceAuthenticationKeyUniqueness(t *testing.
 	client := newClient(t, repo)
 	publicKey, privateKey := keyPair(t)
 	proofs := []registrationProof{
-		client.proof(t, "first-name", publicKey, privateKey),
-		client.proof(t, "second-name", publicKey, privateKey),
+		client.proof(t, publicKey, privateKey),
+		client.proof(t, publicKey, privateKey),
 	}
 	if proofs[0].ChallengeID == proofs[1].ChallengeID || proofs[0].Signature == proofs[1].Signature {
 		t.Fatal("fresh challenges must create independent proofs")
@@ -350,7 +348,7 @@ func TestHTTPConcurrentFreshProofsEnforceAuthenticationKeyUniqueness(t *testing.
 	if successes != 1 || duplicates != 1 || len(rows) != 1 || repo.attempts.Load() != 2 {
 		t.Fatalf("concurrent registration successes=%d duplicates=%d stored=%d attempts=%d", successes, duplicates, len(rows), repo.attempts.Load())
 	}
-	if !bytes.Equal(rows[0].publicKey, publicKey) || (rows[0].Username != "first-name" && rows[0].Username != "second-name") {
+	if !bytes.Equal(rows[0].publicKey, publicKey) {
 		t.Fatal("concurrent registration persisted an unrelated identity")
 	}
 	expectPublicAccount(t, success, rows[0])
@@ -362,7 +360,7 @@ func TestHTTPFailedPersistenceConsumesProofAndFreshProofCanRecover(t *testing.T)
 	repo.failNext = errors.New(diagnostic)
 	client := newClient(t, repo)
 	publicKey, privateKey := keyPair(t)
-	proof := client.proof(t, "retry-user", publicKey, privateKey)
+	proof := client.proof(t, publicKey, privateKey)
 	response, err := client.post("/dm9pZG5vdGhpbmduZXNz/accounts", proof)
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +377,7 @@ func TestHTTPFailedPersistenceConsumesProofAndFreshProofCanRecover(t *testing.T)
 	if repo.attempts.Load() != 1 {
 		t.Fatal("proof replay after persistence failure reached the repository")
 	}
-	fresh := client.proof(t, "retry-user", publicKey, privateKey)
+	fresh := client.proof(t, publicKey, privateKey)
 	if fresh.ChallengeID == proof.ChallengeID {
 		t.Fatal("recovery reused a consumed challenge")
 	}

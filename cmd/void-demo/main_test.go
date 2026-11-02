@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
+
+	"void-nothingness/internal/account"
 )
 
 func TestDemoRegistersAuthenticatesRelaysAndDisconnects(t *testing.T) {
@@ -18,7 +21,6 @@ func TestDemoRegistersAuthenticatesRelaysAndDisconnects(t *testing.T) {
 		t.Fatalf("local backend demonstration: %v", err)
 	}
 	if report.Alice.VoidID == "" || report.Alice.VoidID == report.Bob.VoidID ||
-		report.Alice.Username != "demo-alice" || report.Bob.Username != "demo-bob" ||
 		report.Alice.CreatedAt.IsZero() || report.Bob.CreatedAt.IsZero() {
 		t.Fatalf("expected two distinct registered accounts, got Alice=%+v Bob=%+v", report.Alice, report.Bob)
 	}
@@ -55,6 +57,23 @@ func TestDemoRegistersAuthenticatesRelaysAndDisconnects(t *testing.T) {
 		if strings.Contains(output.String(), forbidden) {
 			t.Errorf("demo output exposed an authentication field: %q", forbidden)
 		}
+	}
+}
+
+func TestRegistrationSigningMessageRequiresEmptyReservedField(t *testing.T) {
+	id := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	nonce := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
+	publicKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{3}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+	expires := time.Now().UTC().Add(time.Minute)
+	message := "VOID-NOTHINGNESS:register:v1\n" + id + "\n" + expires.Format(time.RFC3339Nano) + "\n" +
+		base64.StdEncoding.EncodeToString(publicKey) + "\n\n" + nonce + "\n"
+	challenge := account.Challenge{ChallengeID: id, ExpiresAt: expires, Message: base64.StdEncoding.EncodeToString([]byte(message))}
+	if decoded, err := registrationSigningMessage(challenge, publicKey); err != nil || string(decoded) != message {
+		t.Fatalf("valid registration challenge rejected: %v", err)
+	}
+	challenge.Message = base64.StdEncoding.EncodeToString([]byte(strings.Replace(message, "\n\n", "\nZGlzcGxheS1uYW1l\n", 1)))
+	if _, err := registrationSigningMessage(challenge, publicKey); err == nil {
+		t.Fatal("client would sign a registration challenge with a nonempty reserved field")
 	}
 }
 

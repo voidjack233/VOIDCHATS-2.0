@@ -34,8 +34,8 @@ func New(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool, idConstraint: "accounts_void_id_key", keyConstraint: "accounts_auth_public_key_key"}
 }
 
-func (r *Repository) Insert(ctx context.Context, voidID int64, username string, publicKey []byte) (account.Account, error) {
-	result, err := insertAccount(ctx, r.pool, voidID, username, publicKey)
+func (r *Repository) Insert(ctx context.Context, voidID int64, publicKey []byte) (account.Account, error) {
+	result, err := insertAccount(ctx, r.pool, voidID, publicKey)
 	if err != nil {
 		r.mu.RLock()
 		idConstraint, keyConstraint := r.idConstraint, r.keyConstraint
@@ -49,14 +49,14 @@ type accountWriter interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func insertAccount(ctx context.Context, writer accountWriter, voidID int64, username string, publicKey []byte) (account.Account, error) {
+func insertAccount(ctx context.Context, writer accountWriter, voidID int64, publicKey []byte) (account.Account, error) {
 	var result account.Account
 	var storedID int64
 	err := writer.QueryRow(ctx, `
-		INSERT INTO public.accounts (void_id, username, auth_public_key)
-		VALUES ($1, NULLIF($2, ''), $3)
-		RETURNING void_id, COALESCE(username, ''), created_at`, voidID, username, publicKey).
-		Scan(&storedID, &result.Username, &result.CreatedAt)
+		INSERT INTO public.accounts (void_id, auth_public_key)
+		VALUES ($1, $2)
+		RETURNING void_id, created_at`, voidID, publicKey).
+		Scan(&storedID, &result.CreatedAt)
 	if err != nil {
 		return account.Account{}, err
 	}
@@ -276,7 +276,7 @@ func (r *Repository) Validate(ctx context.Context) error {
 // not prevent the application from using its existing database connection.
 func hasRequiredColumnAccess(name string, selectable, insertable bool) bool {
 	switch name {
-	case "void_id", "username", "auth_public_key":
+	case "void_id", "auth_public_key":
 		return selectable && insertable
 	case "created_at":
 		return selectable

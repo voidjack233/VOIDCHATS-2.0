@@ -100,8 +100,8 @@ def main():
                 auth_public_key BYTEA NOT NULL UNIQUE CHECK (octet_length(auth_public_key) = 32),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            GRANT INSERT (void_id, username, auth_public_key),
-                SELECT (void_id, username, auth_public_key, created_at) ON public.accounts TO {role};
+            GRANT INSERT (void_id, auth_public_key),
+                SELECT (void_id, auth_public_key, created_at) ON public.accounts TO {role};
         ''')
         test_env = os.environ.copy()
         test_env["VOID_TEST_DATABASE_URL"] = connection_url(admin, database, role, password)

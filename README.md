@@ -36,15 +36,15 @@ The existing HTTP registration routes remain:
 - `POST /dm9pZG5vdGhpbmduZXNz/challenges`
 - `POST /dm9pZG5vdGhpbmduZXNz/accounts`
 
-A challenge accepts an authentication public key and an optional display username:
+A challenge accepts only the authentication public key:
 
 ```json
 {"auth_public_key":"<padded base64 of a valid 32-byte Ed25519 public key>"}
 ```
 
-When supplied, a nonempty username must retain the existing UTF-8, length and character validation. Omitted/empty usernames store SQL NULL after the reviewed migration; no substitute name is invented. Existing usernames, account UUIDs, VOID-IDs and keys are preserved.
+Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. New accounts leave the existing nullable username column as SQL NULL. Existing usernames and account identities remain stored; no database migration is needed for this change.
 
-Clients sign the exact decoded `VOID-NOTHINGNESS:register:v1` challenge message and submit `challenge_id` and padded-base64 `signature` to `/accounts`. Registration proofs remain single-use and bind the submitted public key and optional username. Private keys never leave devices. Registration creates no persistent messaging session.
+Clients sign the exact decoded `VOID-NOTHINGNESS:register:v1` challenge message and submit `challenge_id` and padded-base64 `signature` to `/accounts`. Registration proofs remain single-use and bind the submitted public key. The v1 proof retains an empty reserved line after the encoded key, so its bytes match the previous username-omitted flow. Registration responses contain only `void_id` and `created_at`. Private keys never leave devices. Registration creates no persistent messaging session.
 
 All ordinary messaging uses `/dm9pZG5vdGhpbmduZXNz/ws`. Each connection proves ownership with a fresh Ed25519 challenge before lookup, send, ACK or online protocol exchange. The production proof binds the canonical API audience. See [WEBSOCKET.md](WEBSOCKET.md) for the exact proof bytes.
 

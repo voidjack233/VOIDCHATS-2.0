@@ -34,7 +34,7 @@ func TestStalledBodyReleasesAdmissionAtRequestDeadline(t *testing.T) {
 		t.Run(endpoint, func(t *testing.T) {
 			var serviceCalls atomic.Int64
 			service := stubService{
-				challenge: func(string, []byte) (account.Challenge, error) {
+				challenge: func([]byte) (account.Challenge, error) {
 					serviceCalls.Add(1)
 					return account.Challenge{}, account.ErrUnavailable
 				},

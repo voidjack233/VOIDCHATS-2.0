@@ -101,17 +101,17 @@ func TestPostgresPersistenceAndUniqueness(t *testing.T) {
 	}
 	id, key := freshID(t), freshKey(t)
 	before := time.Now().Add(-time.Second)
-	result, err := repo.Insert(ctx, id, "O'Reilly", key)
+	result, err := repo.Insert(ctx, id, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.VoidID != strconv.FormatInt(id, 10) || result.Username != "O'Reilly" || result.CreatedAt.Before(before) || result.CreatedAt.After(time.Now().Add(time.Second)) {
+	if result.VoidID != strconv.FormatInt(id, 10) || result.CreatedAt.Before(before) || result.CreatedAt.After(time.Now().Add(time.Second)) {
 		t.Fatalf("incorrect persisted public account: %+v", result)
 	}
-	if _, err := repo.Insert(ctx, freshID(t), "duplicate-key", key); !errors.Is(err, account.ErrDuplicateKey) {
+	if _, err := repo.Insert(ctx, freshID(t), key); !errors.Is(err, account.ErrDuplicateKey) {
 		t.Fatalf("duplicate key: got %v", err)
 	}
-	if _, err := repo.Insert(ctx, id, "duplicate-id", freshKey(t)); !errors.Is(err, account.ErrIDCollision) {
+	if _, err := repo.Insert(ctx, id, freshKey(t)); !errors.Is(err, account.ErrIDCollision) {
 		t.Fatalf("duplicate VOID-ID: got %v", err)
 	}
 	storedKey, err := repo.AuthenticationKey(ctx, id)
@@ -131,12 +131,16 @@ func TestPostgresPersistenceAndUniqueness(t *testing.T) {
 	var internalID string
 	var savedKey []byte
 	var savedCreated time.Time
-	if err := admin.QueryRow(ctx, "SELECT id::text, auth_public_key, created_at FROM public.accounts WHERE void_id = $1", id).
-		Scan(&internalID, &savedKey, &savedCreated); err != nil {
+	var usernameNull bool
+	if err := admin.QueryRow(ctx, "SELECT id::text, auth_public_key, created_at, username IS NULL FROM public.accounts WHERE void_id = $1", id).
+		Scan(&internalID, &savedKey, &savedCreated, &usernameNull); err != nil {
 		t.Fatal("could not inspect persisted account")
 	}
 	if len(internalID) != 36 || internalID[14] != '7' || !bytes.Equal(savedKey, key) || !savedCreated.Equal(result.CreatedAt) {
 		t.Fatal("PostgreSQL did not persist UUIDv7, public key, and default creation timestamp correctly")
+	}
+	if !usernameNull {
+		t.Fatal("new registration populated the legacy username column")
 	}
 }
 
@@ -149,11 +153,12 @@ func TestPostgresRuntimePrivileges(t *testing.T) {
 	}
 	queries := []string{
 		"SELECT id FROM public.accounts LIMIT 1",
+		"SELECT username FROM public.accounts LIMIT 1",
 		"SELECT * FROM public.accounts LIMIT 1",
 		"UPDATE public.accounts SET username = 'forbidden' WHERE false",
 		"DELETE FROM public.accounts WHERE false",
-		"INSERT INTO public.accounts (id, void_id, username, auth_public_key) VALUES (uuidv7(), 1, 'forbidden', decode(repeat('00', 32), 'hex'))",
-		"INSERT INTO public.accounts (void_id, username, auth_public_key, created_at) VALUES (1, 'forbidden', decode(repeat('00', 32), 'hex'), now())",
+		"INSERT INTO public.accounts (id, void_id, auth_public_key) VALUES (uuidv7(), 1, decode(repeat('00', 32), 'hex'))",
+		"INSERT INTO public.accounts (void_id, auth_public_key, created_at) VALUES (1, decode(repeat('00', 32), 'hex'), now())",
 	}
 	for _, query := range queries {
 		_, err := app.Exec(ctx, query)
@@ -179,7 +184,7 @@ func TestPostgresConcurrentDuplicateKeys(t *testing.T) {
 	var group sync.WaitGroup
 	for _, id := range ids {
 		group.Go(func() {
-			_, err := repo.Insert(ctx, id, "concurrent", key)
+			_, err := repo.Insert(ctx, id, key)
 			results <- err
 		})
 	}
@@ -216,7 +221,7 @@ func TestPostgresInterruptedInsert(t *testing.T) {
 	id := freshID(t)
 	interrupted, stop := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer stop()
-	_, err = postgres.New(app).Insert(interrupted, id, "interrupted", freshKey(t))
+	_, err = postgres.New(app).Insert(interrupted, id, freshKey(t))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("interrupted insert returned %v", err)
 	}
@@ -266,7 +271,7 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 		return response.StatusCode, data
 	}
 	status, data := post("/dm9pZG5vdGhpbmduZXNz/challenges", map[string]string{
-		"username": "http-integration", "auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
+		"auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	})
 	if status != http.StatusCreated {
 		t.Fatalf("challenge status %d: %s", status, data)
@@ -292,22 +297,22 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, err := strconv.ParseInt(registered.VoidID, 10, 64)
-	if err != nil || id <= 0 || registered.Username != "http-integration" || registered.CreatedAt.IsZero() {
+	if err != nil || id <= 0 || registered.CreatedAt.IsZero() {
 		t.Fatalf("invalid registration response: %s", data)
 	}
 	var responseFields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &responseFields); err != nil || len(responseFields) != 3 || responseFields["id"] != nil || responseFields["auth_public_key"] != nil {
+	if err := json.Unmarshal(data, &responseFields); err != nil || len(responseFields) != 2 || responseFields["id"] != nil || responseFields["auth_public_key"] != nil || responseFields["username"] != nil {
 		t.Fatal("registration exposed internal fields")
 	}
-	var username string
-	if err := app.QueryRow(context.Background(), "SELECT username FROM public.accounts WHERE void_id = $1", id).Scan(&username); err != nil || username != registered.Username {
+	storedKey, err := repo.AuthenticationKey(context.Background(), id)
+	if err != nil || !bytes.Equal(storedKey, publicKey) {
 		t.Fatal("HTTP registration did not persist")
 	}
 	if status, _ := post("/dm9pZG5vdGhpbmduZXNz/accounts", registration); status != http.StatusUnauthorized {
 		t.Fatalf("replayed challenge returned status %d", status)
 	}
 	status, data = post("/dm9pZG5vdGhpbmduZXNz/challenges", map[string]string{
-		"username": "same-key", "auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
+		"auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	})
 	if status != http.StatusCreated {
 		t.Fatalf("second challenge status %d", status)
@@ -328,8 +333,12 @@ func TestHTTPRegistrationPersistsInPostgres(t *testing.T) {
 	}
 	if admin != nil {
 		var internalID string
-		if err := admin.QueryRow(context.Background(), "SELECT id::text FROM public.accounts WHERE void_id = $1", id).Scan(&internalID); err != nil || len(internalID) != 36 || internalID[14] != '7' {
+		var usernameNull bool
+		if err := admin.QueryRow(context.Background(), "SELECT id::text, username IS NULL FROM public.accounts WHERE void_id = $1", id).Scan(&internalID, &usernameNull); err != nil || len(internalID) != 36 || internalID[14] != '7' {
 			t.Fatal("HTTP registration did not use PostgreSQL's UUIDv7 default")
+		}
+		if !usernameNull {
+			t.Fatal("HTTP registration populated the legacy username column")
 		}
 	}
 }

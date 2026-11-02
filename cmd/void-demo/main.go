@@ -54,7 +54,7 @@ type memoryAccounts struct {
 	byKey map[string]struct{}
 }
 
-func (m *memoryAccounts) Insert(ctx context.Context, id int64, username string, key []byte) (account.Account, error) {
+func (m *memoryAccounts) Insert(ctx context.Context, id int64, key []byte) (account.Account, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -66,7 +66,7 @@ func (m *memoryAccounts) Insert(ctx context.Context, id int64, username string, 
 	if _, ok := m.byKey[string(key)]; ok {
 		return account.Account{}, account.ErrDuplicateKey
 	}
-	result := account.Account{VoidID: strconv.FormatInt(id, 10), Username: username, CreatedAt: time.Now().UTC()}
+	result := account.Account{VoidID: strconv.FormatInt(id, 10), CreatedAt: time.Now().UTC()}
 	m.byID[id] = storedAccount{Account: result, publicKey: bytes.Clone(key)}
 	m.byKey[string(key)] = struct{}{}
 	return result, nil
@@ -165,11 +165,11 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 	client.Timeout = 5 * time.Second
 	defer client.CloseIdleConnections()
 
-	alice, err := registerUser(ctx, client, server.URL, "demo-alice")
+	alice, err := registerUser(ctx, client, server.URL)
 	if err != nil {
 		return report, fmt.Errorf("register Alice through HTTP challenge/proof: %w", err)
 	}
-	bob, err := registerUser(ctx, client, server.URL, "demo-bob")
+	bob, err := registerUser(ctx, client, server.URL)
 	if err != nil {
 		return report, fmt.Errorf("register Bob through HTTP challenge/proof: %w", err)
 	}
@@ -287,18 +287,18 @@ func runDemo(ctx context.Context, out io.Writer) (demoReport, error) {
 	return report, log.err
 }
 
-func registerUser(ctx context.Context, client *http.Client, baseURL, username string) (demoUser, error) {
+func registerUser(ctx context.Context, client *http.Client, baseURL string) (demoUser, error) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return demoUser{}, errors.New("generate ephemeral authentication key")
 	}
 	var challenge account.Challenge
 	if err := postJSON(ctx, client, baseURL+apiPrefix+"/challenges", map[string]string{
-		"username": username, "auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
+		"auth_public_key": base64.StdEncoding.EncodeToString(publicKey),
 	}, &challenge); err != nil {
 		return demoUser{}, err
 	}
-	message, err := registrationSigningMessage(challenge, username, publicKey)
+	message, err := registrationSigningMessage(challenge, publicKey)
 	if err != nil {
 		return demoUser{}, err
 	}
@@ -309,7 +309,7 @@ func registerUser(ctx context.Context, client *http.Client, baseURL, username st
 	}, &result); err != nil {
 		return demoUser{}, err
 	}
-	if !auth.ValidVoidID(result.VoidID) || result.Username != username {
+	if !auth.ValidVoidID(result.VoidID) || result.CreatedAt.IsZero() {
 		return demoUser{}, errors.New("registration returned an invalid account identity")
 	}
 	return demoUser{account: result, privateKey: privateKey}, nil
@@ -336,7 +336,7 @@ func postJSON(ctx context.Context, client *http.Client, url string, value, resul
 	return json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(result)
 }
 
-func registrationSigningMessage(challenge account.Challenge, username string, publicKey ed25519.PublicKey) ([]byte, error) {
+func registrationSigningMessage(challenge account.Challenge, publicKey ed25519.PublicKey) ([]byte, error) {
 	message, err := decodeChallengeMessage(challenge.ChallengeID, challenge.Message, challenge.ExpiresAt)
 	if err != nil {
 		return nil, err
@@ -344,7 +344,7 @@ func registrationSigningMessage(challenge account.Challenge, username string, pu
 	fields := strings.Split(string(message), "\n")
 	if len(fields) != 7 || fields[0] != "VOID-NOTHINGNESS:register:v1" || fields[1] != challenge.ChallengeID ||
 		fields[2] != challenge.ExpiresAt.UTC().Format(time.RFC3339Nano) || fields[3] != base64.StdEncoding.EncodeToString(publicKey) ||
-		fields[4] != base64.StdEncoding.EncodeToString([]byte(username)) || !validChallengeToken(fields[5]) || fields[6] != "" {
+		fields[4] != "" || !validChallengeToken(fields[5]) || fields[6] != "" {
 		return nil, errors.New("registration challenge does not bind the requested account")
 	}
 	return message, nil

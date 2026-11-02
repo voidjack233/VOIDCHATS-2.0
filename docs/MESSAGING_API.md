@@ -16,7 +16,7 @@ Use the Ed25519 `auth_begin` → `auth_challenge` → `auth_proof` → `auth_ok`
 {"type":"person","void_id":"202","auth_public_key":"<padded-base64 registered public key>"}
 ```
 
-Usernames are not required for routing or messaging. There is no username search. Devices validate/pin the discovered peer key according to their own cryptographic identity verification policy.
+Registration accepts no username, and usernames are not used for routing or messaging. There is no username search. Devices validate/pin the discovered peer key according to their own cryptographic identity verification policy.
 
 ## Store and send
 

@@ -22,37 +22,31 @@ func (q accountInsertQuery) QueryRow(ctx context.Context, sql string, args ...an
 }
 
 type accountInsertRow struct {
-	id       int64
-	username string
-	created  time.Time
+	id      int64
+	created time.Time
 }
 
 func (row accountInsertRow) Scan(dest ...any) error {
 	*dest[0].(*int64) = row.id
-	*dest[1].(*string) = row.username
-	*dest[2].(*time.Time) = row.created
+	*dest[1].(*time.Time) = row.created
 	return nil
 }
 
-func TestAccountInsertPreservesKeyAndOptionalName(t *testing.T) {
+func TestAccountInsertUsesOnlyIdentityAndKey(t *testing.T) {
 	key := bytes.Repeat([]byte{42}, 32)
 	created := time.Unix(1234, 0).UTC()
-	for _, name := range []string{"", "Existing Name"} {
-		t.Run(fmt.Sprintf("name=%q", name), func(t *testing.T) {
-			writer := accountInsertQuery(func(_ context.Context, sql string, args ...any) pgx.Row {
-				if len(args) != 3 || args[0] != int64(9223372036854775807) || args[1] != name || !bytes.Equal(args[2].([]byte), key) {
-					t.Fatal("insertion changed account identity, provided name, or public key")
-				}
-				if !strings.Contains(sql, "NULLIF($2, '')") || !strings.Contains(sql, "COALESCE(username, '')") {
-					t.Fatal("optional username must persist as NULL and return as an omitted empty string")
-				}
-				return accountInsertRow{id: 9223372036854775807, username: name, created: created}
-			})
-			got, err := insertAccount(context.Background(), writer, 9223372036854775807, name, key)
-			if err != nil || got.VoidID != "9223372036854775807" || got.Username != name || !got.CreatedAt.Equal(created) {
-				t.Fatalf("insert result: %+v %v", got, err)
-			}
-		})
+	writer := accountInsertQuery(func(_ context.Context, sql string, args ...any) pgx.Row {
+		if len(args) != 2 || args[0] != int64(9223372036854775807) || !bytes.Equal(args[1].([]byte), key) {
+			t.Fatal("insertion changed account identity or public key")
+		}
+		if strings.Contains(strings.ToLower(sql), "username") {
+			t.Fatal("registration must not read or create a username")
+		}
+		return accountInsertRow{id: 9223372036854775807, created: created}
+	})
+	got, err := insertAccount(context.Background(), writer, 9223372036854775807, key)
+	if err != nil || got.VoidID != "9223372036854775807" || !got.CreatedAt.Equal(created) {
+		t.Fatalf("insert result: %+v %v", got, err)
 	}
 }
 
@@ -98,9 +92,9 @@ func TestRequiredColumnAccessMatchesRegistrationAndAuthentication(t *testing.T) 
 		{"void_id", false, false, false},
 		{"void_id", false, true, false},
 		{"void_id", true, false, false},
-		{"username", false, false, false},
-		{"username", false, true, false},
-		{"username", true, false, false},
+		{"username", false, false, true},
+		{"username", false, true, true},
+		{"username", true, false, true},
 		{"auth_public_key", false, true, false},
 		{"auth_public_key", false, false, false},
 		{"auth_public_key", true, false, false},

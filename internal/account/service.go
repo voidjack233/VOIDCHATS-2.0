@@ -12,11 +12,8 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"filippo.io/edwards25519"
 )
@@ -33,7 +30,6 @@ var (
 
 type Account struct {
 	VoidID    string    `json:"void_id"`
-	Username  string    `json:"username,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -44,7 +40,7 @@ type Challenge struct {
 }
 
 type Repository interface {
-	Insert(context.Context, int64, string, []byte) (Account, error)
+	Insert(context.Context, int64, []byte) (Account, error)
 }
 
 type IDGenerator interface {
@@ -57,7 +53,6 @@ type Options struct {
 }
 
 type pending struct {
-	username  string
 	publicKey []byte
 	message   []byte
 	expiresAt time.Time
@@ -78,25 +73,6 @@ func NewService(repo Repository, ids IDGenerator, opts Options) (*Service, error
 		return nil, errors.New("invalid account service configuration")
 	}
 	return &Service{repo: repo, ids: ids, opts: opts, now: time.Now, rand: rand.Reader, challenges: make(map[string]pending)}, nil
-}
-
-func validUsername(username string) bool {
-	if username == "" {
-		return true // Optional public metadata; identity is the registered key.
-	}
-	if !utf8.ValidString(username) || strings.TrimSpace(username) != username {
-		return false
-	}
-	n := utf8.RuneCountInString(username)
-	if n < 1 || n > 32 {
-		return false
-	}
-	for _, r := range username {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return false
-		}
-	}
-	return true
 }
 
 // A valid signature alone is not proof of a private key for small-order public
@@ -126,8 +102,8 @@ func validPublicKey(key []byte) bool {
 	return new(edwards25519.Point).ScalarMult(inverseEight, cofactored).Equal(p) == 1
 }
 
-func (s *Service) Challenge(username string, publicKey []byte) (Challenge, error) {
-	if !validUsername(username) || !validPublicKey(publicKey) {
+func (s *Service) Challenge(publicKey []byte) (Challenge, error) {
+	if !validPublicKey(publicKey) {
 		return Challenge{}, ErrInvalidInput
 	}
 	// Both the opaque lookup token and nonce use 256 bits of OS randomness.
@@ -141,8 +117,9 @@ func (s *Service) Challenge(username string, publicKey []byte) (Challenge, error
 	expires := now.Add(s.opts.ChallengeTTL)
 	// Sign the decoded message verbatim. Base64 field encoding and a fixed
 	// domain/version make the framing unambiguous and bind all registration data.
+	// Preserve the reserved empty line in v1 proofs for existing clients.
 	message := []byte("VOID-NOTHINGNESS:register:v1\n" + id + "\n" + expires.UTC().Format(time.RFC3339Nano) + "\n" +
-		base64.StdEncoding.EncodeToString(publicKey) + "\n" + base64.StdEncoding.EncodeToString([]byte(username)) + "\n" + nonce + "\n")
+		base64.StdEncoding.EncodeToString(publicKey) + "\n\n" + nonce + "\n")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for token, p := range s.challenges {
@@ -156,7 +133,7 @@ func (s *Service) Challenge(username string, publicKey []byte) (Challenge, error
 	if _, exists := s.challenges[id]; exists {
 		return Challenge{}, ErrUnavailable // Never overwrite even on RNG collision.
 	}
-	s.challenges[id] = pending{username: username, publicKey: append([]byte(nil), publicKey...), message: message, expiresAt: expires}
+	s.challenges[id] = pending{publicKey: append([]byte(nil), publicKey...), message: message, expiresAt: expires}
 	return Challenge{ChallengeID: id, Message: base64.StdEncoding.EncodeToString(message), ExpiresAt: expires.UTC()}, nil
 }
 
@@ -193,7 +170,7 @@ func (s *Service) Register(ctx context.Context, challengeID string, signature []
 			}
 			return Account{}, ErrUnavailable
 		}
-		result, err := s.repo.Insert(ctx, id, p.username, p.publicKey)
+		result, err := s.repo.Insert(ctx, id, p.publicKey)
 		if errors.Is(err, ErrIDCollision) {
 			continue
 		}

@@ -2,7 +2,7 @@
 
 Approved on 2026-11-02 (Asia/Manila), including the owner's final adjustments: Go sets all event timestamps and a fixed 30-day deadline; advanced retry/deduplication and encrypted delivery receipts are deferred. The owner subsequently instructed "do the migration now". The exact SQL was verified in isolated PostgreSQL and applied on 2026-11-02 at 14:56 (Asia/Manila), followed by the matching backend. The live database has only accounts/messages; both accounts and registered keys were preserved. Credentials and Cloudflared remain unchanged.
 
-The responsibility is Authenticate → Locate → Temporarily store → Relay → Acknowledge → Delete. VOID-ID is a permanent public routing/contact identifier. Registered Ed25519 key ownership authenticates an account; the identifier itself does not. Usernames are optional display metadata, never required for messaging.
+The responsibility is Authenticate → Locate → Temporarily store → Relay → Acknowledge → Delete. VOID-ID is a permanent public routing/contact identifier. Registered Ed25519 key ownership authenticates an account; the identifier itself does not. Registration creates no username. Existing legacy username values are retained in the database and are not exposed by the registration or messaging APIs.
 
 The deployed database has only public.accounts and public.messages. Existing account UUIDs, VOID-IDs, authentication keys, timestamps and supplied usernames are retained. The applied migration makes the existing username column nullable; it does not remove that column or invent replacement names.
 
