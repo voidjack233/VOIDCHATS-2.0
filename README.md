@@ -6,7 +6,7 @@ Durable messaging provides short-lived bearer sessions, exact VOID-ID discovery,
 
 ## Run locally
 
-Run the commands below from the repository root of VOIDCHATS-2.0. The durable messaging work is on `codex/durable-messaging`, based on `backend`. The real `.env` is excluded from Git. For a new checkout, create your local `.env` from the settings in `.env.example` using an existing owner-approved connection; preserve an existing environment file.
+Run the commands below from the repository root on the `backend` branch of VOIDCHATS-2.0. It includes the durable messaging implementation, migrations and handoff documentation. The real `.env` is excluded from Git. For a new checkout, create your local `.env` from the settings in `.env.example` using an existing owner-approved connection; preserve an existing environment file.
 
 Go 1.26.5 and PostgreSQL 18 are required. The owner chose the existing `postgres` login in `.env` and database `void2-0e2ee`. The backend accepts that configured login and checks the access needed for registration. The existing username and password have not been changed. See [DATABASE_CHANGES.md](DATABASE_CHANGES.md) for the record of database/environment changes, including the explicitly authorized removal of `void_accounts_app`.
 

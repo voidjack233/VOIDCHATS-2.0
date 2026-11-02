@@ -1,6 +1,6 @@
 # Durable messaging verification and live deployment
 
-Verified on 2026-11-02 (Asia/Manila). Branch: `codex/durable-messaging`.
+Verified on 2026-11-02 (Asia/Manila). Integration branch: `backend`.
 **Deployed backend source: `bad8a7216c5276d1cfd71f22a188fdcda69cc241`.**
 
 The owner approved isolated PostgreSQL verification, the two reviewed additive
