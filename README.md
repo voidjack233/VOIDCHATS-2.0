@@ -4,9 +4,9 @@ A Go backend that authenticates accounts and temporarily queues opaque encrypted
 
 This source implements the owner-approved two-table design: `accounts` and a temporary `messages` queue. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
 
-**Source implementation only: the existing database and installed server have not been migrated or replaced.** The exact proposed SQL is [004_temporary_relay_queue.sql](migrations/004_temporary_relay_queue.sql). Review [deployment and preservation requirements](docs/MESSAGING_DEPLOYMENT.md) before application. Startup validates the schema and never applies migrations.
+**Activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly authorized migration.** Database `void2-0e2ee` now has only `accounts` and `messages`; both existing accounts and their keys were preserved. Backend source `d1825c6` is running. The exact applied SQL is [004_temporary_relay_queue.sql](migrations/004_temporary_relay_queue.sql); see [deployment and preservation evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates the schema and never applies migrations.
 
-The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, KeyPackage inventory, delivery-receipt event system, persistent retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [source verification record](docs/RELAY_VALIDATION.md).
+The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, KeyPackage inventory, delivery-receipt event system, persistent retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [verification and activation record](docs/RELAY_VALIDATION.md).
 
 ## Development
 
@@ -60,4 +60,4 @@ Expired events are excluded from dispatch. A bounded cleanup task in the same Go
 
 Per-account byte/count quotas, command rate limits, connection admission and transport byte budgets bound queue abuse. They do not solve unlimited fresh-key bot-account registration. Persistent per-peer blocking, server-managed contact requests and multi-device delivery tracking are outside this minimal design.
 
-Historical database changes and earlier deployments remain recorded in [DATABASE_CHANGES.md](DATABASE_CHANGES.md) and [the historical validation record](docs/MESSAGING_VALIDATION.md). Those records describe previous builds, not the current unactivated source.
+Historical database changes and earlier deployments remain recorded in [DATABASE_CHANGES.md](DATABASE_CHANGES.md) and [the historical validation record](docs/MESSAGING_VALIDATION.md). Those records describe previous builds, not the current relay deployment.

@@ -181,8 +181,43 @@ database application, database testing or live verification. See
 
 ## Approved two-table relay implementation: 2026-11-02
 
+This source-only stage was superseded by the explicitly authorized activation recorded below.
+
 The owner approved the adjusted design and authorized implementation: server-controlled creation/expiry timestamps, exactly 30-day queue retention, recipient ACK deletion, basic forwarding/reconnect behavior, and deferred advanced retries and sender-facing receipts. This authorization is implemented in Go source and proposed SQL only. The existing database, real environment, credentials, installed executable, Cloudflared and network configuration have not been changed for this task.
 
 Prepared `migrations/004_temporary_relay_queue.sql` and a separate parameterized privilege file for exact review before application. The migration locks the expected legacy tables and refuses to proceed if any old messaging/session/block/package data exists; it does not automatically delete or convert existing records. With an empty legacy data set, it replaces the nine legacy messaging tables with one six-column temporary messages queue, removes the internal version marker, and makes only accounts.username nullable. It preserves all account rows, UUIDs, VOID-IDs, keys, timestamps and username values. There is no username-column removal or identity re-registration.
 
 The previously paused request-decoupling draft was preserved privately before reconciliation; its unapplied004 proposal was superseded. No existing migration001–003 was rewritten or replayed. No PostgreSQL migration, database test or live messaging test has been executed for this implementation. Verification is restricted to mocks, in-memory stores and synthetic loopback HTTP/WebSocket fixtures. See [current architecture](docs/ARCHITECTURE_CORRECTION.md) and [exact migration review](docs/MESSAGING_DEPLOYMENT.md).
+
+## Explicitly authorized two-table migration and activation: 2026-11-02
+
+The owner instructed **"do the migration now"**. Before live application, created
+and verified a full private backup at `/home/void0000/.local/state/void-backend/deployments/20261102T144530+0800-two-table-relay/database.before.dump`. It was
+restored into an isolated Unix-socket-only PostgreSQL 18 cluster; every table's
+row digest matched. The exact reviewed 004 migration passed there, preserved
+account rows/keys/OID and catalog invariants, and passed actual read-only Go
+schema validation. A separate entirely synthetic database proved nonempty legacy
+data causes an atomic rollback, verified restricted-role permissions, and passed
+all eight real HTTP/WebSocket/PostgreSQL delivery checks.
+
+The restricted-role test exposed an unnecessary UPDATE permission requirement
+in SELECT FOR UPDATE cleanup. Replacing that selection with a bounded plain
+selection and an outer-expiry-qualified DELETE fixed it without changing the
+approved schema or grants. Full race tests and vet passed afterward.
+
+The old live backend stopped gracefully. Under migration locks, all eight
+legacy data tables were empty; the internal schema marker was the sole removed
+row. Applied only `migrations/004_temporary_relay_queue.sql`, SHA-256
+`2c11bc55d59c274baadbfee39768a5a377c35dd641eaead119a94b28a78f7a80`. The database now contains only public.accounts and
+the new public.messages queue. Both account rows, registered keys, UUIDs, VOID-IDs,
+creation timestamps, username values, ownership, ACLs and existing key/index/
+check definitions were preserved. Only username nullability was relaxed.
+No role, password, grant, credential, real environment-file or tunnel change was
+needed; the existing postgres login retains the necessary access.
+
+The matching backend source `d1825c648b72a3ecf413af3b4243540d6c9ad83b` was installed and started.
+Seventeen local/public HTTP/tunnel checks and two actual WebSocket route checks
+passed without registering or sending from any live account. Final account data
+and catalog invariants still match, and the queue is empty. Private connection
+state/test clusters were removed after verification; the backup/audit remains.
+See [activation evidence](docs/RELAY_VALIDATION.md).

@@ -1,6 +1,6 @@
 # Authenticated temporary WebSocket relay
 
-The approved implementation uses the existing WebSocket endpoint for all normal messaging. See [the full frame contract](docs/MESSAGING_API.md). It has not been activated against the existing database; migration 004 requires explicit review before application.
+The approved implementation uses the existing WebSocket endpoint for all normal messaging. See [the full frame contract](docs/MESSAGING_API.md). It was activated against the existing database on 2026-11-02 after explicit approval and isolated PostgreSQL verification; see [the deployment record](docs/MESSAGING_DEPLOYMENT.md).
 
 VOID-ID is a public account address. Authentication proves possession of the private key corresponding to `accounts.auth_public_key`. Every reconnect authenticates again. There is one active connection per VOID-ID; a successfully authenticated replacement closes the previous connection. Failed authentication cannot replace it.
 

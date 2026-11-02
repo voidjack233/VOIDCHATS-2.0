@@ -1,6 +1,12 @@
-# Temporary relay source verification
+# Temporary relay verification and activation
 
-Verified on 2026-11-02 (Asia/Manila), on branch backend. This is source verification only: no migration, live PostgreSQL test, installed-binary replacement, service restart, credential edit, tunnel/network change or frontend work was performed. The review binary is `/tmp/void-relay-review`; it has not been started against the existing database.
+Verified on 2026-11-02 (Asia/Manila), on branch backend. Deployed source: `d1825c648b72a3ecf413af3b4243540d6c9ad83b`. Installed binary SHA-256: `f1022703c89b8af04f675924ba64659836d049f3c6bc76547cbaec27084ade06`.
+
+The owner explicitly authorized migration with "do the migration now". The exact 004 was rehearsed against a full isolated restore, then applied to the existing database at 14:56. Both accounts and keys remain exact; account table identity, metadata and privileges were preserved apart from optional username nullability. Exactly accounts/messages remain, and the new queue was empty after verification. The matching backend is running.
+
+Private backup and audit: `/home/void0000/.local/state/void-backend/deployments/20261102T144530+0800-two-table-relay`. Full backup restore, account/table hashes, guard rollback snapshots, build metadata, migration results, all-PASS synthetic real-PostgreSQL/WebSocket logs and live activation probes are retained with private permissions. Temporary private connection state and test clusters are removed after verification. Existing credentials, .env content/permissions, user-local instruction/ignore changes and Cloudflare configuration were preserved. No autostart service was installed.
+
+Actual PostgreSQL testing found cleanup row-locking required an UPDATE privilege not granted to the restricted role. The fix removed the unnecessary SELECT lock, retaining bounded DELETE with an outer expiry recheck. No new UPDATE permission or schema change was introduced. All eight actual private database/HTTP/WebSocket assertion groups then passed. Live checks performed no account registration or message writes.
 
 | Check | Result |
 | --- | --- |
@@ -12,7 +18,10 @@ Verified on 2026-11-02 (Asia/Manila), on branch backend. This is source verifica
 | Formatting and `git diff --check` | Passed |
 | Documented JSON examples | All 14 parse without duplicate fields |
 | Python registration helper | Parses; not executed against PostgreSQL |
-| Proposed SQL/catalog behavior on PostgreSQL | Not executed; separate review/authorization required |
+| Exact SQL/catalog behavior on PostgreSQL 18 | Passed on isolated restored/synthetic databases, including restricted-role validation |
+| Full real-PostgreSQL/HTTP/WebSocket synthetic flow | All eight checks passed |
+| Live schema/account-preservation check | Passed; two accounts and original keys preserved |
+| Live HTTP/tunnel and WebSocket route checks | 17 HTTP/readiness probes and two WebSocket checks passed |
 
 Core tests verify a server-owned UTC clock, exact 720-hour expiry, byte-preserving offline storage in the synthetic store, recipient-qualified deletion, physical removal from the in-memory queue, expiry boundaries, bounded cleanup, sender/recipient byte quotas, duplicate pending IDs, account-scoped IDs, cancellation and safe storage errors. Recreating a Service over the same memory store models restart access to pending records; it does not constitute real disk/process-restart verification.
 
@@ -20,7 +29,7 @@ Loopback WebSocket tests verify Ed25519 ownership, audience-bound authentication
 
 Registration tests cover omitted/empty usernames, retained supplied names, invalid/null/duplicate/unknown fields, key validation, signed proof binding, expiration and replay. Account repository mocks verify SQL NULL binding, existing identity/key preservation and nullable-username schema validation.
 
-PostgreSQL queue mocks cover numeric account lock ordering, exact 64-bit ID splitting into two advisory-lock keys, no account UPDATE privilege requirement, transaction commit before acceptance, quota/duplicate rejection, ownership-bound ACK deletion, unexpired bounded scans, bounded expiry deletion, safe errors, six-column schema validation and PostgreSQL 18 NOT NULL catalog handling. These tests do not prove actual SQL execution or migration rollback; an approved disposable PostgreSQL check remains necessary before live cutover. Production connection-local IntervalStyle is pinned to postgres for deterministic constraint rendering without changing database/server settings.
+PostgreSQL queue mocks cover numeric account lock ordering, exact 64-bit ID splitting into two advisory-lock keys, no account UPDATE privilege requirement, transaction commit before acceptance, quota/duplicate rejection, ownership-bound ACK deletion, unexpired bounded scans, bounded expiry deletion, safe errors, six-column schema validation and PostgreSQL 18 NOT NULL catalog handling. The later private PostgreSQL rehearsal and flow verification additionally exercised actual SQL, permissions and atomic guard rollback. Production connection-local IntervalStyle is pinned to postgres for deterministic constraint rendering without changing database/server settings.
 
 The migration is deliberately drain-first: it refuses ANY legacy messaging/session/block/package data and preserves accounts. Its exact reviewed files at this verification are:
 
@@ -31,4 +40,4 @@ The migration is deliberately drain-first: it refuses ANY legacy messaging/sessi
 
 There is no automatic resend/backoff, persistent deduplication, permanent delivered state or sender-facing receipt lifecycle. Tests explicitly demonstrate rejection while an ID is queued and possible reuse after deletion, without claiming exactly-once processing. One in-flight event per recipient can stall on a lost ACK until reconnect or expiry. Synthetic opaque bytes do not demonstrate native OpenMLS encryption or handset integration.
 
-The earlier paused source draft was preserved privately before reconciliation. Historical migrations 001–003 remain unchanged. Existing database records and the old installed backend remain untouched. See [the exact migration review](MESSAGING_DEPLOYMENT.md) and [current protocol](MESSAGING_API.md).
+The earlier paused source draft was preserved privately before reconciliation. Historical migrations 001–003 remain unchanged. Both existing account rows were preserved and the matching new backend replaced the earlier executable after migration. All retired legacy messaging data tables were empty under the migration locks. See [the exact migration review](MESSAGING_DEPLOYMENT.md) and [current protocol](MESSAGING_API.md).

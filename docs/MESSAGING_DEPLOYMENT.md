@@ -1,10 +1,20 @@
 # Two-table relay: migration review and deployment
 
-Status: owner-approved design implemented in source; exact SQL is prepared for review and has NOT been applied. The existing installed server still runs the previous backend. No live messaging or PostgreSQL test, deployment, credential edit or network change is included in source verification.
+Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Source `d1825c648b72a3ecf413af3b4243540d6c9ad83b` is running. Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
 
-## Proposed SQL and effects
+Private backup/audit directory: `/home/void0000/.local/state/void-backend/deployments/20261102T144530+0800-two-table-relay`. It contains the full pre-migration dump, earlier executable, account/catalog snapshots, migration hashes, private verification source/logs and activation results. The temporary connection file was removed after verification.
 
-[004_temporary_relay_queue.sql](../migrations/004_temporary_relay_queue.sql) is the complete exact proposed database transaction, applied after the already-existing migrations 001–003. It is not executed by startup, tests or a launcher.
+The exact migration was first applied to a full isolated restore of the live backup. All restored row digests matched. Applying the migration preserved the account table OID, row/key digests, ownership, ACLs, UUID/default/key/index/constraint metadata, with only username nullability relaxed as approved. A separate synthetic PostgreSQL database proved the nonempty-data guard rolls back without changing schema or rows, and validated the new schema under a restricted runtime role.
+
+Actual HTTP/WebSocket tests against that synthetic database passed registration without username, named registration, audience-bound v2 authentication, lookup, transient online exchange, committed offline persistence, fresh application instances over the same database, reconnect replay, recipient-only ACK deletion and expiration cleanup. They found that SELECT FOR UPDATE cleanup needed unnecessary UPDATE permission; cleanup now uses a bounded plain selection and DELETE with an outer expiry recheck. The schema/grants were unchanged. Full race tests and vet then passed.
+
+The old backend stopped before live DDL. Exactly the reviewed 004 file was applied; no privilege script was needed for the existing postgres login. The new binary started successfully. All 17 local/public HTTP/tunnel probes and two real WebSocket route/unknown-account rejection checks passed, without creating any live accounts or messages. See [full verification](RELAY_VALIDATION.md).
+
+The remaining instructions describe future reviewed applications/recovery; they are not permission to replay this migration.
+
+## Applied SQL and effects
+
+[004_temporary_relay_queue.sql](../migrations/004_temporary_relay_queue.sql) is the complete exact reviewed database transaction, applied after the already-existing migrations 001–003. It is not automatically executed by startup, the standard test suite or a launcher.
 
 The transaction sets a 5-second lock timeout and 1-minute statement timeout, checks the expected legacy schema, and locks accounts plus all nine legacy messaging tables before examining their contents. It aborts if any legacy data table contains even one row. Expired sessions, ACKed messages, blocks, claims and delivery events are all protected by this guard. Only the expected singleton internal schema marker(version 1) can be discarded. RLS must not hide rows from the guard. An unexpected schema or dependency aborts instead of using CASCADE.
 
@@ -50,14 +60,14 @@ env -u VOID_RUN_POSTGRES_INTEGRATION -u VOID_RUN_MESSAGING_INTEGRATION \
 go vet ./...
 ```
 
-Loopback HTTP/WebSocket fixtures create synthetic keys and in-memory accounts only. Adapter tests mock pgx transactions; they do not establish a database connection. Default PostgreSQL registration cases skip. Historical messaging database/restart runners and their old API tests were retired rather than run against the changed architecture. This source verification does not claim that migration DDL/catalog expression handling has been exercised against PostgreSQL; that requires a separately approved disposable PostgreSQL check before live cutover.
+Loopback HTTP/WebSocket fixtures create synthetic keys and in-memory accounts only. Adapter tests mock pgx transactions; they do not establish a database connection. Default PostgreSQL registration cases skip. Historical messaging database/restart runners and their old API tests were retired rather than run against the changed architecture. The subsequent approved private PostgreSQL verification and live cutover are recorded above. Repeat database tests only against explicitly approved disposable resources.
 
-The existing PostgreSQL administration helper remains an explicitly opted-in registration fixture; it must never target the live database. No new SQL runner applies the proposed migration automatically.
+The existing PostgreSQL administration helper remains an explicitly opted-in registration fixture; it must never target the live database. No new SQL runner applies the migration automatically.
 
 ## Runtime after a reviewed cutover
 
-The new executable always serves the temporary WebSocket relay plus existing registration/health endpoints. There is no durable-HTTP-versus-WebSocket feature-mode switch. Use the owner's existing literal environment and audience; no credential, tunnel, DNS, ingress or frontend change is needed here. The previous run-messaging-server.sh launcher remains untouched for the currently installed binary; source review does not replace or restart that process.
+The deployed new executable always serves the temporary WebSocket relay plus existing registration/health endpoints. There is no durable-HTTP-versus-WebSocket feature-mode switch. Use the owner's existing literal environment and audience; no credential, tunnel, DNS, ingress or frontend change is needed here. The previous run-messaging-server.sh launcher remains untouched. The new executable was started directly as ./void-server; its mode is always the temporary relay, so no old feature switch is needed. No autostart service was installed.
 
 Go timestamps every accepted queue event and expires it after exactly 30 * 24 hours. Recipient ACK deletes the row. A cleanup task in the same process runs on startup and each minute with bounded batches/deadlines. Reads and writes exclude expired delivery regardless of cleanup lag. Cleanup cannot execute during outages; PostgreSQL MVCC/WAL/backups are not instant physical erasure.
 
-There is no encrypted delivery-receipt lifecycle, permanent delivery status, automatic retry/backoff, persistent deduplication, contact-request system, server conversation state or KeyPackage inventory. Review the [frame and failure contract](MESSAGING_API.md) before client interoperability testing; source-only work does not inspect or modify the separate frontend.
+There is no encrypted delivery-receipt lifecycle, permanent delivery status, automatic retry/backoff, persistent deduplication, contact-request system, server conversation state or KeyPackage inventory. Review the [frame and failure contract](MESSAGING_API.md) before client interoperability testing; this backend work did not inspect or modify the separate frontend.
