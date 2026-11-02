@@ -233,3 +233,24 @@ role/grant or schema changes were applied. The matching backend was activated at
 15:28 (Asia/Manila) after full race tests and vet passed. Thirteen local/public
 checks passed without inserting live account or message records. See
 [the follow-up verification](docs/RELAY_VALIDATION.md).
+
+
+## Explicitly authorized username-column removal: 2026-11-02, 15:45
+
+The owner instructed that username can be removed from the table. Applied
+`migrations/005_drop_account_username.sql` (SHA-256
+`0f6880494123eb6b2c848dcf9a0ff3c6f4673eded24dfb1727d52ca494e9f5db`) after a private full backup/restore rehearsal,
+dependency inspection, synthetic RESTRICT refusal check, restricted-role schema
+validation, full race suite and vet. The transaction drops only accounts.username
+with RESTRICT and bounded lock/statement timeouts; its local CHECK disappears
+with it. No historical migration was changed or replayed.
+
+Accounts now contain id, void_id, auth_public_key and created_at. Both existing
+account identity/key/timestamp hashes, table OID and remaining metadata are exact;
+messages, their foreign keys and indexes are unchanged. The matching backend is
+running and six live HTTP/readiness probes passed without account/message writes.
+No role, credential, environment, tunnel or network change was made. Removed
+username values are retained in the private recovery dump at
+`/home/void0000/.local/state/void-backend/deployments/20261102T154015+0800-drop-account-username/database.before.dump`.
+Temporary connection state/test cluster were removed; see
+[verification](docs/RELAY_VALIDATION.md) and [deployment](docs/MESSAGING_DEPLOYMENT.md).

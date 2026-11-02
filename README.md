@@ -4,7 +4,7 @@ A Go backend that authenticates accounts and temporarily queues opaque encrypted
 
 This source implements the owner-approved two-table design: `accounts` and a temporary `messages` queue. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
 
-**Activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly authorized migration.** Database `void2-0e2ee` now has only `accounts` and `messages`; both existing accounts and their keys were preserved. Backend source `f583d3a` is running with username-free registration. The exact applied SQL is [004_temporary_relay_queue.sql](migrations/004_temporary_relay_queue.sql); see [deployment and preservation evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates the schema and never applies migrations.
+**Activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly authorized migration.** Database `void2-0e2ee` now has only `accounts` and `messages`; both existing accounts and their keys were preserved. Backend source `5fd593f` is running with username-free registration and the username column removed. The applied SQL is [004_temporary_relay_queue.sql](migrations/004_temporary_relay_queue.sql), followed by [005_drop_account_username.sql](migrations/005_drop_account_username.sql); see [deployment and preservation evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates the schema and never applies migrations.
 
 The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, KeyPackage inventory, delivery-receipt event system, persistent retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [verification and activation record](docs/RELAY_VALIDATION.md).
 
@@ -42,7 +42,7 @@ A challenge accepts only the authentication public key:
 {"auth_public_key":"<padded base64 of a valid 32-byte Ed25519 public key>"}
 ```
 
-Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. New accounts leave the existing nullable username column as SQL NULL. Existing usernames and account identities remain stored; no database migration is needed for this change.
+Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. Migration 005 removes the legacy username column and its CHECK constraint. Accounts contain `id`, `void_id`, `auth_public_key` and `created_at`; existing account identities and keys are preserved.
 
 Clients sign the exact decoded `VOID-NOTHINGNESS:register:v1` challenge message and submit `challenge_id` and padded-base64 `signature` to `/accounts`. Registration proofs remain single-use and bind the submitted public key. The v1 proof retains an empty reserved line after the encoded key, so its bytes match the previous username-omitted flow. Registration responses contain only `void_id` and `created_at`. Private keys never leave devices. Registration creates no persistent messaging session.
 

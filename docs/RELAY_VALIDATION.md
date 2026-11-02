@@ -1,6 +1,6 @@
 # Temporary relay verification and activation
 
-Verified on 2026-11-02 (Asia/Manila), on branch backend. Deployed source: `f583d3a5d06370b4627cdcf44814e77abe72e477`. Installed binary SHA-256: `19cc6c430397eeede97633df99003cf9ddd05d146ba8d1662dcc74a4fdb49615`.
+Verified on 2026-11-02 (Asia/Manila), on branch backend. Deployed source: `5fd593f3253e38d2e5ea5c7ab490581ac0135eec`. Installed binary SHA-256: `cc6ba5d0b386d1dc09fde54f657b890eb6717c49b9ad2792f2b506a9f6c65fff`.
 
 The owner explicitly authorized migration with "do the migration now". The exact 004 was rehearsed against a full isolated restore, then applied to the existing database at 14:56. Both accounts and keys remain exact; account table identity, metadata and privileges were preserved apart from optional username nullability. Exactly accounts/messages remain, and the new queue was empty after verification. The original matching backend was started after that migration.
 
@@ -27,7 +27,7 @@ Core tests verify a server-owned UTC clock, exact 720-hour expiry, byte-preservi
 
 Loopback WebSocket tests verify Ed25519 ownership, audience-bound authentication, persistence before acceptance, live forwarding, remaining-event replay after reconnect, a disconnected sender's pending delivery, wrong-recipient ACK safety, ACK deletion, client timestamp/sender/legacy-frame rejection, opaque online initialization forwarding without storage, payload/byte budgets, account command rates across reconnect, admission, origin handling, heartbeat, slow writers and connection replacement. Ordinary HTTP deadlines do not shorten upgraded socket lifetime. The synthetic demo registers two local identities and exercises both directions plus offline/reconnect/ACK deletion without reading `.env` or opening a database.
 
-Current registration tests cover key-only registration, rejection of named/empty/null usernames, strict invalid/duplicate/unknown-field handling, key validation, signed proof binding, expiration and replay. Account repository mocks verify that INSERT/RETURNING never reference username, preserve identity/key/time values, retain nullable-username schema validation and require no username privileges.
+Current registration tests cover key-only registration, rejection of named/empty/null usernames, strict invalid/duplicate/unknown-field handling, key validation, signed proof binding, expiration and replay. Account repository mocks verify that INSERT/RETURNING never reference username, preserve identity/key/time values, require the four retained account columns and two CHECK constraints, reject the legacy username column and require no username privileges.
 
 PostgreSQL queue mocks cover numeric account lock ordering, exact 64-bit ID splitting into two advisory-lock keys, no account UPDATE privilege requirement, transaction commit before acceptance, quota/duplicate rejection, ownership-bound ACK deletion, unexpired bounded scans, bounded expiry deletion, safe errors, six-column schema validation and PostgreSQL 18 NOT NULL catalog handling. The later private PostgreSQL rehearsal and flow verification additionally exercised actual SQL, permissions and atomic guard rollback. Production connection-local IntervalStyle is pinned to postgres for deterministic constraint rendering without changing database/server settings.
 
@@ -64,3 +64,33 @@ empty and null username fields, key-only challenge creation with exact v1 bindin
 and empty-registration rejection. These probes created only process-local
 challenges; no account or message records were written. The backend is running.
 Private executable backup, build metadata and activation results: `/home/void0000/.local/state/void-backend/deployments/20261102T152735+0800-username-free-registration`.
+
+
+## Username column removal: 2026-11-02, 15:45 (Asia/Manila)
+
+The owner explicitly authorized removing username from the database. Migration
+005 SHA-256: `0f6880494123eb6b2c848dcf9a0ff3c6f4673eded24dfb1727d52ca494e9f5db`.
+
+Live dependency inspection found only accounts_username_check, with its normal
+and automatic dependency entries. The full private backup was restored into a
+Unix-socket-only PostgreSQL 18.6 cluster; account/message row counts and hashes,
+including retained identity fields, matched. Exact 005 removed the column and
+its own CHECK. Account table OID, retained attribute/constraint/index/ACL metadata
+and identity hashes stayed equal; the complete messages snapshot stayed equal.
+A separate synthetic view dependency correctly prevented deletion atomically.
+Both actual Go schema validators passed under a restricted runtime role.
+
+The full race suite, vet and Python syntax check passed. PostgreSQL registration
+fixtures were updated for four columns but were not run against the live database.
+After graceful backend shutdown, exact 005 was applied live and the matching
+binary started. Final read-only validation confirmed username absent, both
+accounts' identity/key/timestamp and remaining metadata hashes unchanged, and all
+messages/foreign keys/indexes unchanged. Six local/public HTTP/readiness probes
+passed; no live accounts or messages were inserted. Credentials, .env, tunnel,
+network settings, frontend and user-local ignore/instruction changes were untouched.
+
+Private dump, executable backup, inspection sources, snapshots, rehearsal,
+activation and cleanup records: `/home/void0000/.local/state/void-backend/deployments/20261102T154015+0800-drop-account-username`.
+The removed names remain recoverable there. Temporary production connection
+state and the private test cluster were removed after verification. Historical
+migrations 001–004 remain unchanged.

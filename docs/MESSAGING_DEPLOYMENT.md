@@ -1,6 +1,6 @@
 # Two-table relay: migration review and deployment
 
-Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Current source `f583d3a5d06370b4627cdcf44814e77abe72e477` is running. Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
+Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Current source `5fd593f3253e38d2e5ea5c7ab490581ac0135eec` is running. The separately authorized username-column removal was applied at 15:45 (Asia/Manila). Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
 
 Private backup/audit directory: `/home/void0000/.local/state/void-backend/deployments/20261102T144530+0800-two-table-relay`. It contains the full pre-migration dump, earlier executable, account/catalog snapshots, migration hashes, private verification source/logs and activation results. The temporary connection file was removed after verification.
 
@@ -12,9 +12,41 @@ The old backend stopped before live DDL. Exactly the reviewed 004 file was appli
 
 Registration was updated at 15:28 (Asia/Manila) to remove username creation. Challenges accept only `auth_public_key`; named, empty and null username fields are rejected. Account responses contain only `void_id` and `created_at`. The existing nullable username column and its values remain intact. No migration or privilege change was applied. Full race tests, vet and 13 local/public checks passed; challenge probes did not create accounts or messages. The previous executable and this activation record are retained privately at `/home/void0000/.local/state/void-backend/deployments/20261102T152735+0800-username-free-registration`.
 
+## Applied username-column removal (005)
+
+The owner explicitly authorized removing username from the table. The live
+catalog showed only the column's own CHECK dependency. A new private full dump
+was restored into an isolated Unix-socket-only PostgreSQL 18.6 cluster; both
+tables' row hashes and account identity hash matched. Exact migration 005 passed,
+preserving account table identity, remaining attributes/constraints/indexes/ACLs
+and all message rows and schema. A separate synthetic dependent view correctly
+caused RESTRICT to abort atomically. Both Go validators passed under restricted
+runtime permissions. Full race tests and vet also passed.
+
+The complete [005 transaction](../migrations/005_drop_account_username.sql) is:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '1min';
+ALTER TABLE public.accounts DROP COLUMN username RESTRICT;
+COMMIT;
+```
+
+The backend stopped gracefully before live application. Accounts now contain
+exactly `id`, `void_id`, `auth_public_key` and `created_at`. Both existing identity
+rows, keys, timestamps and remaining metadata match their pre-migration hashes;
+messages and their foreign keys/indexes are unchanged. Only username values and
+their CHECK were removed. No CASCADE, role, credential, tunnel or network change
+was used. Six live HTTP/readiness probes passed without account/message writes.
+
+Private recovery archive, earlier executable, before/after snapshots and audit:
+`/home/void0000/.local/state/void-backend/deployments/20261102T154015+0800-drop-account-username`. The removed names are retained in that recovery archive. Temporary
+connection state and the isolated test cluster were removed after verification.
+
 The remaining instructions describe future reviewed applications/recovery; they are not permission to replay this migration.
 
-## Applied SQL and effects
+## Earlier applied relay migration (004)
 
 [004_temporary_relay_queue.sql](../migrations/004_temporary_relay_queue.sql) is the complete exact reviewed database transaction, applied after the already-existing migrations 001–003. It is not automatically executed by startup, the standard test suite or a launcher.
 
@@ -32,7 +64,7 @@ Accounts are not recreated. Their existing internal UUIDs/defaults, VOID-IDs, ke
 
 The companion [004_temporary_relay_privileges.sql](../migrations/004_temporary_relay_privileges.sql) is separately reviewed and parameterized for an existing restricted runtime role. The new queue needs SELECT, INSERT and DELETE; replacing the old table does not transfer its old grants. Existing account registration/key-lookup privileges remain necessary. The owner-selected postgres login already has the needed access; do not change roles or passwords merely to apply this design.
 
-## Legacy records and approval boundary
+## Recovery and future migration boundaries
 
 If any guard fails, do not delete rows to force the migration through. Record counts and review a specific preservation/drain/import decision with the owner. No data disposal is authorized by the guard failure.
 
