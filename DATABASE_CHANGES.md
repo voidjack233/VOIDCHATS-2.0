@@ -221,3 +221,15 @@ passed without registering or sending from any live account. Final account data
 and catalog invariants still match, and the queue is empty. Private connection
 state/test clusters were removed after verification; the backup/audit remains.
 See [activation evidence](docs/RELAY_VALIDATION.md).
+
+
+## Username creation removed without database changes: 2026-11-02
+
+The owner requested removal of username creation. Registration now accepts only
+an authentication public key, rejects username fields and returns only VOID-ID
+and creation time. New INSERTs omit the existing nullable username column.
+Existing username values, account identifiers and keys remain intact; no SQL,
+role/grant or schema changes were applied. The matching backend was activated at
+15:28 (Asia/Manila) after full race tests and vet passed. Thirteen local/public
+checks passed without inserting live account or message records. See
+[the follow-up verification](docs/RELAY_VALIDATION.md).

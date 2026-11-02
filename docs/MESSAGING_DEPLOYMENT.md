@@ -1,6 +1,6 @@
 # Two-table relay: migration review and deployment
 
-Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Source `d1825c648b72a3ecf413af3b4243540d6c9ad83b` is running. Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
+Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Current source `f583d3a5d06370b4627cdcf44814e77abe72e477` is running. Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
 
 Private backup/audit directory: `/home/void0000/.local/state/void-backend/deployments/20261102T144530+0800-two-table-relay`. It contains the full pre-migration dump, earlier executable, account/catalog snapshots, migration hashes, private verification source/logs and activation results. The temporary connection file was removed after verification.
 
@@ -9,6 +9,8 @@ The exact migration was first applied to a full isolated restore of the live bac
 Actual HTTP/WebSocket tests against that synthetic database passed registration without username, named registration, audience-bound v2 authentication, lookup, transient online exchange, committed offline persistence, fresh application instances over the same database, reconnect replay, recipient-only ACK deletion and expiration cleanup. They found that SELECT FOR UPDATE cleanup needed unnecessary UPDATE permission; cleanup now uses a bounded plain selection and DELETE with an outer expiry recheck. The schema/grants were unchanged. Full race tests and vet then passed.
 
 The old backend stopped before live DDL. Exactly the reviewed 004 file was applied; no privilege script was needed for the existing postgres login. The new binary started successfully. All 17 local/public HTTP/tunnel probes and two real WebSocket route/unknown-account rejection checks passed, without creating any live accounts or messages. See [full verification](RELAY_VALIDATION.md).
+
+Registration was updated at 15:28 (Asia/Manila) to remove username creation. Challenges accept only `auth_public_key`; named, empty and null username fields are rejected. Account responses contain only `void_id` and `created_at`. The existing nullable username column and its values remain intact. No migration or privilege change was applied. Full race tests, vet and 13 local/public checks passed; challenge probes did not create accounts or messages. The previous executable and this activation record are retained privately at `/home/void0000/.local/state/void-backend/deployments/20261102T152735+0800-username-free-registration`.
 
 The remaining instructions describe future reviewed applications/recovery; they are not permission to replay this migration.
 
