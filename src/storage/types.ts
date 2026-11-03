@@ -223,7 +223,7 @@ export interface NativeStorageModule {
   close(): Promise<string>;
   removeLocalData(): Promise<string>;
   getLocalIdentity(): Promise<string>;
-  prepareAccountRegistration(username: string, apiUrl: string): Promise<string>;
+  prepareAccountRegistration(apiUrl: string): Promise<string>;
   signAccountChallenge(messageBase64: string): Promise<string>;
   completeAccountRegistration(accountJSON: string): Promise<string>;
   execute(operation: StorageOperation, payloadJSON: string): Promise<string>;

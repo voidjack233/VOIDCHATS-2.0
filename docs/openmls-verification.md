@@ -1,5 +1,11 @@
 # OpenMLS integration verification
 
+This document records the original 2026-10-11 integration checks. Its APK hashes,
+test counts and remaining-work statements describe that historical build. For the
+current WebSocket messaging implementation, use the [backend contract](messaging-backend-handoff.md)
+and [phase 5 two-device checklist](two-device-messaging-test.md). Current Android
+device verification is owner-run; historical desktop checks do not establish it.
+
 Validation completed on **2026-10-11** in the Windows checkout of `VOIDCHATS-2.0`. Dependency/security review was performed on 2026-10-10; see [security findings](openmls-security.md).
 
 ## Completed checks

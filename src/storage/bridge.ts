@@ -5,7 +5,6 @@ export {sanitizeStorageError, StorageError} from './errors';
 
 export interface AccountBinding {
   void_id: string;
-  username: string;
   created_at: string;
   api_url: string;
   auth_public_key: string;
@@ -17,7 +16,7 @@ export interface StorageDriver {
   initializeDevelopment(): Promise<NativeStorageSnapshot>;
   close(): Promise<NativeStorageSnapshot>;
   removeLocalData(): Promise<NativeStorageSnapshot>;
-  prepareAccountRegistration(username: string, apiUrl: string): Promise<LocalIdentity>;
+  prepareAccountRegistration(apiUrl: string): Promise<LocalIdentity>;
   signAccountChallenge(messageBase64: string): Promise<string>;
   completeAccountRegistration(account: AccountBinding): Promise<NativeStorageSnapshot>;
   execute(operation: StorageOperation, payload: object): Promise<unknown>;
@@ -70,7 +69,7 @@ export function createStorageDriver(
     },
     close: async () => decodeSnapshot(await invoke(native => native.close())),
     removeLocalData: async () => decodeSnapshot(await invoke(native => native.removeLocalData())),
-    prepareAccountRegistration: async (username, apiUrl) => decodeIdentity(await invoke(() => registrationModule().prepareAccountRegistration(username, apiUrl))),
+    prepareAccountRegistration: async apiUrl => decodeIdentity(await invoke(() => registrationModule().prepareAccountRegistration(apiUrl))),
     signAccountChallenge: async message => {
       try {
         const signature = await registrationModule().signAccountChallenge(message);

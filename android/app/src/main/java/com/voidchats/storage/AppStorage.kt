@@ -4,10 +4,6 @@ import android.content.Context
 import android.util.Base64
 import com.facebook.react.bridge.Promise
 import com.voidchats.BuildConfig
-import com.voidchats.openmls.MlsEngine
-import com.voidchats.openmls.MlsException
-import com.voidchats.openmls.MlsStorage
-import com.voidchats.openmls.StoredMlsState
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.RejectedExecutionException
@@ -18,15 +14,11 @@ import org.json.JSONObject
 import org.json.JSONArray
 import org.json.JSONTokener
 
-/** One queue and one transaction boundary for public history and private MLS checkpoints. */
+/** One serialized SQLCipher boundary for account keys, Signal state and history. */
 internal class AppStorage(private val context: Context, namespace: String = "void-local-v1") {
   private val encrypted = EncryptedDatabase(context, namespace)
   private var database: SQLiteDatabase? = null
-  private var engine: MlsEngine? = null
   private var errorCode: String? = null
-  private var checkpointed = false
-  private val loadedSnapshotBuffers = mutableListOf<ByteArray>()
-  private var transactionActive = false
   private var references = 2
   private val executor = object : ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32)) {
     override fun terminated() { closeHandles(); super.terminated() }
@@ -41,11 +33,7 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
           promise.reject(error.code.removePrefix("STORAGE_"), "Protected local storage is unavailable.")
         }
         catch (_: IllegalArgumentException) { promise.reject("INVALID_INPUT", "The local storage input is invalid.") }
-        catch (error: MlsException) {
-          if (error is MlsException.StorageFailure) poison("DATABASE_ERROR")
-          val category = error.javaClass.simpleName.replace(Regex("([a-z])([A-Z])"), "$1_$2").uppercase()
-          promise.reject("MLS_$category", "The native MLS operation failed.")
-        }
+        catch (error: SignalFailure) { promise.reject(error.code, "The protected Signal operation could not be completed.") }
         catch (_: LinkageError) { poison("NATIVE_MODULE_UNAVAILABLE"); promise.reject("NATIVE_MODULE_UNAVAILABLE", "The protected native library could not be loaded.") }
         catch (_: Exception) { poison("DATABASE_ERROR"); promise.reject("DATABASE_ERROR", "Protected local storage is unavailable.") }
       }
@@ -74,11 +62,10 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
       database = db
       val identity = localIdentity()
       if (identity == null) throw StorageFailure("DATABASE_ERROR")
-      engine = openEngine(false)
-      val clients = engine!!.listClients()
-      val primary = clients.singleOrNull { it.clientHandle == identity.getString("clientHandle") } ?: throw StorageFailure("DATABASE_ERROR")
-      if (base64(primary.credentialIdentity) != identity.getString("credentialIdentityBase64") ||
-          base64(primary.signaturePublicKey) != identity.getString("signaturePublicKeyBase64")) throw StorageFailure("DATABASE_ERROR")
+      transaction {
+        AccountKeyStore(db).preserveExisting(identity)
+        SignalStore(db).ensureIdentity()
+      }
       errorCode = null
       return@withLifecycleLock status()
     } catch (error: Throwable) {
@@ -100,11 +87,12 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
       val db = encrypted.open(create = true)
       database = db
       StorageMigrations(context).migrate(db)
-      mutateMls(initializeIfMissing = true) { active ->
+      transaction {
         val localId = UUID.randomUUID().toString()
-        val client = active.createClient(localId.toByteArray(Charsets.UTF_8))
+        val publicKey = AccountKeyStore(db).generate()
         db.execSQL("INSERT INTO local_identity(slot,local_device_id,client_handle,credential_identity_base64,signature_public_key_base64,account_void_id,created_at) VALUES(1,?,?,?,?,NULL,?)",
-          arrayOf(localId, client.clientHandle, base64(client.credentialIdentity), base64(client.signaturePublicKey), System.currentTimeMillis()))
+          arrayOf(localId, "account-$localId", base64(localId.toByteArray(Charsets.UTF_8)), base64(publicKey), System.currentTimeMillis()))
+        SignalStore(db).ensureIdentity()
       }
       errorCode = null
       return@withLifecycleLock status()
@@ -119,20 +107,19 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
         put("credentialIdentityBase64", it.getString(2)); put("signaturePublicKeyBase64", it.getString(3))
         put("accountVoidId", if (it.isNull(4)) JSONObject.NULL else it.getString(4)); put("createdAt", it.getLong(5))
         val account = registration()
-        put("accountUsername", if (it.isNull(4) || account == null) JSONObject.NULL else account.getString("username"))
+        put("accountUsername", if (it.isNull(4) || account == null || account.isNull("username")) JSONObject.NULL else account.getString("username"))
         put("accountApiUrl", if (it.isNull(4) || account == null) JSONObject.NULL else account.getString("api_url"))
       }
     }
   }
 
   private fun registration(): JSONObject? = requireDatabase().rawQuery("SELECT username,api_url,proof_signed,created_at FROM account_registration WHERE slot=1", emptyArray()).use {
-    if (!it.moveToFirst()) null else JSONObject().put("username", it.getString(0)).put("api_url", it.getString(1))
+    if (!it.moveToFirst()) null else JSONObject().put("username", if (it.isNull(0)) JSONObject.NULL else it.getString(0)).put("api_url", it.getString(1))
       .put("proof_signed", it.getInt(2)).put("created_at", if (it.isNull(3)) JSONObject.NULL else it.getString(3))
   }
 
   /** Reuses durable identity material, including after failures and restarts. */
-  fun prepareAccountRegistration(username: String, apiUrl: String): String {
-    require(RegistrationProof.validUsername(username))
+  fun prepareAccountRegistration(apiUrl: String): String {
     RegistrationProof.validateApiUrl(apiUrl)
     initializeLocalIdentity()
     val identity = localIdentity() ?: throw StorageFailure("DATABASE_ERROR")
@@ -141,9 +128,9 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
     try {
       val current = registration()
       if (!identity.isNull("accountVoidId")) {
-        if (current == null || current.getString("username") != username || current.getString("api_url") != apiUrl) throw StorageFailure("CONFLICT")
-      } else if (current == null || current.getString("username") != username || current.getString("api_url") != apiUrl) {
-        db.execSQL("INSERT INTO account_registration(slot,username,api_url,proof_signed,created_at) VALUES(1,?,?,0,NULL) ON CONFLICT(slot) DO UPDATE SET username=excluded.username,api_url=excluded.api_url,proof_signed=0,created_at=NULL", arrayOf(username, apiUrl))
+        if (current == null || current.getString("api_url") != apiUrl) throw StorageFailure("CONFLICT")
+      } else if (current == null || !current.isNull("username") || current.getString("api_url") != apiUrl) {
+        db.execSQL("INSERT INTO account_registration(slot,username,api_url,proof_signed,created_at) VALUES(1,NULL,?,0,NULL) ON CONFLICT(slot) DO UPDATE SET username=NULL,api_url=excluded.api_url,proof_signed=0,created_at=NULL", arrayOf(apiUrl))
       }
       db.setTransactionSuccessful()
     } finally { db.endTransaction() }
@@ -154,10 +141,10 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
     val identity = localIdentity() ?: throw StorageFailure("NOT_INITIALIZED")
     if (!identity.isNull("accountVoidId")) throw StorageFailure("CONFLICT")
     val pending = registration() ?: throw StorageFailure("INVALID_INPUT")
-    val message = RegistrationProof.validate(messageBase64, pending.getString("username"), identity.getString("signaturePublicKeyBase64"))
-    // Signing does not mutate MLS state. Persist the intent before returning the
-    // public proof so a successful remote result can be saved after reopening.
-    val signature = requireEngine().signRegistrationChallenge(identity.getString("clientHandle"), message)
+    require(pending.isNull("username"))
+    val message = RegistrationProof.validate(messageBase64, identity.getString("signaturePublicKeyBase64"))
+    // Keep the deployed registration framing and the original Ed25519 account key.
+    val signature = AccountKeyStore(requireDatabase()).sign(message)
     val db = requireDatabase()
     db.beginTransaction()
     try {
@@ -175,7 +162,7 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
       require(parser.nextClean() == '\u0000')
       parsed
     } catch (_: org.json.JSONException) { throw IllegalArgumentException() }
-    val fields = setOf("void_id", "username", "created_at", "api_url", "auth_public_key")
+    val fields = setOf("void_id", "created_at", "api_url", "auth_public_key")
     require(account.length() == fields.size && account.keys().asSequence().all { it in fields && account.get(it) is String })
     val voidId = account.getString("void_id")
     require(Regex("^[1-9][0-9]{0,18}$").matches(voidId) && voidId.toLongOrNull() != null)
@@ -185,7 +172,7 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
     db.beginTransaction()
     try {
       val pending = registration() ?: throw StorageFailure("INVALID_INPUT")
-      if (pending.getString("username") != account.getString("username") || pending.getString("api_url") != account.getString("api_url") ||
+      if (pending.getString("api_url") != account.getString("api_url") ||
           pending.getInt("proof_signed") != 1 || identity.getString("signaturePublicKeyBase64") != account.getString("auth_public_key")) throw StorageFailure("CONFLICT")
       if (!identity.isNull("accountVoidId")) {
         if (identity.getString("accountVoidId") != voidId || pending.optString("created_at") != account.getString("created_at")) throw StorageFailure("CONFLICT")
@@ -199,148 +186,11 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
   }
 
   fun requireDatabase(): SQLiteDatabase = database ?: throw StorageFailure(if (encrypted.exists()) "LOCKED" else "NOT_INITIALIZED")
-  fun requireEngine(): MlsEngine = engine ?: throw StorageFailure("LOCKED")
-  fun requirePrimary(handle: String) {
-    require(handle == localIdentity()?.getString("clientHandle"))
-  }
-
-  private val callback = object : MlsStorage {
-    override fun loadState(): StoredMlsState? = loadMlsState()?.also { loadedSnapshotBuffers.add(it.snapshot) }
-    override fun stateRevision(): ULong = requireDatabase().rawQuery("SELECT revision FROM native_mls_state WHERE slot=1", emptyArray()).use {
-      if (!it.moveToFirst()) 0uL else it.getLong(0).toULong()
-    }
-    override fun saveState(expectedRevision: ULong, snapshot: ByteArray): ULong {
-      try {
-        if (!transactionActive || !requireDatabase().inTransaction() || expectedRevision >= Long.MAX_VALUE.toULong() || snapshot.isEmpty() || snapshot.size > 64 * 1024 * 1024) throw MlsException.StorageFailure()
-        val next = expectedRevision + 1uL
-        val db = requireDatabase()
-        if (expectedRevision == 0uL) {
-          db.compileStatement("INSERT INTO native_mls_state(slot,revision,snapshot) VALUES(1,1,?)").use {
-            it.bindBlob(1, snapshot); it.executeInsert()
-          }
-        } else {
-          db.compileStatement("UPDATE native_mls_state SET revision=?,snapshot=? WHERE slot=1 AND revision=?").use {
-            it.bindLong(1, next.toLong()); it.bindBlob(2, snapshot); it.bindLong(3, expectedRevision.toLong())
-            if (it.executeUpdateDelete() != 1) throw MlsException.StorageFailure()
-          }
-        }
-        checkpointed = true
-        return next
-      } catch (_: Exception) { throw MlsException.StorageFailure() }
-      finally { snapshot.fill(0) }
-    }
-  }
-
-  private fun openEngine(initializeIfMissing: Boolean): MlsEngine = try {
-    MlsEngine.open(callback, initializeIfMissing)
-  } finally {
-    // UniFFI synchronously lifted each callback result into Rust before returning.
-    for (snapshot in loadedSnapshotBuffers) snapshot.fill(0)
-    loadedSnapshotBuffers.clear()
-  }
-
-  // CursorWindow has a bounded row size. Read large private snapshots in memory chunks.
-  internal fun loadMlsState(): StoredMlsState? {
-    val db = requireDatabase()
-    val metadata = db.rawQuery("SELECT revision,length(snapshot) FROM native_mls_state WHERE slot=1", emptyArray()).use {
-      if (!it.moveToFirst()) null else Pair(it.getLong(0), it.getInt(1))
-    } ?: return null
-    if (metadata.first < 1 || metadata.second !in 1..(64 * 1024 * 1024)) throw MlsException.StorageFailure()
-    val snapshot = ByteArray(metadata.second)
-    try {
-      var offset = 0
-      while (offset < snapshot.size) {
-        val length = minOf(256 * 1024, snapshot.size - offset)
-        db.rawQuery("SELECT substr(snapshot,?,?) FROM native_mls_state WHERE slot=1 AND revision=?", arrayOf((offset + 1).toString(), length.toString(), metadata.first.toString())).use {
-          if (!it.moveToFirst()) throw MlsException.StorageFailure()
-          val chunk = it.getBlob(0)
-          try { if (chunk.size != length) throw MlsException.StorageFailure(); chunk.copyInto(snapshot, offset) } finally { chunk.fill(0) }
-        }
-        offset += length
-      }
-      return StoredMlsState(metadata.first.toULong(), snapshot)
-    } catch (_: Exception) { snapshot.fill(0); throw MlsException.StorageFailure() }
-  }
-
-  fun readStoredDecryptions(beforeJSON: String, limit: Double): String {
-    require(beforeJSON.length <= 1024 && limit.isFinite() && limit == limit.toInt().toDouble() && limit in 1.0..100.0)
-    val parser = JSONTokener(beforeJSON)
-    val parsed = parser.nextValue(); require(parser.nextClean() == '\u0000')
-    val before = if (parsed == JSONObject.NULL) null else parsed as? JSONObject ?: throw IllegalArgumentException()
-    val beforeId: String?; val beforeAt: Long?
-    if (before != null) {
-      require(before.keys().asSequence().toSet() == setOf("createdAt", "id"))
-      beforeId = before.get("id") as? String ?: throw IllegalArgumentException()
-      val number = before.get("createdAt") as? Number ?: throw IllegalArgumentException(); beforeAt = number.toLong()
-      require(beforeId.isNotBlank() && beforeId.length <= 128 && beforeAt in 0..9_007_199_254_740_991L && number.toDouble() == beforeAt.toDouble())
-    } else { beforeId = null; beforeAt = null }
-    val localId = localIdentity()?.getString("localDeviceId") ?: throw StorageFailure("NOT_INITIALIZED")
-    val db = requireDatabase()
-    db.rawQuery("SELECT count(*) FROM crypto_events WHERE local_id=? AND operation='decrypt' AND outcome='ok' AND (group_id IS NULL OR plaintext IS NULL OR sender_identity IS NULL OR sender_signature_public_key IS NULL OR epoch IS NULL OR checkpoint_revision IS NULL)", arrayOf(localId)).use {
-      if (!it.moveToFirst() || it.getLong(0) != 0L) throw StorageFailure("DATABASE_ERROR")
-    }
-    val columns = "SELECT id,group_id,plaintext,sender_identity,sender_signature_public_key,epoch,created_at FROM crypto_events WHERE local_id=? AND operation='decrypt' AND outcome='ok'"
-    val sql = if (before == null) "$columns ORDER BY created_at DESC,id DESC LIMIT ?" else "$columns AND (created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?"
-    val args = if (before == null) arrayOf(localId, (limit.toInt() + 1).toString()) else arrayOf(localId, beforeAt.toString(), beforeAt.toString(), beforeId!!, (limit.toInt() + 1).toString())
-    val items = JSONArray(); var more = false; var encodedSize = 0
-    db.rawQuery(sql, args).use { c ->
-      while (c.moveToNext()) {
-        if (items.length() >= limit.toInt()) { more = true; break }
-        val plaintext = c.getBlob(2)
-        try {
-          val groupId = c.getBlob(1); val senderIdentity = c.getBlob(3); val senderKey = c.getBlob(4)
-          val eventId = c.getString(0); val epoch = c.getString(5); val createdAt = c.getLong(6)
-          if (plaintext.size > 1024 * 1024 || groupId.size !in 1..256 || senderIdentity.size !in 1..1024 || senderKey.size != 32 ||
-              eventId.isBlank() || eventId.length > 128 || createdAt !in 0..9_007_199_254_740_991L ||
-              !epoch.matches(Regex("0|[1-9][0-9]{0,19}")) || (epoch.length == 20 && epoch > "18446744073709551615")) throw StorageFailure("DATABASE_ERROR")
-          val item = JSONObject().put("eventId", eventId).put("groupIdBase64", base64(groupId)).put("plaintextBase64", base64(plaintext))
-            .put("senderIdentityBase64", base64(senderIdentity)).put("senderSignaturePublicKeyBase64", base64(senderKey)).put("epoch", epoch).put("createdAt", createdAt)
-          val size = item.toString().length + 1
-          if (items.length() > 0 && encodedSize + size > 4 * 1024 * 1024 - 1024) { more = true; break }
-          items.put(item); encodedSize += size
-        } finally { plaintext.fill(0) }
-      }
-    }
-    val last = if (more && items.length() > 0) items.getJSONObject(items.length() - 1) else null
-    return JSONObject().put("items", items).put("nextCursor", if (last == null) JSONObject.NULL else JSONObject().put("createdAt", last.getLong("createdAt")).put("id", last.getString("eventId"))).toString()
-  }
-
-  fun <T> mutateMls(initializeIfMissing: Boolean = false, operation: (MlsEngine) -> T): T {
+  fun <T> transaction(operation: () -> T): T {
     val db = requireDatabase()
     db.beginTransaction()
-    checkpointed = false
-    transactionActive = true
-    var failure: Throwable? = null
-    var result: T? = null
-    try {
-      val active = engine ?: openEngine(initializeIfMissing).also { engine = it }
-      try { result = operation(active) }
-      catch (error: Throwable) { failure = error }
-      // Rust can consume a ratchet/key package before returning a protocol error.
-      // A successful checkpoint must survive even when the operation is rejected.
-      if (failure == null || (checkpointed && failure is MlsException && failure !is MlsException.StorageFailure)) {
-        db.setTransactionSuccessful()
-      } else if (failure is MlsException.StorageFailure || failure !is MlsException) {
-        engine?.poison()
-      }
-    } catch (error: Throwable) { failure = error; engine?.poison() }
-    finally {
-      transactionActive = false
-      try { db.endTransaction() }
-      catch (error: Throwable) { failure = StorageFailure("DATABASE_ERROR") }
-    }
-    val error = failure
-    if (error != null) {
-      if (error !is MlsException || error is MlsException.StorageFailure) poison("DATABASE_ERROR")
-      throw error
-    }
-    @Suppress("UNCHECKED_CAST") return result as T
-  }
-
-  fun journal(operation: String, groupId: ByteArray?, plaintext: ByteArray?, ciphertext: ByteArray?, senderIdentity: ByteArray? = null, senderSignaturePublicKey: ByteArray? = null, epoch: String? = null) {
-    check(transactionActive)
-    requireDatabase().execSQL("INSERT INTO crypto_events(id,local_id,operation,group_id,plaintext,ciphertext,outcome,created_at,sender_identity,sender_signature_public_key,epoch,checkpoint_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-      arrayOf(UUID.randomUUID().toString(), localIdentity()!!.getString("localDeviceId"), operation, groupId, plaintext, ciphertext, "ok", System.currentTimeMillis(), senderIdentity, senderSignaturePublicKey, epoch, callback.stateRevision().toLong()))
+    try { val result = operation(); db.setTransactionSuccessful(); return result }
+    finally { db.endTransaction() }
   }
 
   fun execute(operation: String, payload: JSONObject): String {
@@ -360,12 +210,11 @@ internal class AppStorage(private val context: Context, namespace: String = "voi
 
   fun removeLocalData(): String = encrypted.withLifecycleLock { lock(); encrypted.removeLocalData(); errorCode = null; status() }
   private fun closeHandles() {
-    val active = engine; engine = null; database = null
-    try { active?.closeEngine() } finally { try { active?.destroy() } finally { encrypted.close() } }
+    database = null
+    encrypted.close()
   }
   private fun poison(code: String) {
     errorCode = code
-    try { engine?.poison() } catch (_: Exception) { }
     try { closeHandles() } catch (_: Exception) { }
   }
   private fun base64(bytes: ByteArray) = Base64.encodeToString(bytes, Base64.NO_WRAP)

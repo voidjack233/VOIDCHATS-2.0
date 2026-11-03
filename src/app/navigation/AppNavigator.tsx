@@ -85,18 +85,21 @@ function MessengerNavigator(): React.JSX.Element {
     setDetail(null);
     setTab(nextTab);
   };
+  const openConversation = (conversation: Conversation) => {
+    if (localDeviceId) { setDetail({name: 'chat', conversation, localDeviceId}); }
+  };
 
   let content: React.JSX.Element;
   if (detail?.name === 'chat' && localDeviceId && detail.localDeviceId === localDeviceId) {
     content = (
-      <ChatScreen conversation={detail.conversation} onBack={() => setDetail(null)} />
+      <ChatScreen key={detail.conversation.id} conversation={detail.conversation} onBack={() => setDetail(null)} />
     );
   } else if (detail?.name === 'settings') {
     content = <SettingsScreen onBack={() => setDetail(null)} />;
   } else if (tab === 'requests') {
-    content = <RequestsScreen />;
+    content = <RequestsScreen onOpenConversation={openConversation} />;
   } else if (tab === 'contacts') {
-    content = <ContactsScreen />;
+    content = <ContactsScreen onOpenConversation={openConversation} />;
   } else if (tab === 'profile') {
     content = <ProfileScreen onOpenSettings={() => setDetail({name: 'settings'})} />;
   } else {
@@ -104,9 +107,7 @@ function MessengerNavigator(): React.JSX.Element {
       <ConversationsScreen
         onOpenRequests={() => showTab('requests')}
         onOpenContacts={() => showTab('contacts')}
-        onOpenConversation={conversation => {
-          if (localDeviceId) { setDetail({name: 'chat', conversation, localDeviceId}); }
-        }}
+        onOpenConversation={openConversation}
       />
     );
   }

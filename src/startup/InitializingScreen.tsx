@@ -1,9 +1,9 @@
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useEffect, useRef} from 'react';
 import {ActivityIndicator, StyleSheet, View} from 'react-native';
-import {useAccount, validateUsername} from '../account';
+import {useAccount} from '../account';
 import {useStorage} from '../storage';
 import {useTheme} from '../theme';
-import {AppText, Button, TextInput} from '../ui';
+import {AppText, Button} from '../ui';
 import {StartupLayout} from './components/StartupLayout';
 
 export interface InitializingScreenProps {
@@ -16,12 +16,10 @@ export function InitializingScreen({onBack, onPreview, onBusyChange}: Initializi
   const theme = useTheme();
   const account = useAccount();
   const storage = useStorage();
-  const [username, setUsername] = useState(account.username ?? '');
   const submitting = useRef(false);
   const busy = !['idle', 'error', 'ready'].includes(account.status);
   const nativeBuildRequired = storage.status === 'error' &&
     ['UNSUPPORTED_PLATFORM', 'NATIVE_MODULE_UNAVAILABLE', 'NATIVE_MODULE_INCOMPATIBLE'].includes(storage.errorCode ?? '');
-  const validUsername = validateUsername(username);
   const progress = account.status === 'preparing' ? 'Protecting your identity on this device…'
     : account.status === 'challenge' ? 'Connecting to VOID…'
     : account.status === 'signing' ? 'Confirming your device identity…'
@@ -35,9 +33,9 @@ export function InitializingScreen({onBack, onPreview, onBusyChange}: Initializi
   }, [busy, onBusyChange]);
 
   const initialize = async () => {
-    if (submitting.current || busy || nativeBuildRequired || !validUsername || account.status === 'ready') { return; }
+    if (submitting.current || busy || nativeBuildRequired || account.status === 'ready') { return; }
     submitting.current = true;
-    try { await account.initialize(username); }
+    try { await account.initialize(); }
     catch { /* The account provider supplies a safe error message below. */ }
     finally { submitting.current = false; }
   };
@@ -59,7 +57,7 @@ export function InitializingScreen({onBack, onPreview, onBusyChange}: Initializi
               variant="ghost"
               size="sm"
               hitSlop={3}
-              disabled={busy || !account.canEditUsername}
+              disabled={busy || !account.canPreview}
               onPress={onPreview}
             />
           </View>
@@ -77,31 +75,14 @@ export function InitializingScreen({onBack, onPreview, onBusyChange}: Initializi
         style={{marginTop: theme.spacing.lg}}>
         {nativeBuildRequired
           ? 'Account creation needs VOID’s encrypted storage and identity protection. These are included in the custom Android app. Expo Go can preview the screens, but cannot create an account.'
-          : 'Choose a username for your VOID account. Your private identity keys stay on this device.'}
+          : 'Register this device’s protected identity to get your VOID-ID. Your private identity keys stay on this device.'}
       </AppText>
       {nativeBuildRequired ? (
         <AppText variant="body" color="textSecondary" style={{marginTop: theme.spacing.lg}}>
           Install and open the latest VOID Android build, then return to account setup.
           {__DEV__ ? ' You can keep exploring the screens with Preview VOID below.' : ''}
         </AppText>
-      ) : <>
-      <TextInput
-        label="Username"
-        value={username}
-        onChangeText={setUsername}
-        autoCapitalize="none"
-        autoCorrect={false}
-        editable={!busy && account.canEditUsername}
-        maxLength={64}
-        returnKeyType="go"
-        onSubmitEditing={() => { initialize().catch(() => {}); }}
-        error={username.length > 0 && !validUsername ? 'Use 1–32 characters with no leading or trailing spaces or invisible characters.' : undefined}
-        containerStyle={{marginTop: theme.spacing.xxl}}
-      />
-      <AppText variant="caption" color="textMuted" style={{marginTop: theme.spacing.sm}}>
-        1–32 characters. No leading or trailing spaces.
-      </AppText>
-      </>}
+      ) : null}
       {progress ? (
         <View style={[styles.progress, {marginTop: theme.spacing.xl}]}>
           {busy ? <ActivityIndicator color={theme.colors.accent} style={{marginRight: theme.spacing.md}} /> : null}
@@ -128,7 +109,7 @@ export function InitializingScreen({onBack, onPreview, onBusyChange}: Initializi
         title={nativeBuildRequired ? 'Android build required' : account.status === 'error' ? 'Retry account setup' : 'Create account'}
         fullWidth
         loading={busy}
-        disabled={nativeBuildRequired || !validUsername || storage.status === 'opening' || account.status === 'ready'}
+        disabled={nativeBuildRequired || storage.status === 'opening' || account.status === 'ready'}
         onPress={() => { initialize().catch(() => {}); }}
         style={{marginTop: theme.spacing.xl}}
       />

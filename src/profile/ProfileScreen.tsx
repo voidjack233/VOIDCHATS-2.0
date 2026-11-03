@@ -22,7 +22,7 @@ export function ProfileScreen({ onOpenSettings }: ProfileScreenProps) {
         <View style={[styles.profileHeader, { paddingVertical: theme.spacing.xxxl }]}>
           <Avatar name={account.username ?? 'VOID'} size={76} />
           <AppText variant="heading" style={{ marginTop: theme.spacing.lg }}>
-            {account.username ?? 'Your space on VOID'}
+            {account.username ?? (voidId ? `VOID ${voidId}` : 'Your space on VOID')}
           </AppText>
           <AppText variant="body" color="textSecondary" style={[styles.centerText, { marginTop: theme.spacing.sm }]}>
             {voidId ? 'Your account is initialized on this device.' : 'Development preview. Your account has not been initialized.'}

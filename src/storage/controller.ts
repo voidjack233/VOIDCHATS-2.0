@@ -58,11 +58,17 @@ export class StorageController {
   }
   /** Opens existing encrypted data only. No identity creation or regeneration. */
   openExisting = () => this.run(() => this.driver.open());
+  /** Native messaging calls this only after its local transaction commits. */
+  notifyCommitted = (localDeviceId: string) => {
+    if (this.state.status === 'ready' && this.state.identity?.localDeviceId === localDeviceId) {
+      this.publish({revision: this.state.revision + 1});
+    }
+  };
   createDevelopmentStorage = () => this.run(() => this.driver.initializeDevelopment());
-  prepareAccountRegistration = async (username: string, apiUrl: string): Promise<LocalIdentity> => {
+  prepareAccountRegistration = async (apiUrl: string): Promise<LocalIdentity> => {
     let identity: LocalIdentity | null = null;
     await this.run(async () => {
-      identity = await this.driver.prepareAccountRegistration(username, apiUrl);
+      identity = await this.driver.prepareAccountRegistration(apiUrl);
       const snapshot = await this.driver.getStatus();
       if (snapshot.status !== 'open' || snapshot.identity?.localDeviceId !== identity.localDeviceId ||
           snapshot.identity.signaturePublicKeyBase64 !== identity.signaturePublicKeyBase64) { throw new StorageError('INVALID_NATIVE_RESPONSE'); }
@@ -77,7 +83,7 @@ export class StorageController {
   completeAccountRegistration = (account: AccountBinding) => this.run(async () => {
     const snapshot = await this.driver.completeAccountRegistration(account);
     if (snapshot.status !== 'open' || snapshot.identity?.accountVoidId !== account.void_id ||
-        snapshot.identity.accountUsername !== account.username || snapshot.identity.accountApiUrl !== account.api_url ||
+        snapshot.identity.accountApiUrl !== account.api_url ||
         snapshot.identity.signaturePublicKeyBase64 !== account.auth_public_key) { throw new StorageError('INVALID_NATIVE_RESPONSE'); }
     return snapshot;
   });

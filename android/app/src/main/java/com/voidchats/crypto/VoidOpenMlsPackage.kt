@@ -6,11 +6,12 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
 import com.voidchats.storage.AppStorage
 import com.voidchats.storage.VoidStorageModule
+import com.voidchats.storage.VoidMessagingModule
 
 class VoidOpenMlsPackage : ReactPackage {
   override fun createNativeModules(context: ReactApplicationContext): List<NativeModule> {
     val storage = AppStorage(context)
-    return listOf(VoidOpenMlsModule(context, storage), VoidStorageModule(context, storage))
+    return listOf(VoidOpenMlsModule(context, storage), VoidStorageModule(context, storage), VoidMessagingModule(context, storage))
   }
 
   override fun createViewManagers(context: ReactApplicationContext): List<ViewManager<*, *>> = emptyList()

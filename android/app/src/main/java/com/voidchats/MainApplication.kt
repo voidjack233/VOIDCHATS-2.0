@@ -6,7 +6,7 @@ import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
 import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
-import com.voidchats.crypto.VoidOpenMlsPackage
+import com.voidchats.storage.VoidNativePackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -16,7 +16,7 @@ class MainApplication : Application(), ReactApplication {
       jsMainModulePath = "native-entry",
       packageList =
         PackageList(this).packages.apply {
-          add(VoidOpenMlsPackage())
+          add(VoidNativePackage())
         },
     )
   }

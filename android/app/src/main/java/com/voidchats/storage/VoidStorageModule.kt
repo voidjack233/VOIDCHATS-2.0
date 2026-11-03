@@ -13,7 +13,7 @@ internal class VoidStorageModule(context: ReactApplicationContext, private val s
   @ReactMethod fun getStatus(promise: Promise) = storage.submit(promise) { storage.status() }
   @ReactMethod fun open(promise: Promise) = storage.submit(promise) { storage.open() }
   @ReactMethod fun initializeDevelopment(promise: Promise) = storage.submit(promise) { storage.initializeDevelopment() }
-  @ReactMethod fun prepareAccountRegistration(username: String, apiUrl: String, promise: Promise) = storage.submit(promise) { storage.prepareAccountRegistration(username, apiUrl) }
+  @ReactMethod fun prepareAccountRegistration(apiUrl: String, promise: Promise) = storage.submit(promise) { storage.prepareAccountRegistration(apiUrl) }
   @ReactMethod fun signAccountChallenge(messageBase64: String, promise: Promise) = storage.submit(promise) { storage.signAccountChallenge(messageBase64) }
   @ReactMethod fun completeAccountRegistration(accountJSON: String, promise: Promise) = storage.submit(promise) { storage.completeAccountRegistration(accountJSON) }
   @ReactMethod fun close(promise: Promise) = storage.submit(promise) { storage.lock() }

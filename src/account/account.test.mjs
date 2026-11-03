@@ -23,16 +23,16 @@ function modules(globals = {}) {
 }
 
 const base = 'https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz';
-function fixture(username = 'Synthetic user 👋') {
+function fixture() {
   const keys = generateKeyPairSync('ed25519');
   const publicKey = keys.publicKey.export({type: 'spki', format: 'der'}).subarray(-32).toString('base64');
   const challengeId = randomBytes(32).toString('base64url');
   const nonce = randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + 120000).toISOString();
-  const message = `VOID-NOTHINGNESS:register:v1\n${challengeId}\n${expiresAt}\n${publicKey}\n${Buffer.from(username).toString('base64')}\n${nonce}\n`;
+  const message = `VOID-NOTHINGNESS:register:v1\n${challengeId}\n${expiresAt}\n${publicKey}\n\n${nonce}\n`;
   const challenge = {challenge_id: challengeId, expires_at: expiresAt, message: Buffer.from(message).toString('base64')};
-  const account = {void_id: '9223372036854775807', username, created_at: '2026-11-01T03:00:00.123456Z'};
-  return {keys, publicKey, username, challengeId, nonce, message, challenge, account};
+  const account = {void_id: '9223372036854775807', created_at: '2026-11-01T03:00:00.123456Z'};
+  return {keys, publicKey, challengeId, nonce, message, challenge, account};
 }
 function response(body, status = 201, headers = {}) {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {status, headers});
@@ -51,7 +51,7 @@ test('registration sends the deployed endpoints and an actual Ed25519 proof with
     calls.push({url, options});
     const body = JSON.parse(options.body);
     if (calls.length === 1) {
-      assert.deepEqual(body, {username: f.username, auth_public_key: f.publicKey});
+      assert.deepEqual(body, {auth_public_key: f.publicKey});
       return response(f.challenge);
     }
     assert.deepEqual(Object.keys(body).sort(), ['challenge_id', 'signature']);
@@ -59,9 +59,9 @@ test('registration sends the deployed endpoints and an actual Ed25519 proof with
     assert.equal(verify(null, Buffer.from(f.message), f.keys.publicKey, Buffer.from(body.signature, 'base64')), true);
     return response(f.account);
   });
-  const challenge = await client.challenge(f.username, f.publicKey);
+  const challenge = await client.challenge(f.publicKey);
   const signature = sign(null, Buffer.from(challenge.message, 'base64'), f.keys.privateKey).toString('base64');
-  const account = await client.register(challenge.challenge_id, signature, f.username);
+  const account = await client.register(challenge.challenge_id, signature);
   assert.deepEqual(plain(account), f.account);
   assert.equal(typeof account.void_id, 'string');
   assert.deepEqual(calls.map(call => call.url), [base + '/challenges', base + '/accounts']);
@@ -86,14 +86,13 @@ test('username validation counts Unicode code points and preserves valid UTF-8 n
   }
 });
 
-test('invalid usernames and noncanonical/wrong-size public keys are rejected before network access', async () => {
+test('noncanonical/wrong-size public keys are rejected before network access', async () => {
   const {createAccountClient} = modules()('client');
   let calls = 0;
   const client = createAccountClient(base, async () => { calls++; throw new Error('Network must not run.'); });
   const f = fixture();
-  await assert.rejects(client.challenge(' bad ', f.publicKey), errorCode('invalid_username'));
   for (const key of ['Zh==', 'Zg', 'Zg==\n', Buffer.alloc(31).toString('base64'), Buffer.alloc(33).toString('base64')]) {
-    await assert.rejects(client.challenge(f.username, key), errorCode('invalid_response'));
+    await assert.rejects(client.challenge(key), errorCode('invalid_response'));
   }
   assert.equal(calls, 0);
 });
@@ -108,12 +107,12 @@ test('base64 rejects alternate padding bits, URL encoding, whitespace and excess
   }
 });
 
-test('challenge proof must bind the exact domain, username, key, token, expiry and trailing newline', async () => {
+test('challenge proof must bind the exact domain, reserved empty line, key, token, expiry and trailing newline', async () => {
   const {createAccountClient} = modules()('client');
   const f = fixture();
   const variants = [
     {...f.challenge, message: Buffer.from(f.message.replace('VOID-NOTHINGNESS:register:v1', 'OTHER:register:v1')).toString('base64')},
-    {...f.challenge, message: Buffer.from(f.message.replace(Buffer.from(f.username).toString('base64'), Buffer.from('different name').toString('base64'))).toString('base64')},
+    {...f.challenge, message: Buffer.from(f.message.replace('\n\n', '\nZGlmZmVyZW50IG5hbWU=\n')).toString('base64')},
     {...f.challenge, message: Buffer.from(f.message.replace(f.publicKey, Buffer.alloc(32).toString('base64'))).toString('base64')},
     {...f.challenge, challenge_id: randomBytes(32).toString('base64url')},
     {...f.challenge, expires_at: new Date(Date.now() + 90000).toISOString()},
@@ -126,7 +125,7 @@ test('challenge proof must bind the exact domain, username, key, token, expiry a
   ];
   for (const body of variants) {
     const client = createAccountClient(base, async () => response(body));
-    await assert.rejects(client.challenge(f.username, f.publicKey), errorCode('invalid_response'));
+    await assert.rejects(client.challenge(f.publicKey), errorCode('invalid_response'));
   }
 });
 
@@ -141,7 +140,7 @@ test('challenge token and nonce must be canonical encodings of 32 bytes', async 
   ];
   for (const body of variants) {
     const client = createAccountClient(base, async () => response(body));
-    await assert.rejects(client.challenge(f.username, f.publicKey), errorCode('invalid_response'));
+    await assert.rejects(client.challenge(f.publicKey), errorCode('invalid_response'));
   }
 });
 
@@ -152,7 +151,7 @@ test('a challenge outside the server maximum ten-minute lifetime is rejected', a
   const body = {...f.challenge, expires_at: expiresAt,
     message: Buffer.from(f.message.replace(f.challenge.expires_at, expiresAt)).toString('base64')};
   const client = createAccountClient(base, async () => response(body));
-  await assert.rejects(client.challenge(f.username, f.publicKey), errorCode('invalid_response'));
+  await assert.rejects(client.challenge(f.publicKey), errorCode('invalid_response'));
 });
 
 test('VOID-IDs accept the complete positive int64 range as decimal strings only', () => {
@@ -163,7 +162,7 @@ test('VOID-IDs accept the complete positive int64 range as decimal strings only'
   }
 });
 
-test('account success rejects unsafe numeric IDs, wrong usernames and invalid timestamps', async () => {
+test('account success rejects unsafe numeric IDs, unexpected username metadata and invalid timestamps', async () => {
   const {createAccountClient} = modules()('client');
   const f = fixture();
   const signature = sign(null, Buffer.from(f.message), f.keys.privateKey).toString('base64');
@@ -173,7 +172,7 @@ test('account success rejects unsafe numeric IDs, wrong usernames and invalid ti
     {...f.account, created_at: 'not a timestamp'}, {...f.account, created_at: null},
   ]) {
     const client = createAccountClient(base, async () => response(body));
-    await assert.rejects(client.register(f.challengeId, signature, f.username), errorCode('invalid_response'));
+    await assert.rejects(client.register(f.challengeId, signature), errorCode('invalid_response'));
   }
 });
 
@@ -183,7 +182,7 @@ test('registration rejects invalid signatures before network access', async () =
   let calls = 0;
   const client = createAccountClient(base, async () => { calls++; return response(f.account); });
   for (const signature of ['not-base64', Buffer.alloc(63).toString('base64'), Buffer.alloc(65).toString('base64')]) {
-    await assert.rejects(client.register(f.challengeId, signature, f.username), errorCode('invalid_response'));
+    await assert.rejects(client.register(f.challengeId, signature), errorCode('invalid_response'));
   }
   assert.equal(calls, 0);
 });
@@ -196,7 +195,7 @@ test('server errors are sanitized and Retry-After is retained without automatic 
     const client = createAccountClient(base, async () => {
       calls++; return response({error: {code, message: 'SYNTHETIC-SECRET from upstream'}}, status, {'Retry-After': '17'});
     });
-    await assert.rejects(client.challenge(f.username, f.publicKey), error => {
+    await assert.rejects(client.challenge(f.publicKey), error => {
       assert.equal(error.code, code);
       assert.equal(error.retryAfterSeconds, 17);
       assert.equal(error.message.includes('SYNTHETIC-SECRET'), false);
@@ -211,7 +210,7 @@ test('Retry-After HTTP dates and malformed values are handled without exposing u
   const f = fixture();
   for (const value of [new Date(Date.now() + 60000).toUTCString(), '-5', 'tomorrow', '0']) {
     const client = createAccountClient(base, async () => response({error: {code: 'rate_limited'}}, 429, {'Retry-After': value}));
-    await assert.rejects(client.challenge(f.username, f.publicKey), error => {
+    await assert.rejects(client.challenge(f.publicKey), error => {
       if (value.endsWith('GMT')) { assert.ok(error.retryAfterSeconds >= 58 && error.retryAfterSeconds <= 60); }
       else { assert.equal(error.retryAfterSeconds, null); }
       return true;
@@ -232,7 +231,7 @@ test('network, malformed and oversized responses fail safely without retries', a
   ]) {
     let calls = 0;
     const client = createAccountClient(base, async () => { calls++; return reply(); });
-    await assert.rejects(client.challenge(f.username, f.publicKey), error => {
+    await assert.rejects(client.challenge(f.publicKey), error => {
       assert.equal(error.code, expected);
       assert.equal(error.message.includes('SYNTHETIC-SECRET'), false);
       return true;
@@ -249,7 +248,7 @@ test('an aborted request is classified as a timeout and is not resent', async ()
     calls++;
     return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('Aborted.')), {once: true}));
   }, 5);
-  await assert.rejects(client.challenge(f.username, f.publicKey), errorCode('network_timeout'));
+  await assert.rejects(client.challenge(f.publicKey), errorCode('network_timeout'));
   assert.equal(calls, 1);
 });
 
@@ -272,18 +271,18 @@ function setup(overrides = {}) {
   const events = [];
   const deps = {
     client: {base,
-      challenge: async (username, publicKey) => {
-        events.push('challenge'); assert.equal(username, f.username); assert.equal(publicKey, f.publicKey);
+      challenge: async publicKey => {
+        events.push('challenge'); assert.equal(publicKey, f.publicKey);
         return f.challenge;
       },
-      register: async (challengeId, signature, username) => {
-        events.push('register'); assert.equal(challengeId, f.challengeId); assert.equal(username, f.username);
+      register: async (challengeId, signature) => {
+        events.push('register'); assert.equal(challengeId, f.challengeId);
         assert.equal(verify(null, Buffer.from(f.message), f.keys.publicKey, Buffer.from(signature, 'base64')), true);
         return f.account;
       }},
     getIdentity: () => identity,
-    prepare: async (username, apiUrl) => {
-      events.push('prepare'); assert.equal(username, f.username); assert.equal(apiUrl, base); return identity;
+    prepare: async apiUrl => {
+      events.push('prepare'); assert.equal(apiUrl, base); return identity;
     },
     sign: async message => {
       events.push('sign'); return sign(null, Buffer.from(message, 'base64'), f.keys.privateKey).toString('base64');
@@ -300,10 +299,10 @@ function setup(overrides = {}) {
 
 test('initialization commits the signed server account before reporting ready', async () => {
   const {initializer, events, f} = setup();
-  await initializer.initialize(f.username);
+  await initializer.initialize();
   assert.deepEqual(events, ['stage:preparing', 'prepare', 'stage:challenge', 'challenge',
     'stage:signing', 'sign', 'stage:registering', 'register', 'stage:saving', 'complete', 'stage:ready']);
-  assert.equal(initializer.pendingUsername, null);
+  assert.equal(initializer.hasPendingRegistration, false);
 });
 
 test('concurrent initialization calls share one proof and one account submission', async () => {
@@ -312,8 +311,8 @@ test('concurrent initialization calls share one proof and one account submission
   const {initializer, deps, events, f, identity} = setup();
   let preparations = 0;
   deps.prepare = async () => { preparations++; await gate; return identity; };
-  const first = initializer.initialize(f.username);
-  const second = initializer.initialize('Ignored concurrent name');
+  const first = initializer.initialize();
+  const second = initializer.initialize();
   assert.equal(first, second);
   assert.equal(preparations, 1);
   release();
@@ -330,12 +329,12 @@ test('failed local completion retries only the retained successful server result
     accounts.push(plain(account));
     if (accounts.length === 1) { throw new Error('Synthetic disk failure.'); }
   };
-  await assert.rejects(initializer.initialize(f.username), errorCode('save_failed'));
-  assert.equal(initializer.pendingUsername, f.username);
+  await assert.rejects(initializer.initialize(), errorCode('save_failed'));
+  assert.equal(initializer.hasPendingRegistration, true);
   assert.equal(events.includes('stage:ready'), false);
   const beforeRetry = events.length;
-  // The successful server name remains bound, even if UI input changes meanwhile.
-  await initializer.initialize('Different input');
+  // Retry the received account result locally without another registration POST.
+  await initializer.initialize();
   assert.deepEqual(accounts, [
     {...f.account, api_url: base, auth_public_key: f.publicKey},
     {...f.account, api_url: base, auth_public_key: f.publicKey},
@@ -343,20 +342,20 @@ test('failed local completion retries only the retained successful server result
   assert.deepEqual(events.slice(beforeRetry), ['stage:saving', 'stage:ready']);
   assert.equal(events.filter(event => event === 'prepare').length, 1);
   assert.equal(events.filter(event => event === 'register').length, 1);
-  assert.equal(initializer.pendingUsername, null);
+  assert.equal(initializer.hasPendingRegistration, false);
 });
 
 test('already registered identity restores without creating keys or sending network requests', async () => {
   const {initializer, deps, events, f, identity} = setup();
-  deps.getIdentity = () => ({...identity, accountVoidId: f.account.void_id, accountUsername: f.username, accountApiUrl: base});
-  await initializer.initialize(f.username);
+  deps.getIdentity = () => ({...identity, accountVoidId: f.account.void_id, accountUsername: 'Preserved legacy name', accountApiUrl: base});
+  await initializer.initialize();
   assert.deepEqual(events, ['stage:ready']);
 });
 
 test('registered identities cannot silently switch to a different server', async () => {
   const {initializer, deps, events, f, identity} = setup();
   deps.getIdentity = () => ({...identity, accountVoidId: f.account.void_id, accountApiUrl: 'https://other.example'});
-  await assert.rejects(initializer.initialize(f.username), errorCode('invalid_configuration'));
+  await assert.rejects(initializer.initialize(), errorCode('invalid_configuration'));
   assert.deepEqual(events, []);
 });
 
@@ -389,11 +388,11 @@ test('manual retry after an ambiguous account POST uses a fresh challenge and th
     prepare: async () => identity,
     sign: async message => sign(null, Buffer.from(message, 'base64'), first.keys.privateKey).toString('base64'),
     complete: async () => { saves++; }, onStage: () => {}});
-  await assert.rejects(initializer.initialize(first.username), errorCode('network'));
+  await assert.rejects(initializer.initialize(), errorCode('network'));
   assert.equal(requests.length, 2);
   assert.equal(saves, 0);
-  assert.equal(initializer.pendingUsername, null);
-  await initializer.initialize(first.username);
+  assert.equal(initializer.hasPendingRegistration, false);
+  await initializer.initialize();
   assert.equal(requests.length, 4);
   assert.deepEqual(requests.filter(request => request.url.endsWith('/accounts')).map(request => request.body.challenge_id), [first.challengeId, second.challenge_id]);
   assert.equal(saves, 1);
@@ -403,12 +402,12 @@ test('manual retry after an ambiguous account POST uses a fresh challenge and th
 test('duplicate-key responses preserve identity and never falsely complete account setup', async () => {
   const {initializer, deps, events, f, identity, AccountError} = setup();
   deps.client.register = async () => { events.push('register'); throw new AccountError('key_registered'); };
-  await assert.rejects(initializer.initialize(f.username), errorCode('key_registered'));
+  await assert.rejects(initializer.initialize(), errorCode('key_registered'));
   assert.equal(identity.accountVoidId, null);
   assert.equal(identity.signaturePublicKeyBase64, f.publicKey);
   assert.equal(events.includes('complete'), false);
   assert.equal(events.includes('stage:ready'), false);
-  assert.equal(initializer.pendingUsername, null);
+  assert.equal(initializer.hasPendingRegistration, false);
 });
 
 class FakeXMLHttpRequest {
@@ -468,7 +467,7 @@ function xhrClient(operation, timeoutMs) {
 test('Android text transport sends the exact JSON request without cookies and preserves HTTP response headers', async () => {
   const f = fixture();
   const {client, requests} = xhrClient(request => request.respond(201, f.challenge, {'Content-Type': 'application/json'}));
-  const result = await client.challenge(f.username, f.publicKey);
+  const result = await client.challenge(f.publicKey);
   assert.deepEqual(plain(result), f.challenge);
   assert.equal(requests.length, 1);
   const request = requests[0];
@@ -480,11 +479,11 @@ test('Android text transport sends the exact JSON request without cookies and pr
   assert.equal(request.requestHeaders['content-type'], 'application/json');
   assert.equal(request.requestHeaders.accept, 'application/json');
   assert.equal(request.requestHeaders['user-agent'], 'VOIDCHATS/2.0');
-  assert.deepEqual(JSON.parse(request.body), {username: f.username, auth_public_key: f.publicKey});
+  assert.deepEqual(JSON.parse(request.body), {auth_public_key: f.publicKey});
   assert.equal(request.sendCount, 1);
 
   const limited = xhrClient(request => request.respond(429, {error: {code: 'rate_limited', message: 'RAW-SECRET-MARKER'}}, {'Retry-After': '23'}));
-  await assert.rejects(limited.client.challenge(f.username, f.publicKey), error => {
+  await assert.rejects(limited.client.challenge(f.publicKey), error => {
     assert.equal(error.code, 'rate_limited'); assert.equal(error.retryAfterSeconds, 23);
     assert.equal(error.message.includes('RAW-SECRET-MARKER'), false); return true;
   });
@@ -504,7 +503,7 @@ test('Android native DNS, TLS, timeout, refusal and unavailable failures produce
   ];
   for (const [nativeMessage, event, expected] of cases) {
     const {client, requests} = xhrClient(request => request.fail(nativeMessage, event));
-    await assert.rejects(client.challenge(f.username, f.publicKey), error => {
+    await assert.rejects(client.challenge(f.publicKey), error => {
       assert.equal(error.name, 'AccountError'); assert.equal(error.code, expected);
       assert.equal(error.message.includes('RAW-SECRET-MARKER'), false);
       assert.equal(error.message.includes(nativeMessage), false);
@@ -518,7 +517,7 @@ test('Android native DNS, TLS, timeout, refusal and unavailable failures produce
 test('Android in-flight abort cancels the sole request without resubmitting the POST', async () => {
   const {client, requests} = xhrClient(() => {}, 5);
   const f = fixture();
-  await assert.rejects(client.challenge(f.username, f.publicKey), errorCode('network_timeout'));
+  await assert.rejects(client.challenge(f.publicKey), errorCode('network_timeout'));
   assert.equal(requests.length, 1);
   assert.equal(requests[0].sendCount, 1);
   assert.equal(requests[0].abortCount, 1);
@@ -541,7 +540,7 @@ test('Android transport allows repeated body reads without making another HTTP r
 test('Android synchronous transport exceptions remain sanitized and never trigger automatic retries', async () => {
   const f = fixture();
   const {client, requests} = xhrClient(() => { throw new Error('RAW-SECRET-MARKER sync send failure'); });
-  await assert.rejects(client.challenge(f.username, f.publicKey), error => {
+  await assert.rejects(client.challenge(f.publicKey), error => {
     assert.equal(error.code, 'network'); assert.equal(error.message.includes('RAW-SECRET-MARKER'), false); return true;
   });
   assert.equal(requests.length, 1);
@@ -560,7 +559,7 @@ test('a failing Android request factory returns a safe error instead of exposing
   const load = modules(); const f = fixture(); let calls = 0;
   const transport = load('transport').createAccountTransport(() => { calls++; throw new Error('RAW-SECRET-MARKER constructor failed'); });
   const client = load('client').createAccountClient(base, transport);
-  await assert.rejects(client.challenge(f.username, f.publicKey), error => {
+  await assert.rejects(client.challenge(f.publicKey), error => {
     assert.equal(error.code, 'network'); assert.equal(error.message.includes('RAW-SECRET-MARKER'), false); return true;
   });
   assert.equal(calls, 1);
@@ -574,7 +573,7 @@ test('response body read failures do not resubmit an account request or expose n
     calls++; return {status: 201, headers: {get: () => null}, text: async () => { throw new Error('RAW-SECRET-MARKER body read failed'); }};
   });
   const signature = sign(null, Buffer.from(f.message), f.keys.privateKey).toString('base64');
-  await assert.rejects(client.register(f.challengeId, signature, f.username), error => {
+  await assert.rejects(client.register(f.challengeId, signature), error => {
     assert.equal(error.code, 'network'); assert.equal(error.message.includes('RAW-SECRET-MARKER'), false); return true;
   });
   assert.equal(calls, 1);

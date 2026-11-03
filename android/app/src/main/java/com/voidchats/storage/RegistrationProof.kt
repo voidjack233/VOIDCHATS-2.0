@@ -8,7 +8,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-/** Protocol framing only. Actual Ed25519 signing stays in protected Rust. */
+/** Protocol framing only. Ed25519 signing stays in protected native storage. */
 internal object RegistrationProof {
   private val opaqueToken = Regex("^[A-Za-z0-9_-]{43}$")
   private val timestamp = Regex("^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})$")
@@ -51,7 +51,7 @@ internal object RegistrationProof {
 
   fun base64(value: ByteArray): String = Base64.encodeToString(value, Base64.NO_WRAP)
 
-  fun validate(messageBase64: String, username: String, publicKeyBase64: String, now: Long = System.currentTimeMillis()): ByteArray {
+  fun validate(messageBase64: String, publicKeyBase64: String, now: Long = System.currentTimeMillis()): ByteArray {
     val message = bytes(messageBase64)
     require(message.size <= 4096)
     val text = message.toString(Charsets.UTF_8)
@@ -65,7 +65,9 @@ internal object RegistrationProof {
     }
     val expiry = timestampMillis(fields[2])
     require(expiry > now && expiry - now <= 10 * 60 * 1000L + 30_000)
-    require(fields[3] == publicKeyBase64 && fields[4] == base64(username.toByteArray(Charsets.UTF_8)))
+    // The deployed v1 framing reserves this line; username-free registration
+    // must leave it empty instead of signing arbitrary display metadata.
+    require(fields[3] == publicKeyBase64 && fields[4].isEmpty())
     return message
   }
 }

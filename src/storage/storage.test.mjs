@@ -11,6 +11,9 @@ import ts from 'typescript';
 // Host-only SQLite tests use isolated synthetic fixtures, never app/user data.
 const migration = readFileSync(new URL('../../android/app/src/main/assets/storage/001_initial.sql', import.meta.url), 'utf8');
 const registrationMigration = readFileSync(new URL('../../android/app/src/main/assets/storage/002_account_registration.sql', import.meta.url), 'utf8');
+const messagingMigration = readFileSync(new URL('../../android/app/src/main/assets/storage/003_messaging.sql', import.meta.url), 'utf8');
+const optionalUsernameMigration = readFileSync(new URL('../../android/app/src/main/assets/storage/004_optional_account_username.sql', import.meta.url), 'utf8');
+const directMessagingMigration = readFileSync(new URL('../../android/app/src/main/assets/storage/005_direct_messaging.sql', import.meta.url), 'utf8');
 function database(t, path = ':memory:') {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA foreign_keys=ON');
@@ -326,11 +329,11 @@ test('corruption and unavailable encryption preserve distinct sanitized fail-clo
 
 const registrationApi = 'https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz';
 const registrationIdentity = {...identity, signaturePublicKeyBase64: Buffer.alloc(32, 7).toString('base64')};
-const registrationBinding = {void_id: '9223372036854775807', username: 'Synthetic account',
+const registrationBinding = {void_id: '9223372036854775807',
   created_at: '2026-11-01T03:00:00.123456Z', api_url: registrationApi,
   auth_public_key: registrationIdentity.signaturePublicKeyBase64};
 const registeredIdentity = {...registrationIdentity, accountVoidId: registrationBinding.void_id,
-  accountUsername: registrationBinding.username, accountApiUrl: registrationApi};
+  accountUsername: null, accountApiUrl: registrationApi};
 const registeredSnapshot = () => ({...snapshot(), schemaVersion: 2, identity: registeredIdentity});
 const registrationSignature = Buffer.alloc(64, 3).toString('base64');
 function registrationNative(overrides = {}) {
@@ -370,6 +373,65 @@ test('account metadata defaults to unsigned proof and rejects invalid singleton/
   assert.equal(db.prepare('SELECT proof_signed FROM account_registration').get().proof_signed, 1);
 });
 
+test('username-free migration preserves registered accounts and protected data byte for byte', t => {
+  const db = database(t); db.exec(registrationMigration);
+  db.prepare('INSERT INTO local_identity VALUES(1,?,?,?,?,?,?)').run(identity.localDeviceId,
+    identity.clientHandle, identity.credentialIdentityBase64, identity.signaturePublicKeyBase64, '123', identity.createdAt);
+  db.prepare('INSERT INTO native_mls_state VALUES(1,9,?)').run(Buffer.from('SYNTHETIC-PRIVATE-CHECKPOINT'));
+  db.prepare('INSERT INTO account_registration VALUES(1,?,?,1,?)').run('既存 account', registrationApi, registrationBinding.created_at);
+  direct(db); incoming(db, 'kept-message');
+  const before = ['local_identity', 'native_mls_state', 'account_registration', 'messages'].map(table => db.prepare(`SELECT * FROM ${table}`).all());
+  db.exec('BEGIN'); db.exec(messagingMigration); db.exec(optionalUsernameMigration); db.exec('COMMIT');
+  const after = ['local_identity', 'native_mls_state', 'account_registration', 'messages'].map(table => db.prepare(`SELECT * FROM ${table}`).all());
+  assert.deepEqual(after, before);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+  for (const table of ['messaging_sessions', 'messaging_operations', 'messaging_relays', 'messaging_inbox', 'messaging_blocks']) {
+    assert.equal(db.prepare(`SELECT count(*) AS count FROM ${table}`).get().count, 0);
+  }
+  assert.throws(() => db.exec("UPDATE local_identity SET account_void_id='456'"), /account_binding_immutable/);
+  assert.throws(() => db.exec('UPDATE local_identity SET account_void_id=NULL'), /account_binding_immutable/);
+});
+
+test('username-free migration permits registration without a name and retains singleton/proof constraints', t => {
+  const db = database(t); db.exec(registrationMigration); db.exec(messagingMigration); db.exec(optionalUsernameMigration);
+  db.prepare('INSERT INTO account_registration(slot,api_url) VALUES(1,?)').run(registrationApi);
+  const row = db.prepare('SELECT * FROM account_registration').get();
+  assert.equal(row.username, null); assert.equal(row.proof_signed, 0); assert.equal(row.created_at, null);
+  assert.throws(() => db.exec("UPDATE account_registration SET username=''"));
+  assert.throws(() => db.exec('UPDATE account_registration SET proof_signed=2'));
+  assert.throws(() => db.exec('UPDATE account_registration SET slot=2'));
+});
+
+test('direct-message migration preserves protected state and history while upgrading queued setup', t => {
+  const db = database(t); db.exec(registrationMigration); db.exec(messagingMigration); db.exec(optionalUsernameMigration);
+  db.prepare('INSERT INTO local_identity VALUES(1,?,?,?,?,?,?)').run(identity.localDeviceId,
+    identity.clientHandle, identity.credentialIdentityBase64, identity.signaturePublicKeyBase64, '123', identity.createdAt);
+  db.prepare('INSERT INTO native_mls_state VALUES(1,9,?)').run(Buffer.from('KEEP-EXISTING-MLS-GROUPS-AND-SIGNER'));
+  db.prepare('INSERT INTO account_registration VALUES(1,?,?,1,?)').run('Existing name', registrationApi, registrationBinding.created_at);
+  direct(db); incoming(db, 'unchanged-history');
+  direct(db, 'new-sender', 'new-peer'); incoming(db, 'first-incoming', 2000, 'new-sender');
+  direct(db, 'replied', 'replied-peer');
+  db.exec("INSERT INTO messages(id,conversation_id,sender_void_id,body,direction,delivery_state,created_at) VALUES('existing-reply','replied','123','Saved reply','outgoing','sent',2000)");
+  const insertSession = db.prepare('INSERT INTO messaging_sessions(id,peer_void_id,peer_key_base64,direction,status,group_id_base64,created_at) VALUES(?,?,?,?,?,?,1000)');
+  insertSession.run('conversation', 'peer', 'public-key', 'outgoing', 'active', 'Z3JvdXAx');
+  insertSession.run('new-sender', 'new-peer', 'public-key', 'incoming', 'active', 'Z3JvdXAy');
+  insertSession.run('replied', 'replied-peer', 'public-key', 'incoming', 'active', 'Z3JvdXAz');
+  insertSession.run('pending-setup', 'waiting-peer', 'public-key', 'outgoing', 'awaiting_ready', 'Z3JvdXA0');
+  db.exec("INSERT INTO messaging_operations(id,session_id,kind,peer_void_id,payload_base64,status,created_at) VALUES('app-message','conversation','message','peer','Y2lwaGVydGV4dA==','pending',2000),('setup-message','pending-setup','relay','waiting-peer','c2V0dXAtZW52ZWxvcGU=','done',2000)");
+  const before = ['local_identity', 'native_mls_state', 'account_registration', 'messages', 'conversations'].map(table => db.prepare(`SELECT * FROM ${table}`).all());
+  db.exec('BEGIN'); db.exec(directMessagingMigration); db.exec('COMMIT');
+  assert.deepEqual(['local_identity', 'native_mls_state', 'account_registration', 'messages', 'conversations'].map(table => db.prepare(`SELECT * FROM ${table}`).all()), before);
+  assert.equal(db.prepare("SELECT thread_id FROM messaging_sessions WHERE id='conversation'").get().thread_id, 'conversation');
+  assert.equal(db.prepare("SELECT is_request FROM messaging_sessions WHERE id='new-sender'").get().is_request, 1);
+  assert.equal(db.prepare("SELECT is_request FROM messaging_sessions WHERE id='replied'").get().is_request, 0);
+  const setup = db.prepare("SELECT kind,purpose,status,payload_base64 FROM messaging_operations WHERE id='setup-message'").get();
+  assert.deepEqual({...setup}, {kind: 'message', purpose: 'setup', status: 'pending', payload_base64: 'c2V0dXAtZW52ZWxvcGU='});
+  const app = db.prepare("SELECT purpose,status,payload_base64 FROM messaging_operations WHERE id='app-message'").get();
+  assert.deepEqual({...app}, {purpose: 'application', status: 'pending', payload_base64: 'Y2lwaGVydGV4dA=='});
+  assert.equal(db.prepare('SELECT count(*) AS count FROM messaging_drafts').get().count, 0);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
 test('a committed account binding cannot be cleared or switched to another VOID-ID', t => {
   const db = database(t); db.exec(registrationMigration);
   db.prepare('INSERT INTO local_identity VALUES(1,?,?,?,?,NULL,?)').run(identity.localDeviceId,
@@ -385,8 +447,8 @@ test('a committed account binding cannot be cleared or switched to another VOID-
 test('real account registration works in release while debug initialization remains gated', async () => {
   const load = modules(); const calls = [];
   const module = registrationNative({
-    prepareAccountRegistration: async (username, apiUrl) => {
-      calls.push(['prepare', username, apiUrl]); return JSON.stringify(registrationIdentity);
+    prepareAccountRegistration: async apiUrl => {
+      calls.push(['prepare', apiUrl]); return JSON.stringify(registrationIdentity);
     },
     signAccountChallenge: async message => { calls.push(['sign', message]); return registrationSignature; },
     completeAccountRegistration: async json => {
@@ -396,14 +458,14 @@ test('real account registration works in release while debug initialization rema
   });
   const storage = driver(load, module, false);
   assert.equal(calls.length, 0);
-  const prepared = await storage.prepareAccountRegistration(registrationBinding.username, registrationApi);
+  const prepared = await storage.prepareAccountRegistration(registrationApi);
   assert.equal(prepared.signaturePublicKeyBase64, registrationIdentity.signaturePublicKeyBase64);
   assert.equal(await storage.signAccountChallenge('SYNTHETIC-PUBLIC-CHALLENGE'), registrationSignature);
   const result = await storage.completeAccountRegistration(registrationBinding);
   assert.equal(result.identity.accountVoidId, registrationBinding.void_id);
-  assert.equal(result.identity.accountUsername, registrationBinding.username);
+  assert.equal(result.identity.accountUsername, null);
   assert.equal(result.identity.accountApiUrl, registrationApi);
-  assert.deepEqual(calls, [['prepare', registrationBinding.username, registrationApi],
+  assert.deepEqual(calls, [['prepare', registrationApi],
     ['sign', 'SYNTHETIC-PUBLIC-CHALLENGE'], ['complete', registrationBinding]]);
   await assert.rejects(storage.initializeDevelopment(), {code: 'DEVELOPMENT_ONLY'});
 });
@@ -411,11 +473,11 @@ test('real account registration works in release while debug initialization rema
 test('older native builds require rebuilding only when registration methods are requested', async () => {
   const load = modules(); const module = native(); const storage = driver(load, module, false);
   assert.equal((await storage.open()).identity.clientHandle, identity.clientHandle);
-  await assert.rejects(storage.prepareAccountRegistration('Synthetic', registrationApi), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
+  await assert.rejects(storage.prepareAccountRegistration(registrationApi), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
   await assert.rejects(storage.signAccountChallenge('YQ=='), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
   await assert.rejects(storage.completeAccountRegistration(registrationBinding), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
   const partlyUpdated = registrationNative({signAccountChallenge: undefined});
-  await assert.rejects(driver(load, partlyUpdated).prepareAccountRegistration('Synthetic', registrationApi), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
+  await assert.rejects(driver(load, partlyUpdated).prepareAccountRegistration(registrationApi), {code: 'NATIVE_MODULE_INCOMPATIBLE'});
 });
 
 test('registration bridge rejects malformed or secret-shaped native output and sanitizes failures', async () => {
@@ -423,7 +485,7 @@ test('registration bridge rejects malformed or secret-shaped native output and s
   for (const reply of ['{malformed', JSON.stringify({...registrationIdentity, privateKey: 'RAW-SECRET-MARKER'}),
     JSON.stringify({...registrationIdentity, accountVoidId: 123}), JSON.stringify(null)]) {
     module.prepareAccountRegistration = async () => reply;
-    await assert.rejects(storage.prepareAccountRegistration('Synthetic', registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
+    await assert.rejects(storage.prepareAccountRegistration(registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
   }
   for (const signature of ['RAW-SECRET-MARKER', JSON.stringify({signature: registrationSignature}), Buffer.alloc(63).toString('base64'), null]) {
     module.signAccountChallenge = async () => signature;
@@ -434,7 +496,7 @@ test('registration bridge rejects malformed or secret-shaped native output and s
   for (const method of ['prepareAccountRegistration', 'signAccountChallenge', 'completeAccountRegistration']) {
     module[method] = async () => { throw {code: 'DATABASE_ERROR', message: 'RAW-SECRET-MARKER'}; };
   }
-  for (const action of [() => storage.prepareAccountRegistration('Synthetic', registrationApi),
+  for (const action of [() => storage.prepareAccountRegistration(registrationApi),
     () => storage.signAccountChallenge('YQ=='), () => storage.completeAccountRegistration(registrationBinding)]) {
     await assert.rejects(action(), error => error.code === 'DATABASE_ERROR' && !error.message.includes('RAW-SECRET'));
   }
@@ -450,7 +512,7 @@ test('controller publishes completed account identity and restores its public bi
     }});
   const controller = new (load('controller').StorageController)(driver(load, module, false));
   await assert.rejects(controller.signAccountChallenge('YQ=='), {code: 'LOCKED'});
-  const prepared = await controller.prepareAccountRegistration(registrationBinding.username, registrationApi);
+  const prepared = await controller.prepareAccountRegistration(registrationApi);
   assert.equal(prepared.localDeviceId, registrationIdentity.localDeviceId);
   assert.equal(controller.getSnapshot().status, 'ready');
   assert.equal(await controller.signAccountChallenge('YQ=='), registrationSignature);
@@ -463,9 +525,24 @@ test('controller publishes completed account identity and restores its public bi
   await controller.openExisting();
   assert.equal(controller.getSnapshot().status, 'ready');
   assert.equal(controller.getSnapshot().schemaVersion, 2);
-  assert.equal(controller.getSnapshot().identity.accountUsername, registrationBinding.username);
+  assert.equal(controller.getSnapshot().identity.accountUsername, null);
   assert.equal(controller.getSnapshot().identity.accountApiUrl, registrationApi);
   assert.equal(controller.getSnapshot().identity.signaturePublicKeyBase64, registrationIdentity.signaturePublicKeyBase64);
+});
+
+test('native commit refreshes only the currently open identity', async () => {
+  const load = modules();
+  const controller = new (load('controller').StorageController)(driver(load, registrationNative()));
+  await controller.openExisting();
+  const before = controller.getSnapshot().revision;
+  controller.notifyCommitted('different-device');
+  assert.equal(controller.getSnapshot().revision, before);
+  controller.notifyCommitted(identity.localDeviceId);
+  assert.equal(controller.getSnapshot().revision, before + 1);
+  await controller.closeStore();
+  const closedRevision = controller.getSnapshot().revision;
+  controller.notifyCommitted(identity.localDeviceId);
+  assert.equal(controller.getSnapshot().revision, closedRevision);
 });
 
 test('failed account preparation never falls back to development identity creation or local-data removal', async () => {
@@ -476,7 +553,7 @@ test('failed account preparation never falls back to development identity creati
     removeLocalData: async () => { removals++; return JSON.stringify(snapshot('not_initialized')); }});
   const controller = new (load('controller').StorageController)(driver(load, module));
   await controller.openExisting();
-  await assert.rejects(controller.prepareAccountRegistration('Synthetic', registrationApi), {code: 'KEY_UNAVAILABLE'});
+  await assert.rejects(controller.prepareAccountRegistration(registrationApi), {code: 'KEY_UNAVAILABLE'});
   assert.equal(controller.getSnapshot().status, 'error');
   assert.equal(controller.getSnapshot().identity, null);
   assert.equal(controller.getSnapshot().message.includes('RAW-KEY'), false);
@@ -490,7 +567,7 @@ test('controller refuses preparation results from a different local device', asy
   const load = modules();
   const module = registrationNative({getStatus: async () => JSON.stringify({...snapshot(), identity: {...registrationIdentity, localDeviceId: 'different-device'}})});
   const controller = new (load('controller').StorageController)(driver(load, module));
-  await assert.rejects(controller.prepareAccountRegistration('Synthetic', registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
+  await assert.rejects(controller.prepareAccountRegistration(registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
   assert.equal(controller.getSnapshot().status, 'error');
   assert.equal(controller.getSnapshot().identity, null);
 });
@@ -500,7 +577,7 @@ test('controller rejects a preparation snapshot with the same device ID but a di
   const module = registrationNative({getStatus: async () => JSON.stringify({...snapshot(),
     identity: {...registrationIdentity, signaturePublicKeyBase64: Buffer.alloc(32, 9).toString('base64')}})});
   const controller = new (load('controller').StorageController)(driver(load, module));
-  await assert.rejects(controller.prepareAccountRegistration('Synthetic', registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
+  await assert.rejects(controller.prepareAccountRegistration(registrationApi), {code: 'INVALID_NATIVE_RESPONSE'});
   assert.equal(controller.getSnapshot().status, 'error');
   assert.equal(controller.getSnapshot().identity, null);
 });
@@ -508,7 +585,6 @@ test('controller rejects a preparation snapshot with the same device ID but a di
 test('controller refuses completion snapshots that do not exactly match the registered public binding', async () => {
   const variants = [
     {label: 'VOID-ID', value: {...registeredSnapshot(), identity: {...registeredIdentity, accountVoidId: '123'}}},
-    {label: 'username', value: {...registeredSnapshot(), identity: {...registeredIdentity, accountUsername: 'Other name'}}},
     {label: 'server', value: {...registeredSnapshot(), identity: {...registeredIdentity, accountApiUrl: 'https://other.example'}}},
     {label: 'public key', value: {...registeredSnapshot(), identity: {...registeredIdentity, signaturePublicKeyBase64: Buffer.alloc(32, 9).toString('base64')}}},
     {label: 'absent identity', value: {...registeredSnapshot(), identity: null}},

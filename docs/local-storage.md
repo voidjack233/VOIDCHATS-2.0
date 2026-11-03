@@ -2,6 +2,13 @@
 
 VOID stores conversation metadata, messages, contacts, and requests in an on-device SQLCipher database. OpenMLS checkpoints use the same database and native transaction boundary. The local store operates independently of any remote service.
 
+The direct-messaging update opens a local thread and composer immediately after
+VOID-ID lookup. Text entered before MLS setup completes is saved as a pending
+outgoing message in SQLCipher, without sending plaintext to the backend. Automatic
+setup exchanges travel through the durable opaque event queue, so users can open
+the app at different times. Native code encrypts the saved text once the group
+is usable and retains its stable message ID and exact ciphertext for retries.
+
 ## Components
 
 | Location | Responsibility |
@@ -26,7 +33,7 @@ Migration `001_initial.sql` creates these tables:
 - `messages`: sender ID, body, direction, delivery state, timestamps, edits, deletion tombstones and read time. Pagination orders by `(created_at, id)` and uses that pair as a cursor.
 - `message_reactions`, `message_receipts`: foreign keys, uniqueness and monotonic receipt states.
 - `contacts`: public identity information with `unverified`/`changed` state. Saving a public key does not verify its owner.
-- `message_requests`: public sender metadata, optional conversation association and persistent pending/accepted/declined/blocked status.
+- `message_requests`: legacy public request records with optional conversation association and persistent status. The current message inbox classifies Requests through local session metadata and does not require a request-acceptance action.
 - `local_identity`: public device identity metadata and primary native client handle. Account association remains null for local development initialization.
 - `native_mls_state`: one private, versioned engine checkpoint and monotonically increasing transaction revision.
 - `crypto_events`: encrypted native inbox/outbox material, authenticated sender metadata, epoch and checkpoint revision. This table is not exposed through public repository operations.
@@ -34,6 +41,17 @@ Migration `001_initial.sql` creates these tables:
 - `app_settings`, `storage_migrations`: bounded preferences and applied SQL history/checksums.
 
 Foreign keys, indexes, checks and triggers reject invalid identities, duplicate direct peers, message repointing, tombstone resurrection, invalid delivery/request transitions, read-receipt regression and reactions on deleted messages. Public repository duplicate insertion preserves existing edits, delivery/read state and tombstones. There are no seed users, conversations or messages in application migrations or initialization.
+
+`002_account_registration.sql` adds durable registration state. The additive
+`003_messaging.sql` adds local direct sessions, exact-ciphertext operations,
+online-relay replay bookkeeping, staged/applied/rejected inbox records and local
+blocks. These are device records; the backend has no conversation or KeyPackage
+inventory. `004_optional_account_username.sql` makes the local registration name
+optional by rebuilding its constrained table and copying existing values. It
+does not replace the protected identity, private keys, legacy names or account
+association. Installed migrations 001–004 remain unchanged; the direct-message
+update uses a forward migration for pending outgoing text and local Requests
+classification, preserving already established groups and account keys.
 
 `StorageMigrations` discovers contiguous numbered SQL assets, validates applied names/checksums and SQLite's `user_version`, then applies pending migrations in one transaction. It rejects edited, incomplete, unknown/future history. Add a new numbered migration rather than editing installed SQL. `.gitattributes` preserves LF bytes across platforms so checksums remain stable. A schema version change does not grant permission to reinterpret an incompatible MLS checkpoint.
 
@@ -55,9 +73,20 @@ Every mutation validates the loaded revision, advances OpenMLS, flushes cached g
 
 On Android, one bounded native queue serializes database and MLS operations. A native transaction contains the checkpoint and corresponding encrypted crypto-event/public bookkeeping writes. The transaction commits before a Promise can return plaintext, ciphertext, a KeyPackage or a commit to JavaScript. A protocol error still commits a successful checkpoint while rejecting the operation. Storage, journal or final-commit failure poisons/closes the engine and emits no operation result.
 
-The crypto journal preserves material needed by a future inbox/outbox ingestion layer if the process dies after native commit but before JavaScript consumes the result. Sender identity, signing public key, epoch and checkpoint revision are saved with accepted incoming plaintext. `openMls.readStoredDecryptions()` reads accepted application payloads and public sender metadata without advancing a ratchet. Its cursor uses `(createdAt, eventId)`, pages contain at most 100 records and 4 MiB of encoded data, and malformed metadata fails closed. Private checkpoints and keys are never part of this response.
+The crypto journal preserves material needed if the process dies after native commit but before the visible history update. Sender identity, signing public key, epoch and checkpoint revision are saved with accepted incoming plaintext. `openMls.readStoredDecryptions()` reads accepted application payloads and public sender metadata without advancing a ratchet. Its cursor uses `(createdAt, eventId)`, pages contain at most 100 records and 4 MiB of encoded data, and malformed metadata fails closed. Private checkpoints and keys are never part of this response.
 
-A future ingestion layer must materialize visible message records from that authenticated journal, deduplicate stable transport IDs, and invalidate the shared UI storage controller when a direct native MLS call reports a fatal storage error; it must not decrypt already-accepted ciphertext again. Current screens use storage lifecycle/repository failures for invalidation and make no messaging calls. Actual authenticated network delivery and its message envelope are not implemented in this milestone. The journal currently retains encrypted accepted plaintext independently of visible message tombstones; deleting a visible message does not erase that separate record. Journal acknowledgment, retention and deletion must be connected to the reviewed message envelope and ingestion lifecycle before real delivery.
+`MessagingStore` receives the authenticated socket event and verifies its local
+session, peer signing key/credential and encrypted application envelope. Its
+first transaction commits the receiving ratchet, authenticated plaintext journal
+and `staged` inbox row. A second transaction materializes the visible message and
+marks that inbox row `applied`. Only then does native code return an ACK token to
+the socket coordinator. Reopening messaging or replaying an event recovers staged
+rows from the journal without decrypting twice. Duplicate sender/event IDs must
+have the same saved payload hash. Invalid messages are durably rejected before
+ACK so they cannot hold the backend's delivery window indefinitely. The journal
+retains accepted plaintext independently of visible message tombstones; deleting
+a visible message does not erase that separate record. Journal-retention and
+deletion policy remain separate work.
 
 The SQLite transaction gives crash consistency within the supported filesystem's commit guarantees. A revision rejects concurrent/stale engines; it does **not** prevent an attacker from restoring an entire older authenticated database/key-file copy. There is no claim of hardware monotonic antirollback protection. Automatic backups are excluded, but root access, deliberate filesystem rollback, faulty storage and OS compromise remain outside that guarantee.
 
@@ -68,15 +97,22 @@ The SQLite transaction gives crash consistency within the supported filesystem's
 | First launch | Checks for an existing encrypted store; creates no identity or account automatically |
 | Explicit development setup | Settings creates a protected local device identity and empty store; debug-only native guard; no account registration or sample data |
 | Existing store | Opens with the original key and verifies primary public metadata against the restored native identity |
-| Process restart | Reopens committed SQL records and MLS checkpoints; existing development identity resumes the local preview |
+| Process restart | Reopens committed SQL records and MLS checkpoints; registered accounts reconnect with the same signing key and recover staged inbox writes |
 | Missing/invalid key or corrupted/incompatible state | Reports a sanitized error and preserves files; no new key, identity or plaintext fallback |
 | Close local storage | Closes native engine/database and hides identity-scoped rows and chat metadata |
 | Delete local data | Requires explicit UI confirmation, closes storage, deletes this store's files and Keystore alias; irreversible local identity removal |
 | Interrupted initialization/removal | Preserves inconsistent remaining material and fails closed until explicit cleanup; never treats it as an existing healthy identity |
 | App data deletion/uninstall | OS removes local application data/Keystore ownership; reopening has no recoverable identity |
-| Release build | Development initialization and self-tests are rejected natively; actual account initialization/binding remains a separate unfinished flow |
+| Release build | Development initialization and self-tests are rejected natively; key-only registration and native messaging are available |
 
-In a debug build, complete startup acknowledgments, open **Preview VOID → Profile → Settings → Local storage**, then select **Set up local storage**. This creates no registered account. Opening an existing store restores it automatically. The conversations, chat, contacts and requests screens read actual persisted records and preserve empty states. Chats render chronological messages with earlier-page loading, edits, tombstones, reactions and delivery state. Read counts and request status updates persist. Contact identity is always shown as unverified or changed. Sending and lookup remain disabled.
+In a debug build, complete startup acknowledgments, open **Preview VOID → Profile → Settings → Local storage**, then select **Set up local storage**. This creates no registered account. Opening an existing store restores it automatically. Registered accounts use authenticated VOID-ID lookup and can compose immediately. Native setup and pending-message encryption run automatically; no invitation approval or user-managed key establishment is needed. First incoming messages from an unfamiliar peer remain in Requests until the local user replies. Chats render saved chronological history and local read counts; server acceptance of application ciphertext appears as **Sent to server**. Pending text awaiting encryption is not marked sent. Delivery/read receipts are deferred, and contact identity remains unverified or changed. UI preview alone cannot execute the native crypto engine.
+
+The current backend has no prepublished recipient KeyPackages. A first-time
+conversation therefore needs alternating connections to finish the queued
+bootstrap: the sender must reconnect after the recipient supplies its package
+before the pending application text can be encrypted. Simultaneous presence is
+unnecessary. Existing groups can encrypt and queue messages immediately while
+their recipient is offline. See the [bootstrap boundary](offline-first-bootstrap.md).
 
 Closing storage preserves the device identity and records for reopening. Removing local data deletes this device's protected store and signing identity; it does not affect any remote accounts. If another app context still holds the same store open, removal fails before deleting files or the wrapping alias; that context must close first. Registered-account logout, remote account removal and recovery require a future account/session design.
 
@@ -144,4 +180,9 @@ adb shell am instrument -w -e class com.voidchats.storage.StorageProcessRestartT
 
 The current ARM64 APKs are `android/app/build/outputs/apk/debug/app-debug.apk` and `android/app/build/outputs/apk/release/app-release.apk`. Emulator verification APKs are preserved under `android/app/build/outputs/apk/verification/`. Release assembly and restriction checks use the repository's existing development signing configuration; production signing remains unfinished.
 
-Physical-device hardware security, sudden-power-loss behavior, authenticated account binding, transport authorization and real message delivery remain separate validation/design work. The UI smoke used empty application lists; populated history behavior is covered by repository/schema instrumentation rather than a fake messaging demonstration. There is no cloud backup, account recovery or multi-device synchronization.
+The checks above describe the 2026-10-15 storage build. Physical-device hardware
+security and sudden-power-loss behavior remain unverified. Current messaging
+changes add registered account binding, authenticated socket transport and local
+message ingestion; their two-device runtime check is the owner's
+[phase 5 task](two-device-messaging-test.md). There is no cloud backup, account
+recovery or multi-device synchronization.

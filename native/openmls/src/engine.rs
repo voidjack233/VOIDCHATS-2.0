@@ -27,6 +27,9 @@ mod tests;
 #[path = "durable_tests.rs"]
 mod durable_tests;
 
+#[path = "direct.rs"]
+mod direct;
+
 pub(crate) const SUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 pub(crate) const MAX_WIRE: usize = 1024 * 1024;
 pub(crate) const MAX_CLIENTS: usize = 64;
@@ -377,7 +380,7 @@ impl MlsEngine {
     }
 
     /// Registration proof only. The Android coordinator also verifies the exact
-    /// prepared username, public key, token, expiry and nonce before this call.
+    /// reserved empty username, public key, token, expiry and nonce before this call.
     /// No private signing material or general-purpose signing API crosses JS.
     pub fn sign_registration_challenge(
         &self,
@@ -390,9 +393,10 @@ impl MlsEngine {
         if fields.len() != 7
             || fields[0] != "VOID-NOTHINGNESS:register:v1"
             || !fields[6].is_empty()
-            || fields[1..6]
+            || !fields[4].is_empty()
+            || [1, 2, 3, 5]
                 .iter()
-                .any(|field| field.is_empty() || field.contains('\r'))
+                .any(|index| fields[*index].is_empty() || fields[*index].contains('\r'))
         {
             return Err(MlsError::InvalidInput);
         }

@@ -59,6 +59,20 @@ pub struct GroupInfo {
     pub member_count: u32,
 }
 
+/// Public bindings for a verified two-member conversation.
+#[derive(uniffi::Record)]
+pub struct DirectGroupInfo {
+    pub group: GroupInfo,
+    pub peer_credential: Vec<u8>,
+}
+
+/// Validated application content returned only after its ratchet checkpoint.
+#[derive(uniffi::Record)]
+pub struct DirectMessage {
+    pub body: String,
+    pub created_at: u64,
+}
+
 #[derive(uniffi::Record)]
 pub struct AddMemberResult {
     pub commit: Vec<u8>,

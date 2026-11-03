@@ -2,6 +2,7 @@ import {spawnSync} from 'node:child_process';
 import {existsSync, mkdirSync, readdirSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {publishReleaseApk} from './apk-artifacts.mjs';
 
 const android = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'android');
 const args = process.argv.slice(2);
@@ -53,6 +54,6 @@ if (result.status === 0) {
   const variant = release ? 'release' : 'debug';
   const apk = path.join(android, 'app', 'build', 'outputs', 'apk', variant, `app-${variant}.apk`);
   if (!existsSync(apk)) { throw new Error('Gradle finished without producing the expected APK.'); }
-  console.log(`APK: ${apk}`);
+  console.log(`APK: ${release ? publishReleaseApk(apk) : apk}`);
 }
 process.exit(result.status ?? 1);

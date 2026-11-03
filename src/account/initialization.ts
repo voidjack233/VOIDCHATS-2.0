@@ -1,16 +1,15 @@
 import {AccountError, type AccountRegistration, type AccountStage, type RegistrationChallenge} from './client';
 import type {AccountBinding} from '../storage/bridge';
 import type {LocalIdentity} from '../storage/types';
-import {validateUsername} from './validation';
 
 export interface InitializationDependencies {
   client: {
     base: string;
-    challenge(username: string, publicKey: string): Promise<RegistrationChallenge>;
-    register(challengeId: string, signature: string, username: string): Promise<AccountRegistration>;
+    challenge(publicKey: string): Promise<RegistrationChallenge>;
+    register(challengeId: string, signature: string): Promise<AccountRegistration>;
   };
   getIdentity(): LocalIdentity | null;
-  prepare(username: string, apiUrl: string): Promise<LocalIdentity>;
+  prepare(apiUrl: string): Promise<LocalIdentity>;
   sign(messageBase64: string): Promise<string>;
   complete(account: AccountBinding): Promise<void>;
   onStage(stage: AccountStage): void;
@@ -22,11 +21,11 @@ export class AccountInitializer {
   private pending: AccountBinding | null = null;
   constructor(private readonly deps: InitializationDependencies) {}
 
-  get pendingUsername(): string | null { return this.pending?.username ?? null; }
+  get hasPendingRegistration(): boolean { return this.pending !== null; }
 
-  initialize = (username: string): Promise<void> => {
+  initialize = (): Promise<void> => {
     if (this.active) { return this.active; }
-    const action = this.run(username);
+    const action = this.run();
     this.active = action;
     action.finally(() => { this.active = null; }).catch(() => {});
     return action;
@@ -40,9 +39,8 @@ export class AccountInitializer {
     this.deps.onStage('ready');
   }
 
-  private async run(username: string) {
+  private async run() {
     if (this.pending) { await this.save(); return; }
-    if (!validateUsername(username)) { throw new AccountError('invalid_username'); }
     const {client} = this.deps;
     const existing = this.deps.getIdentity();
     if (existing?.accountVoidId) {
@@ -50,17 +48,17 @@ export class AccountInitializer {
       this.deps.onStage('ready'); return;
     }
     this.deps.onStage('preparing');
-    const identity = await this.deps.prepare(username, client.base);
+    const identity = await this.deps.prepare(client.base);
     if (identity.accountVoidId) {
       if (identity.accountApiUrl !== client.base) { throw new AccountError('invalid_configuration'); }
       this.deps.onStage('ready'); return;
     }
     this.deps.onStage('challenge');
-    const challenge = await client.challenge(username, identity.signaturePublicKeyBase64);
+    const challenge = await client.challenge(identity.signaturePublicKeyBase64);
     this.deps.onStage('signing');
     const signature = await this.deps.sign(challenge.message);
     this.deps.onStage('registering');
-    const account = await client.register(challenge.challenge_id, signature, username);
+    const account = await client.register(challenge.challenge_id, signature);
     this.pending = {...account, api_url: client.base, auth_public_key: identity.signaturePublicKeyBase64};
     await this.save();
   }

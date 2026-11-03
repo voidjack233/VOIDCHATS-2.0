@@ -25,6 +25,7 @@ export function useStorage() {
     openExisting: controller.openExisting, createDevelopmentStorage: controller.createDevelopmentStorage,
     prepareAccountRegistration: controller.prepareAccountRegistration, signAccountChallenge: controller.signAccountChallenge,
     completeAccountRegistration: controller.completeAccountRegistration,
+    notifyCommitted: controller.notifyCommitted,
     closeStore: controller.closeStore, removeLocalData: controller.removeLocalData};
 }
 

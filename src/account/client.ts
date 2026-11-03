@@ -1,7 +1,7 @@
-import {decodeBase64, isChallengeToken, isTimestamp, isVoidId, usernameBase64, validateUsername} from './validation';
+import {decodeBase64, isChallengeToken, isTimestamp, isVoidId} from './validation';
 
 export type AccountStage = 'idle' | 'preparing' | 'challenge' | 'signing' | 'registering' | 'saving' | 'ready' | 'error';
-export interface AccountRegistration {void_id: string; username: string; created_at: string}
+export interface AccountRegistration {void_id: string; created_at: string}
 export interface RegistrationChallenge {challenge_id: string; message: string; expires_at: string}
 export interface AccountHttpResponse {
   status: number;
@@ -11,7 +11,6 @@ export interface AccountHttpResponse {
 export type AccountFetcher = (url: string, options: RequestInit) => Promise<AccountHttpResponse>;
 
 const messages = {
-  invalid_username: 'Enter a name with 1–32 characters, without surrounding spaces or control characters.',
   invalid_configuration: 'The account server address is unavailable. Update the app configuration.',
   network: 'Could not reach VOID. Check your connection and try again. Your device identity is saved.',
   network_dns: 'Your phone could not find api.voidchats.xyz. Try mobile data or check Private DNS and VPN settings. Your identity is saved.',
@@ -20,7 +19,7 @@ const messages = {
   network_refused: 'The connection to VOID was refused or interrupted. Try another network. Your identity is saved.',
   network_unavailable: 'Your phone has no network route to VOID. Check Wi-Fi, mobile data and VPN settings. Your identity is saved.',
   invalid_response: 'VOID returned an unexpected response. Your device identity is saved. Try again.',
-  invalid_input: 'VOID could not accept these account details. Check your name and try again.',
+  invalid_input: 'VOID could not accept these account details. Try again with the saved device identity.',
   invalid_proof: 'The setup challenge expired or was rejected. Try again to request a fresh challenge.',
   key_registered: 'This device key is already registered. Keep this app’s local data. Account recovery is not available yet.',
   rate_limited: 'Too many setup attempts. Please wait before trying again.',
@@ -92,29 +91,28 @@ export function createAccountClient(apiUrl: string, fetcher: AccountFetcher = fe
   };
   return {
     base,
-    challenge: async (username: string, publicKey: string): Promise<RegistrationChallenge> => {
-      if (!validateUsername(username)) { throw new AccountError('invalid_username'); }
+    challenge: async (publicKey: string): Promise<RegistrationChallenge> => {
       try { if (decodeBase64(publicKey).length !== 32) { throw new Error(); } }
       catch { throw new AccountError('invalid_response'); }
-      const row = object(await post('/challenges', {username, auth_public_key: publicKey}));
+      const row = object(await post('/challenges', {auth_public_key: publicKey}));
       if (!isChallengeToken(row.challenge_id) || !isTimestamp(row.expires_at) ||
           Date.parse(row.expires_at) <= Date.now() || Date.parse(row.expires_at) > Date.now() + 10 * 60 * 1000) { throw new AccountError('invalid_response'); }
       let bytes: number[];
       try { bytes = decodeBase64(row.message); } catch { throw new AccountError('invalid_response'); }
       if (bytes.some(byte => byte > 127)) { throw new AccountError('invalid_response'); }
       const message = String.fromCharCode(...bytes);
-      const prefix = `VOID-NOTHINGNESS:register:v1\n${row.challenge_id}\n${row.expires_at}\n${publicKey}\n${usernameBase64(username)}\n`;
+      const prefix = `VOID-NOTHINGNESS:register:v1\n${row.challenge_id}\n${row.expires_at}\n${publicKey}\n\n`;
       if (!message.startsWith(prefix) || !message.endsWith('\n') || !isChallengeToken(message.slice(prefix.length, -1))) {
         throw new AccountError('invalid_response');
       }
       return {challenge_id: row.challenge_id, message: row.message as string, expires_at: row.expires_at};
     },
-    register: async (challengeId: string, signature: string, username: string): Promise<AccountRegistration> => {
+    register: async (challengeId: string, signature: string): Promise<AccountRegistration> => {
       try { if (decodeBase64(signature).length !== 64) { throw new Error(); } }
       catch { throw new AccountError('invalid_response'); }
       const row = object(await post('/accounts', {challenge_id: challengeId, signature}));
-      if (!isVoidId(row.void_id) || row.username !== username || !isTimestamp(row.created_at)) { throw new AccountError('invalid_response'); }
-      return {void_id: row.void_id, username, created_at: row.created_at};
+      if (!isVoidId(row.void_id) || !isTimestamp(row.created_at) || 'username' in row) { throw new AccountError('invalid_response'); }
+      return {void_id: row.void_id, created_at: row.created_at};
     },
   };
 }

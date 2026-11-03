@@ -50,8 +50,8 @@ export function TermsScreen({
           color="textSecondary"
           style={{marginTop: theme.spacing.sm}}>
           The final Terms of Service are not available in this preview.
-          Continuing lets you choose a username and create a real VOID account.
-          Account recovery and network messaging are not available yet.
+          Continuing lets you register this device’s protected identity and create a real VOID account.
+          Account recovery is not available yet.
         </AppText>
       </View>
       <View style={{marginTop: theme.spacing.xxxl}}>

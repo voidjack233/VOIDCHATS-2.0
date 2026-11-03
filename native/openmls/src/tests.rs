@@ -9,8 +9,7 @@ fn account_proofs_sign_verbatim_ed25519_and_reject_other_domains() {
         .create_client(b"account-proof-fixture".to_vec())
         .unwrap();
     let message =
-        b"VOID-NOTHINGNESS:register:v1\ntoken\n2026-11-01T09:00:00Z\nkey\ndXNlcg==\nnonce\n"
-            .to_vec();
+        b"VOID-NOTHINGNESS:register:v1\ntoken\n2026-11-01T09:00:00Z\nkey\n\nnonce\n".to_vec();
     let signature = engine
         .sign_registration_challenge(identity.client_handle.clone(), message.clone())
         .unwrap();
@@ -53,6 +52,13 @@ fn account_proofs_sign_verbatim_ed25519_and_reject_other_domains() {
     trailing.extend_from_slice(b"extra\n");
     assert_eq!(
         engine.sign_registration_challenge(identity.client_handle.clone(), trailing),
+        Err(MlsError::InvalidInput)
+    );
+    assert_eq!(
+        engine.sign_registration_challenge(
+            identity.client_handle.clone(),
+            b"VOID-NOTHINGNESS:register:v1\ntoken\nexpiry\nkey\ndXNlcg==\nnonce\n".to_vec()
+        ),
         Err(MlsError::InvalidInput)
     );
     assert_eq!(

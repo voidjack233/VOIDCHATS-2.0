@@ -11,8 +11,8 @@ interface AccountContextValue {
   error: string | null;
   connectionDetails: string | null;
   username: string | null;
-  canEditUsername: boolean;
-  initialize(username: string): Promise<void>;
+  canPreview: boolean;
+  initialize(): Promise<void>;
 }
 const Context = createContext<AccountContextValue | null>(null);
 
@@ -27,19 +27,19 @@ export function AccountProvider({children}: {children: React.ReactNode}): React.
   const initializer = useMemo(() => new AccountInitializer({
     client: createAccountClient(API_URL, createAccountTransport()),
     getIdentity: () => current.current.identity,
-    prepare: (username, url) => current.current.prepareAccountRegistration(username, url),
+    prepare: url => current.current.prepareAccountRegistration(url),
     sign: message => current.current.signAccountChallenge(message),
     complete: account => current.current.completeAccountRegistration(account),
     onStage: setStatus,
   }), []);
-  const initialize = useCallback(async (username: string) => {
+  const initialize = useCallback(async () => {
     if (Date.now() < retryUntil) {
       setError(`Please wait ${Math.ceil((retryUntil - Date.now()) / 1000)} seconds before trying again.`);
       return;
     }
     setError(null);
     setConnectionDetails(null);
-    try { await initializer.initialize(username); }
+    try { await initializer.initialize(); }
     catch (value) {
       const failure = value instanceof AccountError ? value : sanitizeStorageError(value);
       setError(failure.message);
@@ -58,8 +58,8 @@ export function AccountProvider({children}: {children: React.ReactNode}): React.
     status: registered ? 'ready' : status === 'ready' ? 'idle' : status,
     error,
     connectionDetails,
-    username: initializer.pendingUsername ?? storage.identity?.accountUsername ?? null,
-    canEditUsername: initializer.pendingUsername === null && !registered,
+    username: storage.identity?.accountUsername ?? null,
+    canPreview: !initializer.hasPendingRegistration && !registered,
     initialize,
   }}>{children}</Context.Provider>;
 }

@@ -1,57 +1,39 @@
-# VOID-E2EE 2.0
+# VOID 2.0
 
-Native React Native and TypeScript Android application for VOID, with signed account initialization, encrypted local records, and protected native OpenMLS persistence. Network message delivery remains unfinished.
+React Native and TypeScript frontend with official libsignal for 1:1 messaging and SQLCipher protected local storage. Android is implemented first; screens, navigation, WebSocket coordination and the messaging interface remain shared with future iOS integration.
 
-## Run
+**Current status:** source integration only. No Signal build, test, APK or device exchange has run. The Android source version is **2.0.0**, code **5**; existing 1.0.3 APKs predate this change. First-contact messaging still needs the [public-prekey backend proposal](docs/signal-prekey-backend-proposal.md) finalized and implemented. The drafted client adapter is inactive, and the running provider keeps such messages saved locally. Backend validator compatibility, claim retention and size bounds remain unresolved in the SQL review draft.
 
-Install dependencies with `npm install`. Account initialization and OpenMLS require a rebuilt custom native Android app; Expo Go cannot load the Rust module. Configure the Android SDK, NDK **27.1.12297006**, **JDK 17** (`JAVA_HOME`) and rustup, then follow [native setup and verification](native/openmls/README.md). Registration is available in native debug and release builds; the debug preview remains separate.
+## Messaging
 
-Run `npm start` for Metro and `npm run android` to build and install on a connected physical Android phone with USB debugging enabled. The Android command uses that Metro server instead of launching another with the Expo preview configuration. Use `adb reverse tcp:8081 tcp:8081` for Metro over USB. `npm run android:build` builds an APK without requiring an emulator or phone. `npm run crypto:test` tests Rust; `npm run crypto:bridgecheck` tests generated Kotlin bindings against the actual host Rust library. In the phone's React Native DevTools console, `await globalThis.voidMlsSelfTest()` runs the native bridge diagnostic.
+Account setup uses the protected Ed25519 account identity, with no username. Authentication uses the backend's audience-bound WebSocket challenge. VOID-ID lookup retrieves the registered public key without marking the contact verified.
 
-For an APK you can copy to your phone and open without Metro, run `npm run android:apk`. This builds `android/app/build/outputs/apk/release/app-release.apk` with bundled JavaScript, encrypted storage and the Rust signing module. Transfer the APK to your Android phone, open it, allow installation from that source if Android asks, and launch **VOID**. No emulator or USB debugging is needed for this installation route. This testing APK uses the repository's development signing key; store distribution needs separate production signing. The build script also detects the portable Java/SDK tools in the ignored `android/build/tooling` folder when no valid external setup is configured.
+A separate native Signal identity is bound to that account key. Official libsignal handles signed and one-time EC/Kyber prekeys, session establishment, encryption and decryption. Native SQLCipher transactions persist ratchet/prekey changes with ciphertext, history and deduplication. Recipient ACK follows a successful durable commit. Backend `accepted` means **Sent to server**; delivery receipts remain deferred.
 
-The existing Expo setup remains available for UI preview with `npx expo start` and Expo Go. Cryptographic calls in Expo Go fail with an explicit unavailable error. The Android custom build uses `native-entry.js` and `metro.native.config.js`, preserving the same startup UI and theme. Expo's entry and Metro configuration remain available for Expo Go.
+The composer and Requests UI are retained. There is no conversation acceptance step. Once public prekey distribution is available, a published recipient bundle supports first-contact sending while the recipient is offline. Established sessions use the existing opaque `send` queue. No Go implementation or database/deployment change has been made for the proposed extension.
 
-On macOS, install the iOS native dependencies with `bundle install` and `cd ios && bundle exec pod install`, then run `npm run ios` from the project root.
+See [Signal implementation and current limitations](docs/signal-direct-messaging.md) for storage, key preservation and the prekey approval boundary.
 
-Use `npm run typecheck` for TypeScript validation and `npm run lint` for linting.
+## Dormant OpenMLS
 
-## Source layout
+The entire `native/openmls/` directory is preserved. OpenMLS is reserved for future groups and is not used in the new 1:1 flow. Android no longer builds or packages its Rust library/generated bindings, JNA or React module. Existing local MLS checkpoints, groups, legacy outbox records and history remain stored; they are not converted or automatically retransmitted. Historical MLS source, scripts and verification records remain in the repository.
 
-```text
-src/
-  app/             app bootstrap, providers, navigation composition
-  account/         signed registration client, validation, setup lifecycle and provider
-  startup/         welcome, identity guidance, acknowledgments, account setup
-  onboarding/      future entry flow UI
-  conversations/   conversation list UI and reusable display model
-  chat/            conversation detail UI
-  crypto/          typed native OpenMLS interface, independent of screens
-  storage/         typed local repositories, storage lifecycle and data hooks
-  requests/        message requests UI
-  contacts/        contacts and VOID-ID discovery UI
-  profile/         profile UI
-  settings/        settings UI
-  ui/              shared interface primitives
-  theme/           semantic dark theme and typography/spacing tokens
-```
+## Development
 
-First-launch startup progresses through Welcome, How VOID Works, Protect Your Identity, Terms of Service, and account setup. Enter a username and choose **Create account** to register the protected device identity with the backend configured in [src/config/api.ts](src/config/api.ts). Successful setup saves the returned VOID-ID and username, opens the messenger, and displays those values in Profile. Subsequent launches restore a registered account from encrypted storage without registering again. See [account initialization and retry behavior](docs/account-initialization.md).
+Tests, builds, APK generation, migrations and deployments are paused until explicitly authorized. The following commands describe the existing workflow and have not been run for this integration.
 
-The development-only **Preview VOID** action opens the messenger without registration. In Settings, explicit local storage setup creates an unregistered device identity and an empty encrypted store. An unregistered identity stays in the startup flow on the next launch and can be reused for account setup. Missing or damaged state never silently creates a replacement identity.
+Use `npm install` to install frontend dependencies. `npm start` runs Metro; `npm run android` builds/installs the custom Android app when authorized. Expo Go can preview UI but cannot run native libsignal/SQLCipher. Configure the Android SDK, NDK 27.1.12297006 and JDK for the React Native toolchain; Gradle obtains the pinned official Signal artifacts from Signal's Maven repository.
 
-Conversations, chat history, contacts, and requests read persisted local records and preserve empty states when none exist. Message composition and VOID-ID lookup remain disabled. Opening storage does not initialize an account or contact a remote service. See [local storage architecture, lifecycle and verification](docs/local-storage.md).
+`npm run android:apk` publishes a standalone APK when authorized. The existing publisher keeps one `build/apk/v<versionName>/VOID.apk` per version, overwrites that version on rebuild and retains only two versions. `build/apk/latest.json` points to the latest actually produced artifact; it does not yet refer to Signal 2.0.0. No extra APK copies were created.
 
-## Native MLS
+The existing iOS React Native project remains. Its Signal native adapter is not implemented; missing native support fails explicitly with no plaintext fallback.
 
-`native/openmls/` implements official OpenMLS **0.9.1** with RustCrypto and the RFC 9420 X25519/AES-128-GCM/SHA-256/Ed25519 ciphersuite. UniFFI generates the Android Kotlin bindings; private keys and MLS state remain in Rust. The typed `src/crypto/` interface is not connected to messaging screens. Alice/Bob diagnostics use real OpenMLS operations and do not create application accounts.
+## Source map
 
-The Android storage coordinator persists complete native MLS checkpoints and application records in SQLCipher, with its database key wrapped by Android Keystore. Checkpoints and crypto-event records commit before cryptographic results reach JavaScript. Account setup signs a constrained backend challenge using the existing native Ed25519 key and atomically saves the resulting public account association. Login sessions and messaging transport remain future work. See [account initialization boundaries](docs/account-initialization.md), [local storage boundaries](docs/local-storage.md), and [security findings](docs/openmls-security.md); the dependency audit does not make VOID audited.
+- `src/messaging/`: shared coordinator, existing authenticated relay client and platform-independent native/prekey interfaces.
+- `android/app/src/main/java/com/voidchats/storage/`: account-key preservation, official Signal adapter, encrypted repositories and native React bridges.
+- `android/app/src/main/assets/storage/`: additive local schema assets; no migration was executed during this change.
+- `src/chat/`, `src/conversations/`, `src/requests/`: current chat UI.
+- `native/openmls/`, `src/crypto/`: dormant future-group source and historical integration.
 
-See [verification results and remaining device checks](docs/openmls-verification.md) for the Rust and native binding test results and platform limitations.
-
-## Current scope
-
-This checkout contains the mobile application, native OpenMLS integration, and encrypted on-device storage. The Go account service is maintained separately on the repository's [backend branch](https://github.com/voidjack233/VOIDCHATS-2.0/tree/backend).
-
-Signed account initialization connects to that service. Account lookup/recovery, authenticated sessions, remote key exchange, and network message transport are not implemented. UI preview and opening existing local storage remain independent of a server. The registration changes still require native build and device verification; see the [current verification limitations](docs/account-initialization.md#verification).
+The Go relay is maintained on the [backend branch](https://github.com/voidjack233/VOIDCHATS-2.0/tree/backend) by the owner's separate backend agent. Backend changes needed by this frontend are handed off as proposals; this checkout does not contain a backend clone. Group messaging, account recovery, multiple enrolled devices, delivery receipts and automatic Signal prekey rotation/replenishment are outside this implementation.
