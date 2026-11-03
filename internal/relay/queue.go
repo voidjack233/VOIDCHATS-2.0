@@ -56,6 +56,9 @@ func (client *session) queueError(ctx context.Context, err error) {
 }
 
 func (client *session) handleCommand(fields map[string]string) bool {
+	if fields["type"] == "prekeys_publish" || fields["type"] == "prekeys_claim" {
+		return client.handlePrekeys(fields)
+	}
 	s := client.server
 	if !s.allowCommand(client.voidID) {
 		client.sendError(client.ctx, "rate_limited")

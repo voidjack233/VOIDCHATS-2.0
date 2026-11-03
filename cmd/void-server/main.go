@@ -18,6 +18,7 @@ import (
 	"void-nothingness/internal/config"
 	"void-nothingness/internal/httpapi"
 	"void-nothingness/internal/postgres"
+	"void-nothingness/internal/prekeys"
 	"void-nothingness/internal/queue"
 	"void-nothingness/internal/relay"
 	"void-nothingness/internal/snowflake"
@@ -63,14 +64,29 @@ func run() error {
 	defer pool.Close()
 	repo := postgres.New(pool)
 	queueStore := postgres.NewQueueStore(pool)
+	prekeyStore := postgres.NewPrekeyStore(pool)
+	prekeysEnabled, err := prekeySchemaPresent(startup, pool)
+	if err != nil {
+		return errors.New("prekey schema inspection unavailable; startup never applies migrations")
+	}
 	ready := func(ctx context.Context) error {
 		if err := repo.Ready(ctx); err != nil {
 			return err
 		}
-		return queueStore.Validate(ctx)
+		if err := queueStore.Validate(ctx); err != nil {
+			return err
+		}
+		present, err := prekeySchemaPresent(ctx, pool)
+		if err != nil || present != prekeysEnabled {
+			return errors.New("reviewed schema changed; a matching backend restart is required")
+		}
+		if present {
+			return prekeyStore.Validate(ctx)
+		}
+		return nil
 	}
 	if err = ready(startup); err != nil {
-		return errors.New("reviewed two-table relay schema or account access unavailable; startup never applies migrations")
+		return errors.New("reviewed relay schema or account access unavailable; startup never applies migrations")
 	}
 	cancel()
 	ids, err := snowflake.New(cfg.WorkerID, cfg.Epoch)
@@ -85,6 +101,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var publicPrekeys *prekeys.Service
+	if prekeysEnabled {
+		publicPrekeys, err = prekeys.New(prekeyStore, repo, cfg.APIAudience)
+		if err != nil {
+			return errors.New("invalid public prekey service configuration")
+		}
+	}
 	authentication, err := auth.NewServiceForAudience(repo, cfg.WSAuthTimeout, cfg.APIAudience)
 	if err != nil {
 		return errors.New("invalid WebSocket authentication configuration")
@@ -92,7 +115,7 @@ func run() error {
 	sockets, err := relay.New(authentication, relay.Options{
 		AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
 		QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
-		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048), Queue: queued,
+		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048), Queue: queued, Prekeys: publicPrekeys,
 	})
 	if err != nil {
 		return errors.New("invalid WebSocket configuration")
@@ -114,7 +137,7 @@ func run() error {
 	defer server.Close()
 	cleanupCtx, cleanupCancel := context.WithCancel(root)
 	cleanupDone := make(chan struct{})
-	go func() { defer close(cleanupDone); maintainQueue(cleanupCtx, queued) }()
+	go func() { defer close(cleanupDone); maintainQueue(cleanupCtx, queued, publicPrekeys) }()
 	defer func() { cleanupCancel(); <-cleanupDone }()
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(listener) }()
@@ -140,7 +163,7 @@ func run() error {
 
 // Cleanup uses the same process and store, with short bounded batches. Expiry is
 // also checked by every queue read; a cleanup delay never permits old delivery.
-func maintainQueue(ctx context.Context, service *queue.Service) {
+func maintainQueue(ctx context.Context, service *queue.Service, publicPrekeys *prekeys.Service) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -158,10 +181,40 @@ func maintainQueue(ctx context.Context, service *queue.Service) {
 			}
 		}
 		cancel()
+		if publicPrekeys != nil {
+			prekeyCtx, prekeyCancel := context.WithTimeout(ctx, 5*time.Second)
+			for batch := 0; batch < 10; batch++ {
+				n, err := publicPrekeys.Cleanup(prekeyCtx, 1000)
+				if err != nil {
+					if ctx.Err() == nil {
+						slog.Warn("public prekey cleanup unavailable")
+					}
+					break
+				}
+				if n < 1000 {
+					break
+				}
+			}
+			prekeyCancel()
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// The extension is optional until its reviewed migration is applied. A partial
+// installation is rejected, and no startup path creates or changes tables.
+func prekeySchemaPresent(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+	var count int
+	err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relname IN ('signal_prekey_inventory','signal_prekey_claims')`).Scan(&count)
+	if err != nil {
+		return false, errors.New("public prekey schema unavailable")
+	}
+	if count != 0 && count != 2 {
+		return false, errors.New("public prekey schema is incomplete")
+	}
+	return count == 2, nil
 }

@@ -233,14 +233,15 @@ func (s *QueueStore) Expire(ctx context.Context, now time.Time, limit int) (int6
 	return tag.RowsAffected(), nil
 }
 
-// Validate is read-only. It requires the two-table schema, payload/expiry bounds,
+// Validate is read-only. It permits the base schema or the reviewed prekey extension,
+// whose additional tables are separately checked by PrekeyStore.Validate. It verifies payload/expiry bounds,
 // ownership FKs, composite key, delivery/expiry indexes and effective privileges.
 func (s *QueueStore) Validate(ctx context.Context) error {
 	if s.db == nil {
 		return ErrQueueSchema
 	}
 	var okay bool
-	err := s.db.QueryRow(ctx, `SELECT c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND has_table_privilege(c.oid,'SELECT') AND has_table_privilege(c.oid,'INSERT') AND has_table_privilege(c.oid,'DELETE') AND (SELECT array_agg(t.relname::text ORDER BY t.relname COLLATE "C")=ARRAY['accounts','messages']::text[] FROM pg_catalog.pg_class t JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND t.relkind IN ('r','p')) AND (SELECT count(*)=6 AND bool_and(a.attnotnull AND a.attidentity='' AND a.attgenerated='' AND NOT a.atthasdef AND a.atttypid=CASE a.attname WHEN 'event_id' THEN 'uuid'::regtype WHEN 'sender_void_id' THEN 'bigint'::regtype WHEN 'recipient_void_id' THEN 'bigint'::regtype WHEN 'payload' THEN 'bytea'::regtype WHEN 'created_at' THEN 'timestamptz'::regtype WHEN 'expires_at' THEN 'timestamptz'::regtype ELSE 0::oid END) FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public.messages')`).Scan(&okay)
+	err := s.db.QueryRow(ctx, `SELECT c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND has_table_privilege(c.oid,'SELECT') AND has_table_privilege(c.oid,'INSERT') AND has_table_privilege(c.oid,'DELETE') AND (SELECT array_agg(t.relname::text ORDER BY t.relname COLLATE "C") IN (ARRAY['accounts','messages']::text[],ARRAY['accounts','messages','signal_prekey_claims','signal_prekey_inventory']::text[]) FROM pg_catalog.pg_class t JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND t.relkind IN ('r','p')) AND (SELECT count(*)=6 AND bool_and(a.attnotnull AND a.attidentity='' AND a.attgenerated='' AND NOT a.atthasdef AND a.atttypid=CASE a.attname WHEN 'event_id' THEN 'uuid'::regtype WHEN 'sender_void_id' THEN 'bigint'::regtype WHEN 'recipient_void_id' THEN 'bigint'::regtype WHEN 'payload' THEN 'bytea'::regtype WHEN 'created_at' THEN 'timestamptz'::regtype WHEN 'expires_at' THEN 'timestamptz'::regtype ELSE 0::oid END) FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public.messages')`).Scan(&okay)
 	if err != nil || !okay {
 		return ErrQueueSchema
 	}

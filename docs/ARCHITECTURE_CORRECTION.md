@@ -1,5 +1,12 @@
 # Approved temporary encrypted relay
 
+The Signal 1:1 public-prekey extension is now implemented in source following
+frontend `main` commit `af46749`. Its revised two-table addition is prepared for
+review, not applied. The historical deployed relay description below remains the
+base; see [the extension contract and limits](SIGNAL_PREKEYS.md). OpenMLS is
+dormant for future groups, while established Signal ciphertext uses the existing
+opaque queue. No production/frontend change was made by this implementation.
+
 Approved on 2026-11-02 (Asia/Manila), including the owner's final adjustments: Go sets all event timestamps and a fixed 30-day deadline; advanced retry/deduplication and encrypted delivery receipts are deferred. The owner subsequently instructed "do the migration now". The exact SQL was verified in isolated PostgreSQL and applied on 2026-11-02 at 14:56 (Asia/Manila), followed by the matching backend. The live database has only accounts/messages; both accounts and registered keys were preserved. Credentials and Cloudflared remain unchanged.
 
 The responsibility is Authenticate → Locate → Temporarily store → Relay → Acknowledge → Delete. VOID-ID is a permanent public routing/contact identifier. Registered Ed25519 key ownership authenticates an account; the identifier itself does not. Registration creates no username. The legacy username column was removed with migration 005 after explicit approval.

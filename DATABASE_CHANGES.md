@@ -254,3 +254,20 @@ username values are retained in the private recovery dump at
 `/home/void0000/.local/state/void-backend/deployments/20261102T154015+0800-drop-account-username/database.before.dump`.
 Temporary connection state/test cluster were removed; see
 [verification](docs/RELAY_VALIDATION.md) and [deployment](docs/MESSAGING_DEPLOYMENT.md).
+
+
+## Signal public-prekey extension prepared: 2026-11-03
+
+Implemented authenticated Go publication/claim commands and a public-only
+transactional store matching frontend main af46749. Revised the unapplied 006
+proposal: bounded publication UUID/hash history, fixed server-owned 24-hour
+claim expiry, nullable bundle/recipient fields for expiry scrubbing, terminal
+UUID history with lifetime caps, and a partial cleanup index. Existing accounts
+and messages are not altered. Optional grants are separate and create no role.
+No production SQL, credentials, network or frontend changes were made.
+
+Full race/vet/build checks, eight isolated PostgreSQL integration cases,
+restricted-role catalog validation, WebSocket cases and real startup on both
+synthetic two/four-table layouts passed. Exact proposed limits and SQL effects
+are in [the review](docs/SIGNAL_PREKEYS.md). Application/deployment still requires
+approval; no startup path applies migrations. Historical 001–005 are unchanged.

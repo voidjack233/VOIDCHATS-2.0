@@ -1,4 +1,11 @@
-# Two-table relay: migration review and deployment
+# Relay migration review and deployment
+
+New source-only work: authenticated Signal public-prekey distribution is complete.
+Revised migration 006 and optional restricted-role grants remain unapplied. The
+new binary was verified against both base and extended schemas; it never applies
+SQL. Review [the exact changes and proposed policies](SIGNAL_PREKEYS.md) before
+coordinated migration/deployment. The following records describe earlier live
+activations, which this implementation did not replace.
 
 Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Current source `5fd593f3253e38d2e5ea5c7ab490581ac0135eec` is running. The separately authorized username-column removal was applied at 15:45 (Asia/Manila). Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
 

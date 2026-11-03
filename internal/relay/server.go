@@ -16,6 +16,7 @@ import (
 	"github.com/coder/websocket"
 
 	"void-nothingness/internal/auth"
+	"void-nothingness/internal/prekeys"
 	"void-nothingness/internal/queue"
 )
 
@@ -41,6 +42,7 @@ type Options struct {
 	ForwardTimeout  time.Duration
 	Logger          *slog.Logger
 	Queue           *queue.Service
+	Prekeys         *prekeys.Service
 }
 
 // Server is an HTTP handler for the WebSocket endpoint. Close must be called
@@ -57,8 +59,10 @@ type Server struct {
 }
 
 type commandBucket struct {
-	tokens float64
-	seen   time.Time
+	tokens       float64
+	seen         time.Time
+	prekeyTokens float64
+	prekeySeen   time.Time
 }
 
 type session struct {
@@ -264,7 +268,7 @@ func (client *session) authenticate() bool {
 		}
 		return false
 	}
-	if fields["type"] == "send" {
+	if fields["type"] == "send" || fields["type"] == "prekeys_publish" || fields["type"] == "prekeys_claim" {
 		client.sendError(ctx, "unauthorized")
 		return false
 	}

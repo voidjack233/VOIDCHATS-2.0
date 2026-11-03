@@ -101,6 +101,30 @@ def main():
             GRANT INSERT (void_id, auth_public_key),
                 SELECT (void_id, auth_public_key, created_at) ON public.accounts TO {role};
         ''')
+        # Only this newly created disposable database receives test schema.
+        # Exercise the exact reviewed prekey migration without touching .env/live DB.
+        psql(test_admin, """
+            CREATE TABLE public.messages (
+                event_id uuid NOT NULL,
+                sender_void_id bigint NOT NULL REFERENCES public.accounts(void_id),
+                recipient_void_id bigint NOT NULL REFERENCES public.accounts(void_id),
+                payload bytea NOT NULL,
+                created_at timestamptz NOT NULL,
+                expires_at timestamptz NOT NULL,
+                PRIMARY KEY(sender_void_id,event_id),
+                CONSTRAINT messages_payload_check CHECK(octet_length(payload) BETWEEN 1 AND 1048576),
+                CONSTRAINT messages_expiry_check CHECK(expires_at=created_at+INTERVAL '720 hours')
+            );
+            CREATE INDEX messages_recipient_delivery_idx
+                ON public.messages(recipient_void_id,created_at,sender_void_id,event_id);
+            CREATE INDEX messages_expiry_idx ON public.messages(expires_at,sender_void_id,event_id);
+        """)
+        migration_dir = Path(__file__).resolve().parents[1] / "migrations"
+        psql(test_admin, (migration_dir / "006_signal_public_prekeys.sql").read_text(encoding="utf-8"))
+        grants = (migration_dir / "006_signal_public_prekeys_privileges.sql").read_text(encoding="utf-8")
+        # role is generated locally using only an alphabetic prefix and hex.
+        psql(test_admin, grants.replace(':"runtime_role"', role))
+        psql(test_admin, f"GRANT SELECT,INSERT,DELETE ON public.messages TO {role};")
         test_env = os.environ.copy()
         test_env["VOID_TEST_DATABASE_URL"] = connection_url(admin, database, role, password)
         test_env["VOID_TEST_ADMIN_URL"] = connection_url(admin, database)

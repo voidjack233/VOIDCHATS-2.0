@@ -1,12 +1,12 @@
 # VOID-NOTHINGNESS
 
-A Go backend that authenticates accounts and temporarily queues opaque encrypted events for delivery over WebSockets. VOID-ID is a public contact address, not an authentication credential. Devices retain their own history and OpenMLS state.
+A Go backend that authenticates accounts and temporarily queues opaque encrypted events for delivery over WebSockets. VOID-ID is a public contact address, not an authentication credential. Devices retain their own history and encryption state.
 
-This source implements the owner-approved two-table design: `accounts` and a temporary `messages` queue. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
+The deployed relay uses the owner-approved two-table design: `accounts` and a temporary `messages` queue. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
 
 **Activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly authorized migration.** Database `void2-0e2ee` now has only `accounts` and `messages`; both existing accounts and their keys were preserved. Backend source `5fd593f` is running with username-free registration and the username column removed. The applied SQL is [004_temporary_relay_queue.sql](migrations/004_temporary_relay_queue.sql), followed by [005_drop_account_username.sql](migrations/005_drop_account_username.sql); see [deployment and preservation evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates the schema and never applies migrations.
 
-The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, KeyPackage inventory, delivery-receipt event system, persistent retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [verification and activation record](docs/RELAY_VALIDATION.md).
+The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, MLS KeyPackage inventory, delivery-receipt event system, permanent message retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [verification and activation record](docs/RELAY_VALIDATION.md).
 
 ## Development
 
@@ -28,6 +28,16 @@ go run ./cmd/void-demo
 ```
 
 The existing literal `.env`, configured PostgreSQL login and installed executable remain owner-managed. [`.env.example`](.env.example) documents reference settings. Environment assignments are parsed as literal text; no shell interpolation is evaluated. Process values take precedence, and `-env-file ''` disables environment-file loading. Connection diagnostics and credentials are not logged.
+
+## Signal public-prekey extension (source only)
+
+The frontend now uses official libsignal for 1:1 messaging. The matching Go
+publication/claim commands and persistence adapter are implemented and tested;
+[revised migration 006](migrations/006_signal_public_prekeys.sql) remains unapplied
+pending review. The current live backend/database have not been replaced.
+The new binary can serve the existing two-table schema with prekeys disabled,
+or the reviewed four-table schema with prekeys enabled. See the
+[exact contract, proposed limits and activation boundary](docs/SIGNAL_PREKEYS.md).
 
 ## Account initialization
 
@@ -52,7 +62,7 @@ Local `/healthz` and `/readyz` remain available. The listener stays on loopback 
 
 ## Scope and reliability
 
-The first version offers basic committed acceptance, forwarding, recipient ACK deletion and reconnect replay. A lost acceptance or recipient ACK can leave an ambiguous result or cause duplicate delivery after reconnect. Queued duplicate event IDs are rejected; after deletion the same ID can be accepted again. There are no retained tombstones or exactly-once processing guarantees. Devices remain responsible for safely handling duplicates and applying OpenMLS state.
+The first version offers basic committed acceptance, forwarding, recipient ACK deletion and reconnect replay. A lost acceptance or recipient ACK can leave an ambiguous result or cause duplicate delivery after reconnect. Queued duplicate event IDs are rejected; after deletion the same ID can be accepted again. There are no retained tombstones or exactly-once processing guarantees. Devices remain responsible for safely handling duplicates and applying their encryption state.
 
 One event is offered at a time to each recipient connection. Its ACK or expiry opens the delivery window. A lost ACK can stall that window until reconnect or expiry. There is no automatic retransmission timer and no durable sender-facing delivery status.
 

@@ -60,9 +60,9 @@ The row and ciphertext are removed from the live queue. No delivered column, rec
 
 There is no sender-facing delivered notification or reverse encrypted receipt lifecycle in this implementation.
 
-## Online opaque MLS initialization
+## Online opaque protocol relay
 
-Both accounts first authenticate to the relay. Devices use OpenMLS to produce and verify protocol objects locally:
+Both accounts first authenticate to the relay. Devices can exchange opaque protocol objects locally, including dormant/future OpenMLS group setup:
 
 ```json
 {"type":"relay_online","exchange_id":"setup-1","to_void_id":"202","payload_base64":"AAECAw=="}
@@ -90,7 +90,7 @@ After successful authentication, the server offers the first remaining unexpired
 
 Unacknowledged events remain after a transport write. Reconnection offers them again. There is no resend/backoff timer, persistent deduplication or exactly-once guarantee. A lost recipient ACK can hold the window until reconnect or expiry. A lost sender acceptance response is ambiguous: the event may already be queued, processed or deleted. After deletion, the same ID can be accepted again with new server timestamps. Devices must handle duplicate processing safely; advanced retry/dedup engineering remains future work.
 
-The ordering above is a queue scan order, not a global commit order or MLS causal sequence. Devices own OpenMLS/application ordering and their local history. Removing server conversations means the backend cannot prove an encrypted payload belongs to an established MLS group; that is a client responsibility.
+The ordering above is a queue scan order, not a global commit order or MLS causal sequence. Devices own encryption/application ordering and their local history. Removing server conversations means the backend cannot prove an encrypted payload belongs to an established MLS group; that is a client responsibility.
 
 Expired records are never dispatched. An in-process task deletes expired rows on startup and each minute in bounded batches. No external worker/service is introduced. Outages or a cleanup backlog can delay physical deletion, and database MVCC/WAL/backups have separate retention. Thirty days is the maximum delivery eligibility; no promise of exact wall-clock disk erasure is made.
 
@@ -107,3 +107,14 @@ Expired records are never dispatched. An in-process task deletes expired rows on
 Errors use `{"type":"error","code":"..."}`. Codes include `invalid_frame`, `unauthorized`, `authentication_failed`, `not_found`, `duplicate_event`, `queue_full`, `rate_limited`, `overloaded` and `unavailable`. Protocol/authentication errors may close the socket. Database and private connection diagnostics are not exposed.
 
 These bounds do not prevent fresh-key bot-account farming or provide persisted per-peer blocking. The target is one logical connected device per account; multi-device delivery state is not implemented.
+
+
+## Signal public prekeys (prepared extension)
+
+Authenticated `prekeys_publish` and `prekeys_claim`, correlated responses/errors,
+public payloads, fixed 24-hour claim expiry and proposed schema are documented in
+[SIGNAL_PREKEYS.md](SIGNAL_PREKEYS.md). These additions are implemented in source;
+migration/deployment approval is still pending. Established Signal ciphertext
+uses the same `send`/`event`/`ack` contract above. The recipient may be offline
+when its previously published public bundle is claimed. No existing frame or
+account-authentication transcript changes.
