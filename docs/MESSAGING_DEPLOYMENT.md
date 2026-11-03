@@ -1,11 +1,13 @@
 # Relay migration review and deployment
 
-New source-only work: authenticated Signal public-prekey distribution is complete.
-Revised migration 006 and optional restricted-role grants remain unapplied. The
-new binary was verified against both base and extended schemas; it never applies
-SQL. Review [the exact changes and proposed policies](SIGNAL_PREKEYS.md) before
-coordinated migration/deployment. The following records describe earlier live
-activations, which this implementation did not replace.
+Signal public-prekey activation: 2026-11-03 11:36 (Asia/Manila), explicitly approved.
+Source `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e` is running with migration 006 applied.
+All three existing accounts, keys and message state were preserved exactly.
+The configured owner already had access; the optional privilege SQL was not
+applied. Six HTTP/readiness checks and two WebSocket checks passed without live
+account/message/prekey writes. Full private recovery backup and audit:
+`/home/void0000/.local/state/void-backend/deployments/20261103T113511+0800-signal-prekeys`. See [the contract and verification](SIGNAL_PREKEYS.md).
+The following records describe earlier deployments; startup never applies SQL.
 
 Status: migration and matching relay activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly instructed "do the migration now". Current source `5fd593f3253e38d2e5ea5c7ab490581ac0135eec` is running. The separately authorized username-column removal was applied at 15:45 (Asia/Manila). Database `void2-0e2ee` contains only accounts/messages. Both existing accounts and keys were preserved; credentials and tunnel configuration are unchanged.
 

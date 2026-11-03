@@ -2,9 +2,9 @@
 
 A Go backend that authenticates accounts and temporarily queues opaque encrypted events for delivery over WebSockets. VOID-ID is a public contact address, not an authentication credential. Devices retain their own history and encryption state.
 
-The deployed relay uses the owner-approved two-table design: `accounts` and a temporary `messages` queue. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
+Identity and temporary ciphertext delivery use `accounts` and `messages`. The approved Signal extension adds `signal_prekey_inventory` and `signal_prekey_claims` for public setup material. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
 
-**Activated on 2026-11-02 at 14:56 (Asia/Manila), after the owner explicitly authorized migration.** Database `void2-0e2ee` now has only `accounts` and `messages`; both existing accounts and their keys were preserved. Backend source `5fd593f` is running with username-free registration and the username column removed. The applied SQL is [004_temporary_relay_queue.sql](migrations/004_temporary_relay_queue.sql), followed by [005_drop_account_username.sql](migrations/005_drop_account_username.sql); see [deployment and preservation evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates the schema and never applies migrations.
+**Signal public prekeys activated on 2026-11-03 11:36 (Asia/Manila), after explicit approval.** Backend source `15458d7` is running. Database `void2-0e2ee` has the four reviewed tables; all three existing accounts and authentication keys were preserved. Applied SQL: [004](migrations/004_temporary_relay_queue.sql), [005](migrations/005_drop_account_username.sql) and [006](migrations/006_signal_public_prekeys.sql). See [deployment evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates schema and never applies migrations.
 
 The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, MLS KeyPackage inventory, delivery-receipt event system, permanent message retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [verification and activation record](docs/RELAY_VALIDATION.md).
 
@@ -29,15 +29,14 @@ go run ./cmd/void-demo
 
 The existing literal `.env`, configured PostgreSQL login and installed executable remain owner-managed. [`.env.example`](.env.example) documents reference settings. Environment assignments are parsed as literal text; no shell interpolation is evaluated. Process values take precedence, and `-env-file ''` disables environment-file loading. Connection diagnostics and credentials are not logged.
 
-## Signal public-prekey extension (source only)
+## Signal public-prekey extension
 
 The frontend now uses official libsignal for 1:1 messaging. The matching Go
-publication/claim commands and persistence adapter are implemented and tested;
-[revised migration 006](migrations/006_signal_public_prekeys.sql) remains unapplied
-pending review. The current live backend/database have not been replaced.
-The new binary can serve the existing two-table schema with prekeys disabled,
-or the reviewed four-table schema with prekeys enabled. See the
-[exact contract, proposed limits and activation boundary](docs/SIGNAL_PREKEYS.md).
+publication/claim commands and public-only persistence adapter are active after
+[approved migration 006](migrations/006_signal_public_prekeys.sql). The frontend
+owner can connect its prepared prekey adapter. The binary also supports the base
+two-table layout with the extension disabled. See the
+[exact contract, limits and verification](docs/SIGNAL_PREKEYS.md).
 
 ## Account initialization
 

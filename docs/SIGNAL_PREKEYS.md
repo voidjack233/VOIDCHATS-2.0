@@ -1,15 +1,17 @@
 # Signal public-prekey extension
 
-Status: implemented and verified in Go source; migration 006 remains unapplied.
-The installed backend, existing PostgreSQL database, frontend, credentials and
-network settings have not been changed by this implementation.
+Status: migration 006 and matching backend were activated with explicit owner
+approval on 2026-11-03 11:36 (Asia/Manila), source `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e`.
+All three existing accounts, authentication keys and message state were preserved.
+The configured owner already had access; no optional grants, credentials,
+frontend or network settings were changed.
 
 The contract matches frontend `main` commit `af467490c522e3e0209701a5d6e4311f3a0c1953`.
 Signal is used for 1:1 messaging; OpenMLS is dormant for future groups. The Go
 backend distributes public setup material and queues opaque ciphertext. It does
 not run libsignal, generate private keys, decrypt messages or store ratchets.
 
-## Proposed database changes
+## Applied database changes
 
 [006_signal_public_prekeys.sql](../migrations/006_signal_public_prekeys.sql) adds
 only `signal_prekey_inventory`, `signal_prekey_claims` and one partial expiry
@@ -37,7 +39,7 @@ A partial expiry index supports bounded cleanup on startup and each minute.
 Outages or lock contention can delay physical cleanup, but expired bundles are
 not returned. MVCC/WAL/backups have separate physical retention behavior.
 
-Proposed fixed limits:
+Approved fixed limits:
 
 | Resource | Limit |
 | --- | --- |
@@ -144,8 +146,8 @@ recipient `ack`, online relay and 30-day ciphertext retention are unchanged.
 No message-delivery receipt, permanent delivered state, conversation table or
 advanced message-retry system is introduced.
 
-The frontend's prepared `PreKeyDirectory` remains inactive. Its frontend owner
-must connect it after backend migration/deployment approval. Native libsignal
+The backend extension is now active. The frontend's prepared `PreKeyDirectory`
+still needs its frontend owner to connect it; this deployment did not modify it. Native libsignal
 builds and real device exchange have not been verified here. Recipient private
 prekey retention must cover the 24-hour claim window plus the existing 30-day
 ciphertext queue; no pruning or rotation is enabled by this backend change.
@@ -165,5 +167,12 @@ replacement, fallback, expiry scrubbing and a forced INSERT failure proving that
 key consumption rolls back. A follow-up prekey run covered expired UUID reuse
 against an unknown recipient. Real server startup/readiness passed against both
 base two-table and extended four-table synthetic databases. Test servers and the
-private cluster are removed after evidence is archived. No live account or
-message was used, and no production schema, credential or network change was made.
+private cluster are removed after evidence is archived. The subsequent approved live activation passed six HTTP/readiness probes and
+two WebSocket upgrade/unknown-account checks without writing any live accounts,
+messages or prekey records. The four-table schema and effective privileges
+validated; original account/message hashes and inspected column/constraint/index metadata remained exact.
+Credentials and network settings were preserved.
+
+Private recovery dump, previous executable, exact SQL, before/after snapshots
+and activation evidence: `/home/void0000/.local/state/void-backend/deployments/20261103T113511+0800-signal-prekeys`. Temporary connection state and
+inspection helpers were removed after verification.

@@ -271,3 +271,17 @@ restricted-role catalog validation, WebSocket cases and real startup on both
 synthetic two/four-table layouts passed. Exact proposed limits and SQL effects
 are in [the review](docs/SIGNAL_PREKEYS.md). Application/deployment still requires
 approval; no startup path applies migrations. Historical 001–005 are unchanged.
+
+
+## Signal public-prekey migration activated: 2026-11-03 11:36 (Asia/Manila)
+
+The owner explicitly approved migration 006 and backend restart. Applied the
+exact reviewed transaction, SHA-256
+`74c0762fd4f473660b8da2c849b8d1dee2665b2625429ca19e8d6caa880756c1`, after a full private recovery backup.
+Only signal_prekey_inventory, signal_prekey_claims and the partial expiry index
+were added. All three account rows/keys and existing message state and inspected metadata
+remained exact. The configured owner already had access; no grant, role,
+credential, environment, frontend or network change was needed. Matching source
+`15458d70e2bedf4986e2be5ad4c83bff08ee8d7e` is running; six HTTP/readiness and two WebSocket checks passed.
+No live account/message/prekey rows were inserted by verification. Private
+backup/audit: `/home/void0000/.local/state/void-backend/deployments/20261103T113511+0800-signal-prekeys`. Temporary connection state and helpers were removed.

@@ -1,17 +1,17 @@
 # Approved temporary encrypted relay
 
-The Signal 1:1 public-prekey extension is now implemented in source following
-frontend `main` commit `af46749`. Its revised two-table addition is prepared for
-review, not applied. The historical deployed relay description below remains the
-base; see [the extension contract and limits](SIGNAL_PREKEYS.md). OpenMLS is
-dormant for future groups, while established Signal ciphertext uses the existing
-opaque queue. No production/frontend change was made by this implementation.
+The Signal 1:1 public-prekey extension was activated after explicit approval
+on 2026-11-03 11:36 (Asia/Manila), following frontend `main` commit `af46749`.
+The approved schema adds two public-key tables without altering existing accounts
+or messages; see [the extension contract and limits](SIGNAL_PREKEYS.md). OpenMLS
+is dormant for future groups; established Signal ciphertext uses the existing
+opaque queue. No frontend, credential or network configuration was changed.
 
 Approved on 2026-11-02 (Asia/Manila), including the owner's final adjustments: Go sets all event timestamps and a fixed 30-day deadline; advanced retry/deduplication and encrypted delivery receipts are deferred. The owner subsequently instructed "do the migration now". The exact SQL was verified in isolated PostgreSQL and applied on 2026-11-02 at 14:56 (Asia/Manila), followed by the matching backend. The live database has only accounts/messages; both accounts and registered keys were preserved. Credentials and Cloudflared remain unchanged.
 
 The responsibility is Authenticate → Locate → Temporarily store → Relay → Acknowledge → Delete. VOID-ID is a permanent public routing/contact identifier. Registered Ed25519 key ownership authenticates an account; the identifier itself does not. Registration creates no username. The legacy username column was removed with migration 005 after explicit approval.
 
-The deployed database has only public.accounts and public.messages. Accounts contain only internal UUID `id`, public `void_id`, `auth_public_key` and `created_at`. Migration 004 preserved identities and made username nullable; the separately authorized [migration 005](../migrations/005_drop_account_username.sql) subsequently removed username and its own CHECK. Remaining account data and messages were preserved; old username values remain available in the private recovery backup.
+Identity and ciphertext delivery retain public.accounts and public.messages; the active Signal extension adds public.signal_prekey_inventory and public.signal_prekey_claims. Accounts contain only internal UUID `id`, public `void_id`, `auth_public_key` and `created_at`. Migration 004 preserved identities and made username nullable; the separately authorized [migration 005](../migrations/005_drop_account_username.sql) subsequently removed username and its own CHECK. Remaining account data and messages were preserved; old username values remain available in the private recovery backup.
 
 The queue stores exactly event_id, sender_void_id, recipient_void_id, payload, created_at and expires_at. The key is (sender_void_id,event_id). Go stamps UTC creation time once and derives expiry with 30 * 24 hours. Clients cannot submit either timestamp. Server acceptance occurs only after persistence commits. Authenticated recipient ACK deletes the entire row and ciphertext; expiry cleanup deletes remaining expired rows. No delivered column, history, tombstone or delivery-receipt state is retained.
 

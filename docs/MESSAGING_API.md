@@ -1,6 +1,6 @@
 # Temporary encrypted event relay API
 
-Status: activated on 2026-11-02 after the owner explicitly authorized the reviewed migration. The database has exactly accounts/messages; existing accounts and keys were preserved. See [deployment evidence](MESSAGING_DEPLOYMENT.md). Registration remains HTTP; ordinary messaging uses authenticated WebSockets at `/dm9pZG5vdGhpbmduZXNz/ws`. No conversation, request, package-publication/claim, HTTP messaging session or HTTP sync/ACK API is mounted.
+Status: activated on 2026-11-02 after the owner explicitly authorized the reviewed migration. The database now has accounts/messages and the two approved Signal prekey tables; existing accounts and keys were preserved. See [deployment evidence](MESSAGING_DEPLOYMENT.md). Registration remains HTTP; ordinary messaging uses authenticated WebSockets at `/dm9pZG5vdGhpbmduZXNz/ws`. No conversation, request, package-publication/claim, HTTP messaging session or HTTP sync/ACK API is mounted.
 
 VOID-IDs are canonical decimal positive int64 strings. They are public addresses, never authentication credentials. Event IDs are lowercase nonzero UUID strings, scoped by authenticated sender. Opaque bytes use canonical padded standard base64. Every frame is one JSON object with exactly its documented string fields; duplicate, unknown, null, numeric and case-variant fields are rejected. Timestamps in this document are illustrative server values, not client inputs.
 
@@ -109,12 +109,12 @@ Errors use `{"type":"error","code":"..."}`. Codes include `invalid_frame`, `unau
 These bounds do not prevent fresh-key bot-account farming or provide persisted per-peer blocking. The target is one logical connected device per account; multi-device delivery state is not implemented.
 
 
-## Signal public prekeys (prepared extension)
+## Signal public prekeys
 
 Authenticated `prekeys_publish` and `prekeys_claim`, correlated responses/errors,
 public payloads, fixed 24-hour claim expiry and proposed schema are documented in
-[SIGNAL_PREKEYS.md](SIGNAL_PREKEYS.md). These additions are implemented in source;
-migration/deployment approval is still pending. Established Signal ciphertext
+[SIGNAL_PREKEYS.md](SIGNAL_PREKEYS.md). These additions are active after approved migration/deployment on
+2026-11-03 11:36 (Asia/Manila). Established Signal ciphertext
 uses the same `send`/`event`/`ack` contract above. The recipient may be offline
 when its previously published public bundle is claimed. No existing frame or
 account-authentication transcript changes.

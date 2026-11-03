@@ -1,6 +1,6 @@
 # Temporary relay verification and activation
 
-Verified on 2026-11-02 (Asia/Manila), on branch backend. Deployed source: `5fd593f3253e38d2e5ea5c7ab490581ac0135eec`. Installed binary SHA-256: `cc6ba5d0b386d1dc09fde54f657b890eb6717c49b9ad2792f2b506a9f6c65fff`.
+Latest activation verified on 2026-11-03 (Asia/Manila), branch backend. Deployed source: `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e`. Installed binary SHA-256: `b264d818880a84d4e2c3c400b617eaf215950fab66b45eec58a0b22f50dfca41`. Earlier dated records below describe their respective deployments.
 
 The owner explicitly authorized migration with "do the migration now". The exact 004 was rehearsed against a full isolated restore, then applied to the existing database at 14:56. Both accounts and keys remain exact; account table identity, metadata and privileges were preserved apart from optional username nullability. Exactly accounts/messages remain, and the new queue was empty after verification. The original matching backend was started after that migration.
 
@@ -94,3 +94,26 @@ activation and cleanup records: `/home/void0000/.local/state/void-backend/deploy
 The removed names remain recoverable there. Temporary production connection
 state and the private test cluster were removed after verification. Historical
 migrations 001–004 remain unchanged.
+
+
+## Signal public prekeys activated: 2026-11-03 11:36 (Asia/Manila)
+
+The owner explicitly approved applying revised migration 006 and restarting.
+Exact SQL SHA-256: `74c0762fd4f473660b8da2c849b8d1dee2665b2625429ca19e8d6caa880756c1`.
+The matching reviewed binary and its clean VCS metadata were verified. A full
+private recovery dump and archive catalog were verified before shutdown.
+The old backend stopped gracefully; exact 006 committed and the matching binary
+started. The optional grant file was unnecessary for the existing owner.
+
+Read-only snapshots before/after show all three existing account rows, keys,
+identity fields and inspected account/message metadata unchanged. Both public-prekey tables
+were created empty. Full actual schema and privilege validation passed. Six
+local/public HTTP/readiness probes and two WebSocket upgrade/unknown-account
+checks passed; no live account, message or prekey rows were created by probes.
+The extension is enabled. Credentials, .env, frontend, tunnel and network settings
+were unchanged. No autostart service was installed.
+
+Private dump, earlier executable, exact SQL, snapshots and activation record:
+`/home/void0000/.local/state/void-backend/deployments/20261103T113511+0800-signal-prekeys`. Temporary connection state and helper files were removed.
+Source verification remains recorded in [SIGNAL_PREKEYS.md](SIGNAL_PREKEYS.md),
+including eight restricted-role PostgreSQL cases and startup on both schemas.
