@@ -4,11 +4,14 @@ Status: the owner-authorized ARM64 release APK 2.0.0 (code 5) built successfully
 on 2026-11-04, overwriting the same version with manual-Resend changes.
 Package inspection confirmed Signal JNI is present while dormant
 OpenMLS/JNA and the unused Signal testing library are excluded. The owner reported
-a successful two-device exchange using the earlier 2026-11-03 APK. The new sender
-behavior has not been tested on devices. No database
-migrations or deployments were executed by this frontend work.
-Subsequent native verification diagnostic changes are source-only and have not
-been built or tested.
+a successful two-device exchange using the earlier 2026-11-03 APK. Subsequent
+package inspection confirmed User A's installation matches the current workspace
+APK, including event-correlation diagnostics; User B has different application
+code but the same native libsignal binary. Recipient logs identify an established
+message failing with `MAC_MISMATCH`. The historical event's cause remains unproven.
+Owner-authorized isolated tests exercised the unchanged Kotlin coordinator and
+SQLCipher on a disposable emulator. They did not use the production relay or real
+account state. No backend database changes or deployments were performed.
 
 ## Dependencies and boundaries
 
@@ -85,6 +88,13 @@ Only allowlisted codes enter the `VoidMessaging` Android log after a failed
 decrypt. Native log text, public-key/counter dumps and message contents are
 discarded. These are observed rejection reasons, not proof of malicious or
 permanently invalid ciphertext; unknown or missing native detail stays unknown.
+Failed established-message decrypt logs also include validated event/routing IDs
+and SHA-256 fingerprints of the decoded opaque payload and Signal ciphertext.
+The chat menu's explicit **Log send diagnostics** action reads up to 128 saved
+outgoing records, including accepted records, to log the corresponding metadata.
+It performs no network or cryptographic processing. See the
+[two-account correlation handoff](signal-message-correlation.md) for the matching
+read-only backend query and collection scope.
 
 ## Message transactions
 
@@ -117,6 +127,37 @@ text and use the normal verified session setup on Resend. A send whose server
 acceptance cannot be established is never presented as delivered or confirmed.
 The recipient may be offline throughout upload: the backend retains accepted
 ciphertext until the existing ACK or expiry.
+
+The explicit **Reconnect** and **Retry connection** buttons restart the socket
+lifecycle and authenticate a new connection. This invalidates stale controller
+operations and lets the relay offer unacknowledged events again. Ordinary
+refresh and automatic connection scheduling keep their existing behavior.
+
+Known limitation: a failed encrypted send can be retried after newer exchanges
+have advanced beyond libsignal's retained receiving chains. Isolated native
+x86_64 tests reproduced this through the unchanged Kotlin coordinator and
+SQLCipher: terminate after ciphertext commit, restart, leave that event
+unsubmitted, complete five later DH ratchet advances, then Resend its exact bytes.
+The old event fails with `MAC_MISMATCH` while fresh traffic still authenticates.
+Sixteen newer messages in the same DH chain remain compatible with the held
+message. Immediate crash/restart/Resend at the tested transaction boundaries
+authenticated successfully; sender state and ciphertext stayed consistent.
+
+This reproduction requires newer exchanges before the held event is submitted;
+an already-accepted event occupying the relay's unacknowledged slot normally
+blocks those later inbound events. It does not establish the historical event's
+cause. Sender fingerprints and event-bound encryption/retry/DH chronology remain
+missing; draft creation time is not encryption time. No ordering-policy correction
+has been implemented, and failed-event ACK eligibility and Resend bytes are unchanged.
+
+The disposable emulator's ARM64-translated fixture repeatedly failed fresh
+prekey decryption, while the native x86_64 fixture succeeded. Its underlying reason
+was unknown and no fixture SIGSEGV was observed. Without an isolated native ARM64
+control or the original translated stack mapping, neither the historical MAC
+failure nor the original crash can be attributed to the translator. The fixture
+omits React Native/Hermes and used Kotlin 2.2.10 with byte-identical storage source
+snapshots, libsignal 0.106.1 and SQLCipher 4.19.1. Local evidence is retained under
+`build/diagnostics/`; it is not included in source control.
 
 ## Active backend connection
 

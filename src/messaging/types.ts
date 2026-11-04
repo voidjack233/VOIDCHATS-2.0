@@ -39,6 +39,7 @@ export interface MessagingSnapshot {
 export interface MessagingDriver {
   signAuthChallenge(message: string): Promise<string>;
   getState(): Promise<MessagingSnapshot>;
+  logSendDiagnostics(conversationId: string): Promise<number>;
   openConversation(peer: Person): Promise<ConversationRecord>;
   resumePending(): Promise<void>;
   getPreKeyPublication(): Promise<PreKeyPublication | null>;

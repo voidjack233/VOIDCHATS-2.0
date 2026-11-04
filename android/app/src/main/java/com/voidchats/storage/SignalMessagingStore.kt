@@ -354,7 +354,7 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
         CiphertextMessage.WHISPER_TYPE -> {
           val message = signal(VerificationStage.MESSAGE_PARSE) { SignalMessage(ciphertext) }
           signal(VerificationStage.MESSAGE_DECRYPT) {
-            SignalDecryptDiagnostics.capture { cipher.decrypt(message) }
+            SignalDecryptDiagnostics.capture(eventId, encoded) { cipher.decrypt(message) }
           }
         }
         else -> throw SignalFailure("SIGNAL_UNSUPPORTED_MESSAGE")
@@ -377,6 +377,26 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
       } finally { plaintext.fill(0) }
       JSONObject().put("sender_void_id", sender).put("event_id", eventId).put("changed", true)
     }
+  }
+
+  /** Explicit, read-only diagnostics for this account's saved outgoing events. */
+  fun logSendDiagnostics(conversationId: String): JSONObject {
+    val localVoidId = identity().getString("accountVoidId")
+    val row = thread(conversationId)
+    val count = db.rawQuery(
+      "SELECT o.event_id,o.payload_base64,o.created_at FROM signal_outbox o JOIN messages m ON m.id=o.event_id " +
+        "WHERE m.conversation_id=? AND m.sender_void_id=? AND m.direction='outgoing' " +
+        "ORDER BY o.created_at DESC,o.event_id DESC LIMIT 128",
+      arrayOf(row.getString("conversation_id"), localVoidId)
+    ).use { cursor ->
+      var inspected = 0
+      while (cursor.moveToNext()) {
+        SignalDecryptDiagnostics.logStoredSend(cursor.getString(0), cursor.getString(1), cursor.getLong(2))
+        inspected++
+      }
+      inspected
+    }
+    return JSONObject().put("count", count)
   }
 
   fun completeOperation(operationId: String, response: Any): JSONObject {

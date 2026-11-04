@@ -11,6 +11,7 @@ internal class VoidMessagingModule(context: ReactApplicationContext, private val
   override fun getName() = "VoidMessaging"
   @ReactMethod fun signAuthChallenge(messageBase64: String, promise: Promise) = storage.submit(promise) { messaging.signAuthChallenge(messageBase64) }
   @ReactMethod fun getState(promise: Promise) = storage.submit(promise) { messaging.state().toString() }
+  @ReactMethod fun logSendDiagnostics(conversationId: String, promise: Promise) = storage.submit(promise) { messaging.logSendDiagnostics(conversationId).toString() }
   @ReactMethod fun resumePending(promise: Promise) = storage.submit(promise) { messaging.resumePending().toString() }
   @ReactMethod fun getPreKeyPublication(promise: Promise) = storage.submit(promise) { messaging.getPreKeyPublication().toString() }
   @ReactMethod fun completePreKeyPublication(publicationId: String, promise: Promise) = storage.submit(promise) { messaging.completePreKeyPublication(publicationId).toString() }

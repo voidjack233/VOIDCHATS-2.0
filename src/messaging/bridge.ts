@@ -7,6 +7,7 @@ import type {MessagingDriver, Person, QueueEvent} from './types';
 interface NativeModule {
   signAuthChallenge(message: string): Promise<string>;
   getState(): Promise<string>;
+  logSendDiagnostics(conversationId: string): Promise<string>;
   openConversation(peer: string): Promise<string>;
   resumePending(): Promise<string>;
   getPreKeyPublication(): Promise<string>;
@@ -36,6 +37,12 @@ export function createMessagingDriver(getModule: () => NativeModule | undefined,
   return {
     signAuthChallenge: async message => await call('signAuthChallenge', [decode.base64(message, 4096)]) as string,
     getState: async () => decode.snapshot(await call('getState')),
+    logSendDiagnostics: async id => {
+      const row = decode.record(await call('logSendDiagnostics', [decode.uuid(id)]), ['count']);
+      const count = row.count;
+      if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0 || count > 128) { throw new MessagingError('invalid_response'); }
+      return count;
+    },
     openConversation: async (peer: Person) => decodeConversation(await call('openConversation', [JSON.stringify(decode.person(peer))])),
     resumePending: () => mutation('resumePending'),
     getPreKeyPublication: async () => {

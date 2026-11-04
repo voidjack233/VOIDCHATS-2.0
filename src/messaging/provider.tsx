@@ -30,7 +30,7 @@ export function useMessaging() {
   const controller = useContext(Context);
   if (!controller) { throw new Error('MessagingProvider is required.'); }
   return {...useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot),
-    refresh: controller.refresh, lookup: controller.lookup, openConversation: controller.openConversation,
-    blockPeer: controller.blockPeer,
+    refresh: controller.refresh, reconnect: controller.reconnect, lookup: controller.lookup, openConversation: controller.openConversation,
+    blockPeer: controller.blockPeer, logSendDiagnostics: controller.logSendDiagnostics,
     sendMessage: controller.sendMessage, retryOperation: controller.retryOperation, retryMessage: controller.retryMessage};
 }

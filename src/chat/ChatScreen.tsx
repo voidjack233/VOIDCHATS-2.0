@@ -113,14 +113,22 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   async function resume() {
     if (!canCompose || resumingRef.current) { return; }
     resumingRef.current = true; setResuming(true); setSendError(null);
-    try { await messaging.refresh(); }
+    try { await messaging.reconnect(); }
     catch (value) { if (active()) { setSendError(safeMessagingError(value).message); } }
     finally { if (active()) { resumingRef.current = false; setResuming(false); } }
+  }
+  async function logSendDiagnostics() {
+    try {
+      const count = await messaging.logSendDiagnostics(conversation.id);
+      if (active()) { Alert.alert('Send diagnostics', count === 0 ? 'No saved outgoing send records were found for this chat.' : `Requested local Android diagnostic logging for ${count} saved outgoing messages.`); }
+    } catch (value) {
+      if (active()) { setSendError(safeMessagingError(value).message); }
+    }
   }
   function options() {
     if (!conversation.voidId || blocked) { return; }
     const peer = conversation.voidId;
-    Alert.alert(name ?? peer, undefined, [{text: 'Cancel', style: 'cancel'}, {text: 'Block person', style: 'destructive', onPress: () => {
+    Alert.alert(name ?? peer, undefined, [{text: 'Cancel', style: 'cancel'}, {text: 'Log send diagnostics', onPress: () => { logSendDiagnostics().catch(() => {}); }}, {text: 'Block person', style: 'destructive', onPress: () => {
       messaging.blockPeer(peer).catch(value => { if (active()) { setSendError(value instanceof Error ? value.message : 'Could not block this person.'); } });
     }}]);
   }

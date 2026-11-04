@@ -1,7 +1,9 @@
 package com.voidchats.storage
 
 import android.util.Log
+import java.security.MessageDigest
 import java.util.EnumSet
+import org.json.JSONObject
 import org.signal.libsignal.protocol.InvalidMessageException
 import org.signal.libsignal.protocol.logging.SignalProtocolLogger
 import org.signal.libsignal.protocol.logging.SignalProtocolLoggerProvider
@@ -70,7 +72,35 @@ internal object SignalDecryptDiagnostics {
     else -> Reason.OTHER_CANDIDATE_FAILURE
   }
 
-  fun <T> capture(operation: () -> T): T {
+  private fun eventMetadata(eventId: String, payloadBase64: String): String {
+    val safeId = try { MessagingProtocol.uuid(eventId) } catch (_: IllegalArgumentException) { "UNKNOWN" }
+    var sender = "UNKNOWN"
+    var recipient = "UNKNOWN"
+    var payloadHash = "UNKNOWN"
+    var ciphertextHash = "UNKNOWN"
+    fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
+    try {
+      val payload = MessagingProtocol.bytes(payloadBase64)
+      try {
+        payloadHash = hash(payload)
+        val envelope = JSONObject(payload.toString(Charsets.UTF_8))
+        try { sender = MessagingProtocol.voidId(MessagingProtocol.text(envelope, "from_void_id", 19)) } catch (_: IllegalArgumentException) { }
+        try { recipient = MessagingProtocol.voidId(MessagingProtocol.text(envelope, "to_void_id", 19)) } catch (_: IllegalArgumentException) { }
+        val ciphertext = MessagingProtocol.bytes(MessagingProtocol.text(envelope, "ciphertext_base64", 1_398_104))
+        try { ciphertextHash = hash(ciphertext) } finally { ciphertext.fill(0) }
+      } finally { payload.fill(0) }
+    } catch (_: Exception) { /* Unavailable diagnostic metadata stays UNKNOWN. */ }
+    return "event_id=$safeId sender_void_id=$sender recipient_void_id=$recipient payload_sha256=$payloadHash ciphertext_sha256=$ciphertextHash"
+  }
+
+  /** Explicit, read-only inspection of an already saved outgoing event. */
+  fun logStoredSend(eventId: String, payloadBase64: String, createdAt: Long) {
+    try {
+      Log.w("VoidMessaging", "stage=stored_send ${eventMetadata(eventId, payloadBase64)} message_created_at=$createdAt")
+    } catch (_: RuntimeException) { /* Diagnostics cannot change saved messages. */ }
+  }
+
+  fun <T> capture(eventId: String, payloadBase64: String, operation: () -> T): T {
     initialize()
     // Never replace a caller's context if capture is unexpectedly nested.
     if (active.get() != null) return operation()
@@ -80,7 +110,7 @@ internal object SignalDecryptDiagnostics {
     catch (error: InvalidMessageException) {
       val flags = if (reasons.isEmpty()) "UNKNOWN" else reasons.joinToString(",") { it.name }
       try {
-        Log.w("VoidMessaging", "stage=message_decrypt code=SIGNAL_MESSAGE_DECRYPT_INVALID_MESSAGE candidate_reasons=$flags")
+        Log.w("VoidMessaging", "stage=message_decrypt code=SIGNAL_MESSAGE_DECRYPT_INVALID_MESSAGE ${eventMetadata(eventId, payloadBase64)} candidate_reasons=$flags")
       } catch (_: RuntimeException) { /* Preserve the original native exception. */ }
       throw error
     } finally { active.remove() }

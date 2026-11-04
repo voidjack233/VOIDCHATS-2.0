@@ -124,6 +124,13 @@ export class MessagingController {
     action.finally(() => { if (this.refreshing === action) { this.refreshing = null; } }).catch(() => {});
     return action;
   };
+  reconnect = (): Promise<void> => {
+    if (!this.active) { return Promise.resolve(); }
+    // Restart the connection lifecycle so an authenticated socket cannot make
+    // an explicit reconnect return without replaying queued recipient events.
+    this.start();
+    return this.refreshing ?? Promise.resolve();
+  };
   private async prepareSignalSessions(generation: number): Promise<MessagingError | null> {
     const directory = this.prekeys;
     try {
@@ -269,6 +276,10 @@ export class MessagingController {
     if (!this.current(generation)) { throw new MessagingError('not_registered'); }
     await this.reload(generation, true);
     return conversation;
+  };
+  logSendDiagnostics = async (id: string): Promise<number> => {
+    if (!this.active) { throw new MessagingError('not_registered'); }
+    return this.options.driver.logSendDiagnostics(id);
   };
   blockPeer = (id: string) => this.mutate(() => this.options.driver.blockPeer(id));
   sendMessage = (id: string, body: string) => this.mutate(() => this.options.driver.queueMessage(id, body));
