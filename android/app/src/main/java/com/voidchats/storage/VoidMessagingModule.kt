@@ -5,7 +5,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 
-/** Public transport artifacts only; private MLS keys never cross this bridge. */
+/** Public transport artifacts only; private Signal keys never cross this bridge. */
 internal class VoidMessagingModule(context: ReactApplicationContext, private val storage: AppStorage) : ReactContextBaseJavaModule(context) {
   private val messaging = SignalMessagingStore(storage)
   override fun getName() = "VoidMessaging"
@@ -22,6 +22,7 @@ internal class VoidMessagingModule(context: ReactApplicationContext, private val
   @ReactMethod fun queueMessage(conversationId: String, body: String, promise: Promise) = storage.submit(promise) { messaging.queueMessage(conversationId, body).toString() }
   @ReactMethod fun completeOperation(operationId: String, responseJSON: String, promise: Promise) = storage.submit(promise) { messaging.completeOperation(operationId, MessagingProtocol.parse(responseJSON)).toString() }
   @ReactMethod fun failOperation(operationId: String, errorCode: String, promise: Promise) = storage.submit(promise) { messaging.failOperation(operationId, errorCode).toString() }
+  @ReactMethod fun failPending(errorCode: String, peerVoidId: String?, promise: Promise) = storage.submit(promise) { messaging.failPending(errorCode, peerVoidId).toString() }
   @ReactMethod fun retryOperation(operationId: String, promise: Promise) = storage.submit(promise) { messaging.retryOperation(operationId).toString() }
   @ReactMethod fun applyOnline(senderVoidId: String, exchangeId: String, payloadBase64: String, peerJSON: String, promise: Promise) = storage.submit(promise) {
     throw SignalFailure("SIGNAL_UNSUPPORTED_MESSAGE")

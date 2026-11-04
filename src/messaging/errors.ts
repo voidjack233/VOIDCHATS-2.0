@@ -9,17 +9,18 @@ const messages: Record<string, string> = {
   unauthorized: 'Reconnect to authenticate your saved VOID identity.',
   not_found: 'That VOID-ID is not registered.',
   duplicate_event: 'Send status is unknown because the server already has this message ID. The saved ciphertext is preserved.',
-  queue_full: 'The recipient’s queue is full. Your encrypted message is saved for retry.',
+  queue_full: 'The recipient’s temporary message storage is full. Try again later.',
   rate_limited: 'Too many messaging requests. Wait a moment before trying again.',
-  overloaded: 'VOID is busy. Your encrypted messages are saved for retry.',
-  unavailable: 'VOID is unavailable. Your encrypted messages are saved for retry.',
-  peer_offline: 'Your message is saved and will continue sending when a connection is available.',
-  deadline_exceeded: 'VOID did not respond. Your saved encrypted operation can be retried.',
+  overloaded: 'VOID is busy. Try again shortly.',
+  unavailable: 'Could not connect to VOID. Check your connection.',
+  peer_offline: 'That device is currently unavailable.',
+  deadline_exceeded: 'VOID did not respond in time. Check your connection.',
+  send_interrupted: 'Sending was interrupted. Your message is saved.',
   secure_state: 'A message could not be verified. Sending is paused for this chat.',
-  prekeys_unavailable: 'Your message is saved. First-contact messaging is waiting for public key distribution to become available.',
+  prekeys_unavailable: 'Secure messaging is currently unavailable. Try again later.',
   prekeys_conflict: 'The published key data conflicts with an earlier operation. Your saved keys and messages are preserved.',
   prekeys_invalid: 'The public key data was rejected. Your saved keys and messages are preserved.',
-  prekeys_capacity: 'The public key inventory is full. Your saved keys and messages are preserved.',
+  prekeys_capacity: 'The messaging service has reached a limit. Try again later.',
   prekey_claim_expired: 'The saved public key claim has expired. Your message remains saved.',
   unsupported_message: 'This message format is not supported by VOID 2.0. Your existing data is preserved.',
   identity_changed: 'This person’s identity has changed. Sending is paused for this chat.',
@@ -39,6 +40,8 @@ export function safeMessagingError(value: unknown): MessagingError {
   if (value instanceof MessagingError) { return value; }
   const code = value && typeof value === 'object' && 'code' in value ? value.code : undefined;
   if (typeof code === 'string') {
+    const normalized = code.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(messages, normalized)) { return new MessagingError(normalized, code); }
     if (['NATIVE_MODULE_UNAVAILABLE', 'NATIVE_MODULE_INCOMPATIBLE', 'UNSUPPORTED_PLATFORM'].includes(code)) { return new MessagingError('native_unavailable'); }
     if (['PEER_KEY_CHANGED', 'SIGNAL_IDENTITY_CHANGED', 'SIGNAL_UNTRUSTED_IDENTITY'].includes(code)) { return new MessagingError('identity_changed', code); }
     if (code === 'SIGNAL_PREKEYS_UNAVAILABLE') { return new MessagingError('prekeys_unavailable', code); }

@@ -47,7 +47,7 @@ export function ConversationsScreen({onOpenRequests, onOpenContacts, onOpenConve
           <AppText color="textMuted">›</AppText>
         </Pressable>
         {registered && (messaging.error || connecting || messaging.status === 'offline') ? <View style={{paddingBottom: theme.spacing.lg}}>
-          <AppText variant="caption" color={messaging.error ? 'warning' : 'textMuted'} accessibilityLiveRegion="polite">{messaging.error ?? (connecting ? 'Connecting…' : 'You’re offline. Messages will send when you reconnect.')}</AppText>
+          <AppText variant="caption" color={messaging.error ? 'warning' : 'textMuted'} accessibilityLiveRegion="polite">{messaging.error ?? (connecting ? 'Connecting…' : 'You’re offline.')}</AppText>
           {!connecting ? <Button title="Retry connection" variant="ghost" size="sm" onPress={() => { messaging.refresh().catch(() => {}); }} style={{marginTop: theme.spacing.xs}} /> : null}
         </View> : null}
         {conversations.error ? <View style={{paddingVertical: theme.spacing.lg}}><AppText color="danger">Could not load messages.</AppText><Button title="Try again" variant="ghost" onPress={conversations.refresh} /></View> : null}

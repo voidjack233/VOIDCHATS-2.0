@@ -1,7 +1,14 @@
 # VOID 2.0 direct messaging
 
-Status: Android source integration, not built or exercised on devices. No tests,
-builds, APK generation, migrations or live exchanges have been executed.
+Status: the owner-authorized ARM64 release APK 2.0.0 (code 5) built successfully
+on 2026-11-04, overwriting the same version with manual-Resend changes.
+Package inspection confirmed Signal JNI is present while dormant
+OpenMLS/JNA and the unused Signal testing library are excluded. The owner reported
+a successful two-device exchange using the earlier 2026-11-03 APK. The new sender
+behavior has not been tested on devices. No database
+migrations or deployments were executed by this frontend work.
+Subsequent native verification diagnostic changes are source-only and have not
+been built or tested.
 
 ## Dependencies and boundaries
 
@@ -62,6 +69,23 @@ pinning the Signal identity. Libsignal verifies its own prekeys and messages.
 Changed account or Signal keys are rejected; protocol pinning never marks the
 contact manually verified.
 
+Native verification diagnostics distinguish identity binding, prekey-bundle
+processing, encryption, prekey-message parsing/decryption and established-message
+parsing/decryption. Invalid message, key, version and legacy-format exceptions
+have separate sanitized codes. Persisted identity/session/prekey decode failures
+are identified when the exception retains the known store/constructor frames;
+otherwise the stage/class code remains the fallback. A decrypt failure alone
+does not prove permanent ciphertext invalidity. No raw exception messages,
+record contents or plaintext enter these diagnostics. ACK and transaction rules
+remain unchanged.
+
+Established-message decryption additionally uses libsignal's public logger API
+to capture fixed candidate-failure reason codes during that one decrypt call.
+Only allowlisted codes enter the `VoidMessaging` Android log after a failed
+decrypt. Native log text, public-key/counter dumps and message contents are
+discarded. These are observed rejection reasons, not proof of malicious or
+permanently invalid ciphertext; unknown or missing native detail stays unknown.
+
 ## Message transactions
 
 Opening a thread does not send an invitation. New incoming plaintext appears in
@@ -83,14 +107,33 @@ return no ACK and do not overwrite history.
 Only backend `accepted` changes outgoing UI state to **Sent to server**.
 Recipient delivery receipts remain deferred.
 
-## Backend approval dependency
+An explicit Send saves locally and starts the upload attempt immediately.
+Existing ciphertext is sent before unrelated public-key publication or session
+setup. A connection failure, timeout or app interruption changes pending sends
+to **Failed to send**. Reconnection leaves those messages alone; **Resend**
+re-enables only the selected saved message. An already encrypted message uses
+the same ciphertext and event ID. Drafts not yet encrypted retain their local
+text and use the normal verified session setup on Resend. A send whose server
+acceptance cannot be established is never presented as delivered or confirmed.
+The recipient may be offline throughout upload: the backend retains accepted
+ciphertext until the existing ACK or expiry.
 
-The existing relay has no public-prekey inventory. A `PreKeyDirectory` interface
-and WebSocket adapter are drafted in source, but the adapter is not connected to
-the running provider. First-contact drafts remain saved with an explicit pending
-message until the [minimal backend extension](signal-prekey-backend-proposal.md)
-is approved and implemented. No Go source, server tables or deployment settings
-have changed.
+## Active backend connection
+
+Backend commit `071aaf3` records the matching public-prekey extension as active.
+The controller creates its default `PreKeyDirectory` from its existing authenticated
+WebSocket client. A registered device publishes its durable public-key payload
+even with an empty outbox. First-contact drafts trigger authenticated lookup,
+bundle claim, native account/signature verification and Signal encryption.
+The encrypted outbox then uses the existing `send`/`accepted` contract.
+
+Unavailable recipient public keys and temporary capacity responses fail the
+current send attempt; they do not schedule an automatic resend. New explicit
+sends during an active pass request another pass so they cannot miss public-key
+preparation. The service still reconnects for incoming delivery and ACKs, without
+re-enabling failed outgoing messages. Native commit and ACK conditions are
+unchanged. No Go source, server tables or deployment settings were modified by
+this frontend activation.
 
 Old queued MLS events are unsupported and are not automatically ACKed. Such an
 event can continue occupying the relay's one in-flight slot; any cleanup policy

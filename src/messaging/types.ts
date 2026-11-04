@@ -50,5 +50,6 @@ export interface MessagingDriver {
   applyOnline(fromId: string, exchangeId: string, payload: string, peer: Person): Promise<void>;
   applyEvent(event: QueueEvent, peer: Person): Promise<RecipientAck & {changed: boolean; diagnosticCode?: string | null}>;
   failOperation(id: string, code: string): Promise<void>;
+  failPending(code: string, peerVoidId?: string): Promise<void>;
   retryOperation(id: string): Promise<void>;
 }

@@ -1,7 +1,7 @@
 import type {Person} from './types';
 import type {MessagingClient} from './client';
 
-/** Public material only. Activation requires the approved server extension.
+/** Public material only, carried by the authenticated backend connection.
  * Android and future iOS use the same coordinator; native stores own private keys. */
 export interface PreKeyPublication {id: string; payloadBase64: string}
 export interface PreKeyRequest {id: string; peer: Person}

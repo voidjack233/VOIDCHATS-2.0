@@ -16,22 +16,23 @@ interface NativeModule {
   queueMessage(id: string, body: string): Promise<string>;
   completeOperation(id: string, response: string): Promise<string>;
   failOperation(id: string, code: string): Promise<string>;
+  failPending(code: string, peerVoidId: string | null): Promise<string>;
   retryOperation(id: string): Promise<string>;
   applyOnline(fromId: string, exchangeId: string, payload: string, peer: string): Promise<string>;
   applyEvent(event: string, peer: string): Promise<string>;
 }
 export function createMessagingDriver(getModule: () => NativeModule | undefined, platform: string): MessagingDriver {
-  const call = async (method: keyof NativeModule, args: string[] = []): Promise<unknown> => {
+  const call = async (method: keyof NativeModule, args: Array<string | null> = []): Promise<unknown> => {
     const native = getModule();
     if (!['android', 'ios'].includes(platform) || !native || typeof native[method] !== 'function') { throw new MessagingError('native_unavailable'); }
     try {
-      const value = await (native[method] as (...values: string[]) => Promise<string>)(...args);
+      const value = await (native[method] as (...values: Array<string | null>) => Promise<string>)(...args);
       if (method === 'signAuthChallenge') { return decode.base64(value, 64, 64); }
       if (typeof value !== 'string' || value.length > 16 * 1024 * 1024) { throw new MessagingError('invalid_response'); }
       return JSON.parse(value) as unknown;
     } catch (error) { throw safeMessagingError(error); }
   };
-  const mutation = async (method: keyof NativeModule, ...args: string[]): Promise<void> => { await call(method, args); };
+  const mutation = async (method: keyof NativeModule, ...args: Array<string | null>): Promise<void> => { await call(method, args); };
   return {
     signAuthChallenge: async message => await call('signAuthChallenge', [decode.base64(message, 4096)]) as string,
     getState: async () => decode.snapshot(await call('getState')),
@@ -49,6 +50,7 @@ export function createMessagingDriver(getModule: () => NativeModule | undefined,
     queueMessage: (id, body) => mutation('queueMessage', decode.uuid(id), body),
     completeOperation: (id, response) => mutation('completeOperation', decode.uuid(id), JSON.stringify(response)),
     failOperation: (id, code) => mutation('failOperation', decode.uuid(id), code),
+    failPending: (code, peerVoidId) => mutation('failPending', code, peerVoidId === undefined ? null : decode.voidId(peerVoidId)),
     retryOperation: id => mutation('retryOperation', decode.uuid(id)),
     applyOnline: async () => { throw new MessagingError('unsupported_message'); },
     applyEvent: async (event: QueueEvent, peer: Person) => {

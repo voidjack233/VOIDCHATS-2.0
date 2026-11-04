@@ -24,7 +24,7 @@ function MessageRow({message, day, uncertain, paused, onRetry, retrying, retryDi
 }) {
   const theme = useTheme();
   const outgoing = message.direction === 'outgoing';
-  const status = uncertain ? 'Send status unknown' : message.deliveryState === 'pending' ? (paused ? 'Sending paused' : 'Saved to send') : message.deliveryState === 'failed' ? 'Not sent' : 'Sent to server';
+  const status = uncertain ? 'Send status unknown' : message.deliveryState === 'pending' ? (paused ? 'Sending paused' : 'Sending…') : message.deliveryState === 'failed' ? 'Failed to send' : 'Sent to server';
   const reactions = new Map<string, number>();
   for (const reaction of message.reactions) { reactions.set(reaction.emoji, (reactions.get(reaction.emoji) ?? 0) + 1); }
   return <>
@@ -48,7 +48,7 @@ function MessageRow({message, day, uncertain, paused, onRetry, retrying, retryDi
     </View>
     {outgoing && message.deliveryState === 'failed' ? <View style={styles.failed}>
       {uncertain ? <AppText variant="caption" color="textMuted">Couldn’t confirm this send. Your message is saved.</AppText>
-        : <Button title="Retry" variant="ghost" size="sm" loading={retrying} disabled={retryDisabled} onPress={onRetry} />}
+        : <Button title="Resend" variant="ghost" size="sm" loading={retrying} disabled={retryDisabled} onPress={onRetry} />}
     </View> : null}
   </>;
 }
@@ -73,6 +73,7 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   const registered = storage.status === 'ready' && Boolean(storage.identity?.accountVoidId);
   const session = messaging.sessions.find(item => item.id === conversation.id);
   const diagnostic = session?.diagnosticCode ? safeMessagingError({code: session.diagnosticCode}) : null;
+  const paused = diagnostic !== null && ['secure_state', 'identity_changed', 'storage', 'native_unavailable'].includes(diagnostic.code);
   const canCompose = registered && conversation.kind === 'direct' && !blocked;
   const list = useRef<FlatList<MessageRecord>>(null);
   const initiallyScrolled = useRef(false);
@@ -153,8 +154,8 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
         renderItem={({item, index}) => <MessageRow message={item}
           day={index === 0 || new Date(chronological[index - 1].createdAt).toDateString() !== new Date(item.createdAt).toDateString()}
           uncertain={messaging.outbox.some(operation => operation.id === item.id && ['duplicate_event', 'send_unknown'].includes(operation.errorCode ?? ''))}
-          paused={diagnostic !== null}
-          onRetry={() => { retry(item.id).catch(() => {}); }} retrying={retryingId === item.id} retryDisabled={!canCompose || retryingId !== null} />}
+          paused={paused}
+          onRetry={() => { retry(item.id).catch(() => {}); }} retrying={retryingId === item.id} retryDisabled={!canCompose || paused || retryingId !== null} />}
         maintainVisibleContentPosition={{minIndexForVisible: 0}}
         contentContainerStyle={[styles.messages, {paddingHorizontal: theme.spacing.lg, paddingBottom: theme.spacing.lg}]}
         scrollEventThrottle={100}
@@ -176,15 +177,16 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
       />
       <View style={{paddingHorizontal: theme.spacing.md, paddingTop: theme.spacing.sm, paddingBottom: theme.spacing.md}}>
         {sendError ? <AppText color="danger" variant="caption" accessibilityLiveRegion="polite" style={{marginBottom: theme.spacing.sm}}>{sendError}</AppText> : null}
-        {diagnostic && !blocked && registered ? <View style={[styles.paused, {paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm, marginBottom: theme.spacing.sm, backgroundColor: theme.colors.surface, borderRadius: theme.radii.md}]}>
+        {diagnostic && paused && !blocked && registered ? <View style={[styles.paused, {paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm, marginBottom: theme.spacing.sm, backgroundColor: theme.colors.surface, borderRadius: theme.radii.md}]}>
           <View style={styles.flex}>
             <AppText variant="caption" color="warning" accessibilityLiveRegion="polite">Your messages are saved. Sending is paused.</AppText>
             {diagnostic.code === 'identity_changed' ? <AppText variant="caption" color="textSecondary" style={{marginTop: theme.spacing.xs}}>{diagnostic.message}</AppText> : null}
+            {session?.diagnosticCode ? <AppText variant="caption" color="textMuted" selectable style={{marginTop: theme.spacing.xs}}>Error code: {session.diagnosticCode}</AppText> : null}
           </View>
-          <Button title="Retry" variant="ghost" size="sm" loading={resuming} onPress={() => { resume().catch(() => {}); }} style={{marginLeft: theme.spacing.sm}} />
+          <Button title="Reconnect" variant="ghost" size="sm" loading={resuming} onPress={() => { resume().catch(() => {}); }} style={{marginLeft: theme.spacing.sm}} />
         </View> : null}
         {blocked || !registered || conversation.kind !== 'direct' || messaging.status === 'offline' ? <AppText variant="caption" color="textMuted" accessibilityLiveRegion="polite" style={[styles.centeredText, {marginBottom: theme.spacing.sm}]}>
-          {blocked ? 'You blocked this person.' : !registered ? 'Create an account to send messages.' : conversation.kind !== 'direct' ? 'Group messaging is not available yet.' : 'You’re offline. Your messages will send when you reconnect.'}
+          {blocked ? 'You blocked this person.' : !registered ? 'Create an account to send messages.' : conversation.kind !== 'direct' ? 'Group messaging is not available yet.' : 'You’re offline. Failed messages stay saved until you tap Resend.'}
         </AppText> : null}
         <View style={styles.composerRow}>
           <TextInput accessibilityLabel="Message" placeholder={blocked ? 'Person blocked' : 'Message'} value={draft} onChangeText={setDraft}

@@ -1,7 +1,7 @@
 import type {ConversationRecord, LocalIdentity} from '../storage/types';
 import {MessagingClient, type Socket} from './client';
 import {MessagingError, retryable, safeMessagingError} from './errors';
-import type {PreKeyDirectory} from './prekeys';
+import {createPreKeyDirectory, type PreKeyDirectory} from './prekeys';
 import type {MessagingDriver, MessagingSnapshot, OnlineEvent, Person, QueueEvent} from './types';
 
 export interface MessagingState extends MessagingSnapshot {
@@ -25,15 +25,29 @@ export class MessagingController {
   private backoff = 1000;
   private refreshing: Promise<void> | null = null;
   private flushing: Promise<void> | null = null;
+  private pendingFailure: Promise<void> = Promise.resolve();
+  private flushRequested = false;
   private inbound: Promise<void> = Promise.resolve();
   private inboundCount = 0;
   private readonly client: MessagingClient;
+  private readonly prekeys: PreKeyDirectory;
   constructor(private readonly options: Options) {
     this.client = new MessagingClient({...options,
       signAuthChallenge: message => options.driver.signAuthChallenge(message),
-      onDisconnect: error => { if (this.active) { this.publish({status: 'offline', error: error.message}); this.schedule(); } },
+      onDisconnect: error => {
+        if (this.active) {
+          const generation = this.generation;
+          this.publish({status: 'offline', error: error.message});
+          this.pendingFailure = this.options.driver.failPending(error.code);
+          this.pendingFailure.then(() => this.reload(generation, true)).catch(value => {
+            if (this.current(generation)) { this.publish({error: safeMessagingError(value).message}); }
+          });
+          this.schedule();
+        }
+      },
       onEvent: event => this.receive(event),
     });
+    this.prekeys = options.prekeys ?? createPreKeyDirectory(this.client);
   }
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -46,15 +60,24 @@ export class MessagingController {
     const identity = this.options.identity();
     if (!identity?.accountVoidId) { return; }
     this.active = true; this.scope = identity.localDeviceId; this.backoff = 1000;
+    // A previous process may have ended before it could record send failure.
+    // Reopening only reconnects; interrupted messages require explicit Resend.
+    this.recordInterruptedSends(this.scope);
     this.refresh().catch(() => {});
   };
   stop = () => {
+    const interruptedScope = this.active ? this.scope : null;
     this.active = false; this.generation++; this.scope = '';
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    this.client.reset(); this.refreshing = null; this.flushing = null;
+    this.client.reset(); this.refreshing = null; this.flushing = null; this.flushRequested = false;
     this.inbound = Promise.resolve(); this.inboundCount = 0;
+    if (interruptedScope) { this.recordInterruptedSends(interruptedScope); }
     this.publish(empty());
   };
+  private recordInterruptedSends(scope: string) {
+    this.pendingFailure = this.options.driver.failPending('send_interrupted');
+    this.pendingFailure.then(() => this.options.committed(scope), () => {});
+  }
   private current(generation: number): boolean { return this.active && generation === this.generation && this.options.identity()?.localDeviceId === this.scope; }
   private schedule(delay = this.backoff) {
     if (!this.active || this.timer) { return; }
@@ -75,13 +98,15 @@ export class MessagingController {
       if (this.timer) { clearTimeout(this.timer); this.timer = null; }
       if (this.state.status !== 'online') { this.publish({status: 'connecting'}); }
       try {
+        await this.pendingFailure;
+        if (!this.current(generation)) { return; }
         await this.reload(generation, true);
         if (!this.current(generation)) { return; }
         await this.client.connect();
         if (!this.current(generation)) { return; }
         this.backoff = 1000; this.publish({status: 'online', error: null});
-        // Native Signal sessions can encrypt saved drafts without a directory
-        // request. A first contact requires an explicitly supplied public bundle.
+        // Encrypt drafts for existing sessions before publishing or claiming
+        // public prekeys for new contacts over this authenticated connection.
         await this.options.driver.resumePending();
         await this.reload(generation, true);
         if (!this.current(generation)) { return; }
@@ -89,7 +114,10 @@ export class MessagingController {
       } catch (value) {
         if (!this.current(generation)) { return; }
         const error = safeMessagingError(value);
-        this.publish({status: 'offline', error: error.message}); this.schedule(); throw error;
+        this.publish({status: 'offline', error: error.message});
+        await this.options.driver.failPending(error.code);
+        await this.reload(generation, true);
+        this.schedule(); throw error;
       }
     })();
     this.refreshing = action;
@@ -97,10 +125,7 @@ export class MessagingController {
     return action;
   };
   private async prepareSignalSessions(generation: number): Promise<MessagingError | null> {
-    const directory = this.options.prekeys;
-    if (!directory) {
-      return this.state.prekeyRequests?.length ? new MessagingError('prekeys_unavailable') : null;
-    }
+    const directory = this.prekeys;
     try {
       await this.client.connect();
       if (!this.current(generation)) { return null; }
@@ -111,7 +136,16 @@ export class MessagingController {
         if (!this.current(generation)) { return null; }
         await this.options.driver.completePreKeyPublication(publication.id);
       }
-      for (const request of this.state.prekeyRequests ?? []) {
+    } catch (value) {
+      if (!this.current(generation)) { return null; }
+      const error = safeMessagingError(value);
+      await this.options.driver.failPending(error.code);
+      await this.reload(generation, true);
+      return error;
+    }
+    let firstError: MessagingError | null = null;
+    for (const request of this.state.prekeyRequests ?? []) {
+      try {
         const peer = await this.client.lookup(request.peer.void_id);
         if (!this.current(generation)) { return null; }
         if (peer.auth_public_key !== request.peer.auth_public_key) { throw new MessagingError('identity_changed', 'PEER_KEY_CHANGED'); }
@@ -119,22 +153,35 @@ export class MessagingController {
         if (!this.current(generation)) { return null; }
         await this.options.driver.establishSignalSession(peer, bundle);
         if (!this.current(generation)) { return null; }
+      } catch (value) {
+        if (!this.current(generation)) { return null; }
+        const error = safeMessagingError(value);
+        await this.options.driver.failPending(error.code, request.peer.void_id);
+        await this.reload(generation, true);
+        firstError ??= error;
       }
-      await this.options.driver.resumePending();
-      await this.reload(generation, true);
-      return null;
-    } catch (value) { return safeMessagingError(value); }
+    }
+    await this.options.driver.resumePending();
+    await this.reload(generation, true);
+    return firstError;
   }
   private flush(): Promise<void> {
-    if (this.flushing) { return this.flushing; }
+    if (this.flushing) { this.flushRequested = true; return this.flushing; }
     const generation = this.generation;
     const action = (async () => {
-      const prekeyError = await this.prepareSignalSessions(generation);
-      if (!this.current(generation)) { return; }
+      let prepared = false;
+      let prekeyError: MessagingError | null = null;
       const attempted = new Set<string>();
       while (this.current(generation)) {
         const op = this.state.outbox.find(item => item.status === 'pending' && !attempted.has(item.id));
-        if (!op) { break; }
+        if (!op) {
+          if (prepared) { break; }
+          // Existing ciphertext goes straight to send, without waiting for
+          // public-key publication or another contact's session setup.
+          prepared = true;
+          prekeyError = await this.prepareSignalSessions(generation);
+          continue;
+        }
         attempted.add(op.id);
         try {
           if (op.kind !== 'message' || op.purpose !== 'application') { throw new MessagingError('unsupported_message'); }
@@ -147,7 +194,6 @@ export class MessagingController {
           if (!this.current(generation)) { return; }
           const error = safeMessagingError(value);
           this.publish({error: error.message});
-          if (retryable(error)) { this.schedule(); break; }
           // duplicate_event is uncertain acceptance, never a sent/delivered receipt.
           await this.options.driver.failOperation(op.id, error.code);
           await this.reload(generation, true);
@@ -155,12 +201,19 @@ export class MessagingController {
       }
       if (this.current(generation) && prekeyError) {
         this.publish({error: prekeyError.message});
-        if (retryable(prekeyError)) { this.schedule(); }
       }
-      if (this.current(generation) && this.state.outbox.some(item => item.status === 'pending')) { this.schedule(5000); }
     })();
     this.flushing = action;
-    action.finally(() => { if (this.flushing === action) { this.flushing = null; } }).catch(() => {});
+    action.finally(() => {
+      if (this.flushing !== action) { return; }
+      this.flushing = null;
+      const requested = this.flushRequested; this.flushRequested = false;
+      if (requested && this.current(generation)) {
+        this.flush().catch(value => {
+          if (this.current(generation)) { this.publish({error: safeMessagingError(value).message}); this.schedule(); }
+        });
+      }
+    }).catch(() => {});
     return action;
   }
   private receive(event: OnlineEvent | QueueEvent) {
@@ -187,7 +240,7 @@ export class MessagingController {
     }).catch(value => {
       if (this.current(generation)) {
         const error = safeMessagingError(value);
-        this.publish({error: error.message});
+        this.publish({error: error.diagnosticCode ? `${error.message} Error code: ${error.diagnosticCode}` : error.message});
         // No ACK on failed processing; the server retains the queued event.
         // Reconnect also retries a failed post-commit ACK through native dedup.
         if (retryable(error) || error.code === 'storage') { this.client.reset(); this.publish({status: 'offline'}); this.schedule(); }

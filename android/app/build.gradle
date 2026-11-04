@@ -95,7 +95,7 @@ android {
     }
     packaging {
         resources.excludes += ["**/*.dylib", "**/*.dll", "**/libsignal_jni*.so"]
-        jniLibs.excludes += ["**/libvoid_openmls.so", "**/libjnidispatch.so"]
+        jniLibs.excludes += ["**/libvoid_openmls.so", "**/libjnidispatch.so", "**/libsignal_jni_testing.so"]
     }
     defaultConfig {
         applicationId "com.voidchats"
@@ -153,4 +153,12 @@ kotlin.sourceSets.named("main") {
     kotlin.exclude("com/voidchats/crypto/VoidOpenMlsModule.kt")
     kotlin.exclude("com/voidchats/crypto/VoidOpenMlsPackage.kt")
     kotlin.exclude("com/voidchats/storage/MessagingStore.kt")
+}
+
+// Android also contributes .kt files from java source directories directly to
+// compilation tasks, so filter those task inputs as well as the source sets.
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    exclude("**/com/voidchats/crypto/VoidOpenMlsModule.kt")
+    exclude("**/com/voidchats/crypto/VoidOpenMlsPackage.kt")
+    exclude("**/com/voidchats/storage/MessagingStore.kt")
 }
