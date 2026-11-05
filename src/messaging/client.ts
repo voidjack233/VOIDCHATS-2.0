@@ -2,6 +2,7 @@ import {normalizeApiUrl} from '../account/client';
 import {decodeBase64, isChallengeToken, usernameBase64} from '../account/validation';
 import type {LocalIdentity} from '../storage/types';
 import * as decode from './decode';
+import {logMessagingDiagnostic} from './diagnostics';
 import {MessagingError} from './errors';
 import type {Accepted, OnlineEvent, OnlineResult, Person, PreKeyBundleFrame, PreKeysPublished, QueueEvent, RecipientAck, ServerFrame} from './types';
 
@@ -34,6 +35,7 @@ export class MessagingClient {
     return identity as LocalIdentity & {accountVoidId: string};
   }
   private shutdown(error: MessagingError, notify: boolean) {
+    if (notify) { logMessagingDiagnostic('socket_disconnect', () => ({local_void_id: this.options.identity()?.accountVoidId, code: error.code})); }
     this.generation++; this.authenticated = false;
     const socket = this.socket; this.socket = null;
     if (socket) { socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null; try { socket.close(); } catch { /* Already closed. */ } }
@@ -41,11 +43,15 @@ export class MessagingClient {
     const waiting = this.waiting; this.waiting = null; waiting?.reject(error);
     if (notify) { this.options.onDisconnect(error); }
   }
-  reset() { this.shutdown(new MessagingError('unavailable'), false); }
+  reset() {
+    logMessagingDiagnostic('socket_reset', () => ({local_void_id: this.options.identity()?.accountVoidId}));
+    this.shutdown(new MessagingError('unavailable'), false);
+  }
   connect(): Promise<void> {
     const identity = this.identity();
     if (this.authenticated) { return Promise.resolve(); }
     if (this.connecting) { return this.connecting; }
+    logMessagingDiagnostic('socket_connect', () => ({local_void_id: identity.accountVoidId}));
     const generation = this.generation;
     const promise = new Promise<void>((resolve, reject) => {
       let challenged = false; let proofSent = false;
@@ -85,10 +91,18 @@ export class MessagingClient {
                 return;
               }
               if (frame.type !== 'auth_ok' || !proofSent || frame.void_id !== identity.accountVoidId) { throw new MessagingError('invalid_response'); }
-              clearTimeout(timer); this.cancelConnect = null; this.connecting = null; this.authenticated = true; resolve();
+              clearTimeout(timer); this.cancelConnect = null; this.connecting = null; this.authenticated = true;
+              logMessagingDiagnostic('auth_ok', () => ({local_void_id: identity.accountVoidId}));
+              resolve();
               return;
             }
-            if (frame.type === 'online_event' || frame.type === 'event') { this.options.onEvent(frame); return; }
+            if (frame.type === 'online_event' || frame.type === 'event') {
+              if (frame.type === 'event') {
+                logMessagingDiagnostic('event_received', () => ({local_void_id: identity.accountVoidId, event_id: frame.event_id,
+                  sender_void_id: frame.from_void_id, created_at: frame.created_at, expires_at: frame.expires_at}));
+              }
+              this.options.onEvent(frame); return;
+            }
             const waiting = this.waiting;
             if (frame.type === 'prekeys_error') {
               if (!waiting || waiting.errorRequestId !== frame.request_id) { throw new MessagingError('invalid_response'); }
@@ -113,7 +127,16 @@ export class MessagingClient {
       return new Promise<ServerFrame>((resolve, reject) => {
         const timer = setTimeout(() => this.shutdown(new MessagingError('deadline_exceeded'), true), this.options.timeoutMs ?? 20000);
         this.waiting = {match, errorRequestId, resolve: frame => { clearTimeout(timer); resolve(frame); }, reject: error => { clearTimeout(timer); reject(error); }};
-        try { this.socket!.send(JSON.stringify(command)); } catch { this.shutdown(new MessagingError('unavailable'), true); }
+        try {
+          this.socket!.send(JSON.stringify(command));
+          logMessagingDiagnostic('socket_transmit', () => {
+            const metadata = command as {type?: string; event_id?: string; sender_void_id?: string;
+              to_void_id?: string; void_id?: string; request_id?: string; publication_id?: string};
+            return {local_void_id: this.options.identity()?.accountVoidId, command_type: metadata.type, event_id: metadata.event_id,
+              sender_void_id: metadata.sender_void_id, recipient_void_id: metadata.to_void_id ?? metadata.void_id,
+              request_id: metadata.request_id, publication_id: metadata.publication_id};
+          });
+        } catch { this.shutdown(new MessagingError('unavailable'), true); }
       });
     });
     this.commands = result.catch(() => {});
@@ -125,13 +148,19 @@ export class MessagingClient {
   }
   async publishPreKeys(publication_id: string, payload_base64: string): Promise<PreKeysPublished> {
     decode.uuid(publication_id); decode.base64(payload_base64, 262144);
-    return await this.command({type: 'prekeys_publish', publication_id, payload_base64},
+    logMessagingDiagnostic('prekeys_publish', () => ({local_void_id: this.options.identity()?.accountVoidId, publication_id}));
+    const result = await this.command({type: 'prekeys_publish', publication_id, payload_base64},
       frame => frame.type === 'prekeys_published' && frame.publication_id === publication_id, publication_id) as PreKeysPublished;
+    logMessagingDiagnostic('prekeys_published', () => ({local_void_id: this.options.identity()?.accountVoidId, publication_id}));
+    return result;
   }
   async claimPreKeys(request_id: string, void_id: string): Promise<PreKeyBundleFrame> {
     decode.uuid(request_id); decode.voidId(void_id);
-    return await this.command({type: 'prekeys_claim', request_id, void_id},
+    logMessagingDiagnostic('prekeys_claim', () => ({local_void_id: this.options.identity()?.accountVoidId, request_id, recipient_void_id: void_id}));
+    const result = await this.command({type: 'prekeys_claim', request_id, void_id},
       frame => frame.type === 'prekey_bundle' && frame.request_id === request_id && frame.void_id === void_id, request_id) as PreKeyBundleFrame;
+    logMessagingDiagnostic('prekeys_claimed', () => ({local_void_id: this.options.identity()?.accountVoidId, request_id, recipient_void_id: void_id}));
+    return result;
   }
   async relay(exchange_id: string, to_void_id: string, payload_base64: string): Promise<OnlineResult> {
     decode.exchangeId(exchange_id); decode.voidId(to_void_id); decode.base64(payload_base64);
@@ -139,10 +168,16 @@ export class MessagingClient {
   }
   async send(event_id: string, to_void_id: string, payload_base64: string): Promise<Accepted> {
     decode.uuid(event_id); decode.voidId(to_void_id); decode.base64(payload_base64);
-    return await this.command({type: 'send', event_id, to_void_id, payload_base64}, frame => frame.type === 'accepted' && frame.event_id === event_id) as Accepted;
+    logMessagingDiagnostic('send_submit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id, recipient_void_id: to_void_id}));
+    const result = await this.command({type: 'send', event_id, to_void_id, payload_base64}, frame => frame.type === 'accepted' && frame.event_id === event_id) as Accepted;
+    logMessagingDiagnostic('send_accepted', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id, recipient_void_id: to_void_id,
+      created_at: result.created_at, expires_at: result.expires_at}));
+    return result;
   }
   async ack(ack: RecipientAck): Promise<void> {
     decode.uuid(ack.event_id); decode.voidId(ack.sender_void_id);
+    logMessagingDiagnostic('ack_submit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: ack.event_id, sender_void_id: ack.sender_void_id}));
     await this.command({type: 'ack', ...ack}, frame => frame.type === 'ack_ok' && frame.event_id === ack.event_id && frame.sender_void_id === ack.sender_void_id);
+    logMessagingDiagnostic('ack_ok', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: ack.event_id, sender_void_id: ack.sender_void_id}));
   }
 }

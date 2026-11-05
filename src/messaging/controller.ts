@@ -1,6 +1,7 @@
 import type {ConversationRecord, LocalIdentity} from '../storage/types';
 import {MessagingClient, type Socket} from './client';
 import {MessagingError, retryable, safeMessagingError} from './errors';
+import {logMessagingDiagnostic} from './diagnostics';
 import {createPreKeyDirectory, type PreKeyDirectory} from './prekeys';
 import type {MessagingDriver, MessagingSnapshot, OnlineEvent, Person, QueueEvent} from './types';
 
@@ -76,7 +77,10 @@ export class MessagingController {
   };
   private recordInterruptedSends(scope: string) {
     this.pendingFailure = this.options.driver.failPending('send_interrupted');
-    this.pendingFailure.then(() => this.options.committed(scope), () => {});
+    this.pendingFailure.then(() => {
+      logMessagingDiagnostic('pending_sends_failed', () => ({local_void_id: this.options.identity()?.accountVoidId, code: 'send_interrupted'}));
+      this.options.committed(scope);
+    }, () => {});
   }
   private current(generation: number): boolean { return this.active && generation === this.generation && this.options.identity()?.localDeviceId === this.scope; }
   private schedule(delay = this.backoff) {
@@ -126,6 +130,7 @@ export class MessagingController {
   };
   reconnect = (): Promise<void> => {
     if (!this.active) { return Promise.resolve(); }
+    logMessagingDiagnostic('reconnect', () => ({local_void_id: this.options.identity()?.accountVoidId}));
     // Restart the connection lifecycle so an authenticated socket cannot make
     // an explicit reconnect return without replaying queued recipient events.
     this.start();
@@ -146,6 +151,7 @@ export class MessagingController {
     } catch (value) {
       if (!this.current(generation)) { return null; }
       const error = safeMessagingError(value);
+      logMessagingDiagnostic('prekey_setup_failed', () => ({local_void_id: this.options.identity()?.accountVoidId, code: error.code, diagnostic_code: error.diagnosticCode}));
       await this.options.driver.failPending(error.code);
       await this.reload(generation, true);
       return error;
@@ -163,6 +169,8 @@ export class MessagingController {
       } catch (value) {
         if (!this.current(generation)) { return null; }
         const error = safeMessagingError(value);
+        logMessagingDiagnostic('prekey_setup_failed', () => ({local_void_id: this.options.identity()?.accountVoidId,
+          request_id: request.id, recipient_void_id: request.peer.void_id, code: error.code, diagnostic_code: error.diagnosticCode}));
         await this.options.driver.failPending(error.code, request.peer.void_id);
         await this.reload(generation, true);
         firstError ??= error;
@@ -195,6 +203,7 @@ export class MessagingController {
           const result = await this.client.send(op.id, op.peerVoidId, op.payloadBase64);
           if (!this.current(generation)) { return; }
           await this.options.driver.completeOperation(op.id, result);
+          logMessagingDiagnostic('send_local_commit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: op.id, recipient_void_id: op.peerVoidId}));
           await this.reload(generation, true);
           if (this.current(generation)) { this.publish({error: null}); }
         } catch (value) {
@@ -203,6 +212,8 @@ export class MessagingController {
           this.publish({error: error.message});
           // duplicate_event is uncertain acceptance, never a sent/delivered receipt.
           await this.options.driver.failOperation(op.id, error.code);
+          logMessagingDiagnostic('send_failed', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: op.id,
+            recipient_void_id: op.peerVoidId, code: error.code, diagnostic_code: error.diagnosticCode}));
           await this.reload(generation, true);
         }
       }
@@ -235,8 +246,12 @@ export class MessagingController {
       } else {
         const peer = await this.client.lookup(event.from_void_id);
         if (!this.current(generation)) { return; }
+        logMessagingDiagnostic('event_apply', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: event.event_id,
+          sender_void_id: event.from_void_id, created_at: event.created_at, expires_at: event.expires_at}));
         const ack = await this.options.driver.applyEvent(event, peer);
         if (!this.current(generation)) { return; }
+        logMessagingDiagnostic('event_local_commit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: ack.event_id,
+          sender_void_id: ack.sender_void_id, changed: ack.changed}));
         if (ack.diagnosticCode) { incomingError = safeMessagingError({code: ack.diagnosticCode}); }
         await this.reload(generation, ack.changed);
         // The native result is returned only after history/dedup commits.
@@ -247,6 +262,9 @@ export class MessagingController {
     }).catch(value => {
       if (this.current(generation)) {
         const error = safeMessagingError(value);
+        logMessagingDiagnostic('event_failed', () => ({local_void_id: this.options.identity()?.accountVoidId,
+          event_id: event.type === 'event' ? event.event_id : undefined, sender_void_id: event.from_void_id,
+          code: error.code, diagnostic_code: error.diagnosticCode}));
         this.publish({error: error.diagnosticCode ? `${error.message} Error code: ${error.diagnosticCode}` : error.message});
         // No ACK on failed processing; the server retains the queued event.
         // Reconnect also retries a failed post-commit ACK through native dedup.
@@ -283,6 +301,9 @@ export class MessagingController {
   };
   blockPeer = (id: string) => this.mutate(() => this.options.driver.blockPeer(id));
   sendMessage = (id: string, body: string) => this.mutate(() => this.options.driver.queueMessage(id, body));
-  retryOperation = (id: string) => this.mutate(() => this.options.driver.retryOperation(id));
+  retryOperation = (id: string) => {
+    logMessagingDiagnostic('retry', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: id}));
+    return this.mutate(() => this.options.driver.retryOperation(id));
+  };
   retryMessage = this.retryOperation;
 }

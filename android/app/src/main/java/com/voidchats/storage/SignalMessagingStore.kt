@@ -32,6 +32,12 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
   private fun ownId() = identity().getString("accountVoidId")
   private fun id() = UUID.randomUUID().toString()
   private fun now() = System.currentTimeMillis()
+  private inline fun diagnosticAfterCommit(operation: () -> Unit) {
+    try {
+      // Nested fixture or caller transactions have not durably committed yet.
+      if (!db.inTransaction()) operation()
+    } catch (_: Throwable) { /* Diagnostic reads and logging cannot change processing results. */ }
+  }
   private fun rows(sql: String, vararg args: String): JSONArray = db.rawQuery(sql, args).use { cursor ->
     JSONArray().apply {
       while (cursor.moveToNext()) put(JSONObject().apply {
@@ -233,6 +239,7 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
   } }
 
   fun establishSignalSession(person: JSONObject, encoded: String): JSONObject {
+    var created = false
     signal { storage.transaction {
       val row = ensureThread(person, false); val store = SignalStore(db); val peerId = row.getString("peer_void_id")
       val bundle = JSONObject(MessagingProtocol.bytes(encoded).toString(Charsets.UTF_8))
@@ -254,9 +261,15 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
         signal(VerificationStage.BUNDLE_PROCESS) {
           SessionBuilder(store, store, store, store, address(peerId), address(ownId())).process(prekey)
         }
+        created = true
       }
       db.execSQL("UPDATE signal_threads SET last_error=NULL WHERE conversation_id=?", arrayOf(row.getString("conversation_id")))
     } }
+    diagnosticAfterCommit {
+      val peerId = person.getString("void_id")
+      val record = SignalStore(db).loadSession(address(peerId))
+      SignalDecryptDiagnostics.logSession(ownId(), peerId, created, record.hasSenderChain(), record.sessionVersion)
+    }
     return resumePending()
   }
 
@@ -281,29 +294,47 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     return resumePending()
   }
 
-  private fun flushDraft(row: JSONObject, draft: JSONObject) = signal { storage.transaction {
-    val current = one("SELECT m.* FROM signal_drafts d JOIN messages m ON m.id=d.message_id WHERE d.message_id=? AND m.delivery_state='pending'", draft.getString("id"))
-      ?: return@transaction
-    val peerId = row.getString("peer_void_id"); available(peerId)
-    if (!thread(row.getString("conversation_id")).isNull("last_error")) return@transaction
-    val store = SignalStore(db)
-    if (!store.containsSession(address(peerId))) return@transaction
-    val messageId = current.getString("id")
-    val content = JSONObject().put("v", 2).put("client_message_id", messageId).put("from_void_id", ownId())
-      .put("to_void_id", peerId).put("body", current.getString("body")).put("created_at", current.getLong("created_at")).toString().toByteArray(Charsets.UTF_8)
-    try {
-      val encrypted = signal(VerificationStage.ENCRYPT) {
-        SessionCipher(store, store, store, store, store, address(ownId()), address(peerId)).encrypt(content)
+  private fun flushDraft(row: JSONObject, draft: JSONObject) = signal {
+    var committedEventId: String? = null
+    var committedPayload: String? = null
+    var draftCreatedAt = 0L
+    var encryptedAt = 0L
+    storage.transaction {
+      val current = one("SELECT m.* FROM signal_drafts d JOIN messages m ON m.id=d.message_id WHERE d.message_id=? AND m.delivery_state='pending'", draft.getString("id"))
+        ?: return@transaction
+      val peerId = row.getString("peer_void_id"); available(peerId)
+      if (!thread(row.getString("conversation_id")).isNull("last_error")) return@transaction
+      val store = SignalStore(db)
+      if (!store.containsSession(address(peerId))) return@transaction
+      val messageId = current.getString("id")
+      val content = JSONObject().put("v", 2).put("client_message_id", messageId).put("from_void_id", ownId())
+        .put("to_void_id", peerId).put("body", current.getString("body")).put("created_at", current.getLong("created_at")).toString().toByteArray(Charsets.UTF_8)
+      try {
+        val encrypted = signal(VerificationStage.ENCRYPT) {
+          SessionCipher(store, store, store, store, store, address(ownId()), address(peerId)).encrypt(content)
+        }
+        encryptedAt = now()
+        val payload = ownBinding(store).put("v", 2).put("kind", "signal").put("client_message_id", messageId)
+          .put("from_void_id", ownId()).put("to_void_id", peerId).put("message_type", encrypted.type)
+          .put("ciphertext_base64", MessagingProtocol.base64(encrypted.serialize()))
+        val encoded = MessagingProtocol.base64(payload.toString().toByteArray(Charsets.UTF_8))
+        db.execSQL("INSERT INTO signal_outbox(event_id,peer_void_id,payload_base64,status,created_at) VALUES(?,?,?,'pending',?)",
+          arrayOf(messageId, peerId, encoded, current.getLong("created_at")))
+        db.execSQL("DELETE FROM signal_drafts WHERE message_id=?", arrayOf(messageId))
+        committedEventId = messageId
+        committedPayload = encoded
+        draftCreatedAt = current.getLong("created_at")
+      } finally { content.fill(0) }
+    }
+    diagnosticAfterCommit {
+      val eventId = committedEventId
+      val encoded = committedPayload
+      if (eventId != null && encoded != null) {
+        SignalDecryptDiagnostics.logCommittedEvent(SignalDecryptDiagnostics.CommitStage.ENCRYPT, ownId(), eventId, encoded,
+          draftCreatedAt, encryptedAt)
       }
-      val payload = ownBinding(store).put("v", 2).put("kind", "signal").put("client_message_id", messageId)
-        .put("from_void_id", ownId()).put("to_void_id", peerId).put("message_type", encrypted.type)
-        .put("ciphertext_base64", MessagingProtocol.base64(encrypted.serialize()))
-      val encoded = MessagingProtocol.base64(payload.toString().toByteArray(Charsets.UTF_8))
-      db.execSQL("INSERT INTO signal_outbox(event_id,peer_void_id,payload_base64,status,created_at) VALUES(?,?,?,'pending',?)",
-        arrayOf(messageId, peerId, encoded, current.getLong("created_at")))
-      db.execSQL("DELETE FROM signal_drafts WHERE message_id=?", arrayOf(messageId))
-    } finally { content.fill(0) }
-  } }
+    }
+  }
 
   fun resumePending(): JSONObject {
     identity()
@@ -329,7 +360,7 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     val created = RegistrationProof.timestampMillis(MessagingProtocol.text(event, "created_at", 40))
     require(RegistrationProof.timestampMillis(MessagingProtocol.text(event, "expires_at", 40)) > created)
     // All failure paths roll back and throw; none returns an ACK token.
-    storage.transaction {
+    val result = storage.transaction {
       val old = one("SELECT payload_hash FROM signal_inbox WHERE sender_void_id=? AND event_id=?", sender, eventId)
       if (old != null) {
         if (old.getString("payload_hash") != digest) throw SignalFailure("SIGNAL_EVENT_ID_CONFLICT")
@@ -349,12 +380,14 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
         CiphertextMessage.PREKEY_TYPE -> {
           val message = signal(VerificationStage.PREKEY_PARSE) { PreKeySignalMessage(ciphertext) }
           if (message.identityKey != boundKey || message.registrationId != payload.getInt("registration_id")) throw SignalFailure("SIGNAL_ACCOUNT_BINDING_FAILED")
-          signal(VerificationStage.PREKEY_DECRYPT) { cipher.decrypt(message) }
+          signal(VerificationStage.PREKEY_DECRYPT) {
+            SignalDecryptDiagnostics.capture(SignalDecryptDiagnostics.DecryptStage.PREKEY, eventId, encoded) { cipher.decrypt(message) }
+          }
         }
         CiphertextMessage.WHISPER_TYPE -> {
           val message = signal(VerificationStage.MESSAGE_PARSE) { SignalMessage(ciphertext) }
           signal(VerificationStage.MESSAGE_DECRYPT) {
-            SignalDecryptDiagnostics.capture(eventId, encoded) { cipher.decrypt(message) }
+            SignalDecryptDiagnostics.capture(SignalDecryptDiagnostics.DecryptStage.MESSAGE, eventId, encoded) { cipher.decrypt(message) }
           }
         }
         else -> throw SignalFailure("SIGNAL_UNSUPPORTED_MESSAGE")
@@ -377,6 +410,11 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
       } finally { plaintext.fill(0) }
       JSONObject().put("sender_void_id", sender).put("event_id", eventId).put("changed", true)
     }
+    diagnosticAfterCommit {
+      val stage = if (result.getBoolean("changed")) SignalDecryptDiagnostics.CommitStage.RECEIVE else SignalDecryptDiagnostics.CommitStage.DUPLICATE
+      SignalDecryptDiagnostics.logCommittedEvent(stage, ownId(), eventId, encoded)
+    }
+    result
   }
 
   /** Explicit, read-only diagnostics for this account's saved outgoing events. */
