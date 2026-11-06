@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {AccessibilityInfo, Alert, Animated, Easing, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View} from 'react-native';
+import {Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View} from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import type {Conversation} from '../conversations';
 import {useMessaging} from '../messaging';
@@ -35,54 +35,46 @@ function dayLabel(timestamp: number): string {
 }
 
 const deliveryIndicators = {
-  pending: {label: 'Waiting to send', color: 'textMuted'},
-  sent: {label: 'Sent', color: 'textMuted'},
-  delivered: {label: 'Delivered', color: 'accent'},
-  failed: {label: 'Failed to send', color: 'danger'},
-  unknown: {label: 'Send status unknown', color: 'warning'},
+  pending: {label: 'Waiting to send'},
+  sent: {label: 'Sent'},
+  delivered: {label: 'Delivered'},
+  failed: {label: 'Failed to send'},
+  unknown: {label: 'Send status unknown'},
 } as const;
 
-function DeliveryIndicator({status, label, animateDelivery, onFillComplete}: {status: keyof typeof deliveryIndicators; label: string; animateDelivery: boolean; onFillComplete: () => void}) {
+function DeliveryIndicator({status, label}: {status: keyof typeof deliveryIndicators; label: string}) {
   const {colors} = useTheme();
-  const stroke = colors[deliveryIndicators[status].color];
-  const filled = status === 'delivered';
-  const fill = useRef(new Animated.Value(0)).current;
-  const onComplete = useRef(onFillComplete); onComplete.current = onFillComplete;
-  useEffect(() => {
-    let active = true;
-    fill.setValue(filled && !animateDelivery ? 1 : 0);
-    if (filled && animateDelivery) {
-      AccessibilityInfo.isReduceMotionEnabled().then(reduced => {
-        if (!active) { return; }
-        if (reduced) { fill.setValue(1); onComplete.current(); return; }
-        Animated.timing(fill, {toValue: 1, duration: 450, easing: Easing.out(Easing.cubic), useNativeDriver: true}).start(({finished}) => {
-          if (active && finished) { onComplete.current(); }
-        });
-      }).catch(() => { if (active) { fill.setValue(1); onComplete.current(); } });
-    }
-    return () => { active = false; fill.stopAnimation(); };
-  }, [fill, filled, animateDelivery]);
+  const stroke = colors.accentText;
+  if (status === 'delivered') {
+    return <View accessible accessibilityRole="image" accessibilityLabel={label} style={styles.mailIcon}>
+      <View style={[styles.mailOutline, {borderColor: stroke}]} />
+      <View style={[styles.mailFlapLeft, {backgroundColor: stroke}]} />
+      <View style={[styles.mailFlapRight, {backgroundColor: stroke}]} />
+      <View style={[styles.mailCheckBackground, {backgroundColor: colors.accent}]}>
+        <View style={[styles.mailCheck, {borderColor: stroke}]} />
+      </View>
+    </View>;
+  }
   return (
     <View
       accessible
       accessibilityRole="image"
       accessibilityLabel={label}
       style={[styles.deliveryIcon, {borderColor: stroke}]}>
-      {filled ? <Animated.View style={[styles.deliveryFill, {backgroundColor: stroke, opacity: fill, transform: [{scale: fill}]}]} /> : null}
       {status === 'failed' || status === 'unknown' ? (
         <View style={styles.exclamation}>
           <View style={[styles.exclamationBar, {backgroundColor: stroke}]} />
           <View style={[styles.exclamationDot, {backgroundColor: stroke}]} />
         </View>
       ) : (
-        <View style={[styles.deliveryMark, status === 'pending' ? styles.clockHands : styles.checkmark, {borderColor: filled ? colors.accentText : stroke}]} />
+        <View style={[styles.deliveryMark, status === 'pending' ? styles.clockHands : styles.checkmark, {borderColor: stroke}]} />
       )}
     </View>
   );
 }
 
-function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, uncertain, paused, onRetry, retrying, retryDisabled}: {
-  message: MessageRecord; day: boolean; startsGroup: boolean; endsGroup: boolean; selected: boolean; onSelect: () => void;
+function MessageRow({message, day, startsGroup, endsGroup, uncertain, paused, onRetry, retrying, retryDisabled}: {
+  message: MessageRecord; day: boolean; startsGroup: boolean; endsGroup: boolean;
   uncertain: boolean; paused: boolean;
   onRetry: () => void; retrying: boolean; retryDisabled: boolean;
 }) {
@@ -90,20 +82,7 @@ function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, u
   const outgoing = message.direction === 'outgoing';
   const {deliveryState} = message;
   const delivered = outgoing && typeof message.verifiedDeliveredAt === 'number';
-  const previousDelivery = useRef({id: message.id, delivered});
-  const [animatingDelivery, setAnimatingDelivery] = useState(false);
   const [showPending, setShowPending] = useState(false);
-  const justDelivered = previousDelivery.current.id === message.id && !previousDelivery.current.delivered && delivered;
-  useEffect(() => {
-    if (previousDelivery.current.id !== message.id) {
-      setAnimatingDelivery(false);
-    } else if (!previousDelivery.current.delivered && delivered) {
-      setAnimatingDelivery(true);
-    } else if (!delivered) {
-      setAnimatingDelivery(false);
-    }
-    previousDelivery.current = {id: message.id, delivered};
-  }, [delivered, message.id]);
   useEffect(() => {
     setShowPending(false);
     if (outgoing && deliveryState === 'pending' && !delivered) {
@@ -118,8 +97,7 @@ function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, u
     : failed ? 'failed'
     : deliveryState === 'pending' || deliveryState === 'sent' ? deliveryState
     : null;
-  const visibleStatus = (status === 'pending' && !showPending) ||
-    (status === 'delivered' && !selected && !justDelivered && !animatingDelivery) ? null : status;
+  const visibleStatus = status === 'pending' && !showPending ? null : status;
   const statusLabel = status === 'pending' && paused ? 'Sending paused' : status ? deliveryIndicators[status].label : '';
   const timestamp = new Date(message.createdAt);
   const metadataColor = outgoing ? theme.colors.accentText : theme.colors.textSecondary;
@@ -131,6 +109,15 @@ function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, u
   };
   const reactions = new Map<string, number>();
   for (const reaction of message.reactions) { reactions.set(reaction.emoji, (reactions.get(reaction.emoji) ?? 0) + 1); }
+  function showMessageOptions() {
+    if (uncertain) {
+      Alert.alert('Send status unknown', 'Couldn’t confirm this send. Your message is saved.');
+    } else if (retryDisabled || retrying) {
+      Alert.alert('Resend unavailable', retrying ? 'Resending this message…' : 'Resend is currently unavailable.');
+    } else {
+      Alert.alert('Message options', undefined, [{text: 'Cancel', style: 'cancel'}, {text: 'Resend', onPress: onRetry}]);
+    }
+  }
   // The inverted list reverses direct cell children, so each row needs one root.
   return <View style={{paddingTop: startsGroup ? theme.spacing.md : theme.spacing.xs}}>
     {day ? <View style={[styles.day, {
@@ -140,15 +127,21 @@ function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, u
       <AppText variant="caption" color="textSecondary">{dayLabel(message.createdAt)}</AppText>
     </View> : null}
     <View style={[styles.messageGroup, outgoing ? styles.outgoing : styles.incoming]}>
-      <Pressable disabled={!outgoing} onPress={onSelect} accessibilityRole={outgoing ? 'button' : undefined}
-        accessibilityLabel={outgoing ? `${message.deletedAt !== null ? 'Message deleted' : message.body ?? ''}, ${statusLabel || 'Status unavailable'}` : undefined}
-        accessibilityHint={outgoing ? 'Double tap to toggle message status.' : undefined}
-        accessibilityState={outgoing ? {selected} : undefined}
+      <View style={styles.bubbleRow}>
+      {failed ? <Pressable accessibilityRole="button" accessibilityLabel={uncertain ? 'Send status unknown' : 'Message failed'} accessibilityHint={uncertain ? 'Shows send status information.' : 'Shows how to resend this message.'}
+        onPress={() => uncertain ? showMessageOptions() : Alert.alert('Message failed', 'Hold the message for options.')}
+        onAccessibilityAction={({nativeEvent}) => { if (nativeEvent.actionName === 'longpress') { showMessageOptions(); } }}
+        accessibilityActions={[{name: 'longpress', label: 'Message options'}]}
+        hitSlop={12} style={[styles.failureIndicator, {borderColor: theme.colors.warning, marginRight: theme.spacing.sm}]}>
+        <AppText style={[styles.failureMark, {color: theme.colors.warning}]}>!</AppText>
+      </Pressable> : null}
+      <Pressable onLongPress={failed ? showMessageOptions : undefined} accessibilityActions={failed ? [{name: 'longpress', label: 'Message options'}] : undefined}
+        onAccessibilityAction={failed ? ({nativeEvent}) => { if (nativeEvent.actionName === 'longpress') { showMessageOptions(); } } : undefined}
         style={[styles.bubble, joinedCorners, {
         backgroundColor: outgoing ? theme.colors.accent : theme.colors.surface,
         paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm,
       }]}>
-        <AppText selectable style={[{color: outgoing ? theme.colors.accentText : theme.colors.textPrimary}, message.deletedAt !== null && styles.deletedText]}>
+        <AppText selectable={!failed} style={[{color: outgoing ? theme.colors.accentText : theme.colors.textPrimary}, message.deletedAt !== null && styles.deletedText]}>
           {message.deletedAt !== null ? 'Message deleted' : message.body}
         </AppText>
         {reactions.size ? <AppText variant="caption" style={{marginTop: theme.spacing.sm, color: outgoing ? theme.colors.accentText : theme.colors.textSecondary}}>{Array.from(reactions, ([emoji, count]) => `${emoji} ${count}`).join('  ')}</AppText> : null}
@@ -158,24 +151,11 @@ function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, u
             style={[styles.timestamp, {color: metadataColor}]}>
             {timestamp.toLocaleTimeString(undefined, {hour: 'numeric', minute: '2-digit'})}
           </AppText>
+          {visibleStatus ? <DeliveryIndicator status={visibleStatus} label={statusLabel} /> : null}
         </View>
       </Pressable>
-      {visibleStatus ? <View style={styles.deliveryStatus} accessible accessibilityLabel={statusLabel}>
-        <AppText variant="caption" color="textMuted" style={styles.deliveryLabel}>{statusLabel}</AppText>
-        <DeliveryIndicator status={visibleStatus} label={statusLabel} animateDelivery={justDelivered || animatingDelivery} onFillComplete={() => setAnimatingDelivery(false)} />
-      </View> : outgoing ? <View style={styles.deliveryPlaceholder} /> : null}
-    </View>
-    {failed ? (
-      <View style={styles.retryRow}>
-        {uncertain ? (
-          <AppText variant="caption" color="textMuted">
-            Couldn’t confirm this send. Your message is saved.
-          </AppText>
-        ) : (
-          <Button title="Resend" variant="ghost" size="sm" loading={retrying} disabled={retryDisabled} onPress={onRetry} />
-        )}
       </View>
-    ) : null}
+    </View>
   </View>;
 }
 
@@ -189,7 +169,6 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   const [sendError, setSendError] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
-  const [selectedStatus, setSelectedStatus] = useState<{id: string; delivered: boolean} | null>(null);
   const sendingRef = useRef(false);
   const retryingRef = useRef(false);
   const resumingRef = useRef(false);
@@ -204,20 +183,15 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   const canCompose = registered && conversation.kind === 'direct' && !blocked;
   const readBatch = useRef('');
   const messageLayout = useMemo(() => getMessageLayout(messages.items, messages.hasMore), [messages.items, messages.hasMore]);
-  const selectedMessage = selectedStatus && messages.items.find(message => message.id === selectedStatus.id);
-  const deliveredSinceSelection = Boolean(selectedStatus && !selectedStatus.delivered && typeof selectedMessage?.verifiedDeliveredAt === 'number');
   const name = conversation.name === `VOID-${conversation.voidId}` ? conversation.voidId : conversation.name;
   const active = () => mounted.current && currentScope.current === scope;
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     readBatch.current = '';
-    setDraft(''); setSendError(null); setSending(false); setRetryingId(null); setResuming(false); setSelectedStatus(null);
+    setDraft(''); setSendError(null); setSending(false); setRetryingId(null); setResuming(false);
     sendingRef.current = false; retryingRef.current = false; resumingRef.current = false;
   }, [scope]);
-  useEffect(() => {
-    if (deliveredSinceSelection) { setSelectedStatus(null); }
-  }, [deliveredSinceSelection]);
 
   async function send() {
     if (!draft.trim() || !canCompose || sendingRef.current) { return; }
@@ -295,8 +269,6 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
             day={layout?.showDateSeparator ?? false}
             startsGroup={layout?.startsGroup ?? true}
             endsGroup={newer ? messageLayout.get(newer.id)?.startsGroup ?? true : true}
-            selected={selectedStatus?.id === item.id && !deliveredSinceSelection}
-            onSelect={() => setSelectedStatus(current => current?.id === item.id ? null : {id: item.id, delivered: typeof item.verifiedDeliveredAt === 'number'})}
             uncertain={messaging.outbox.some(operation => operation.id === item.id && ['duplicate_event', 'send_unknown'].includes(operation.errorCode ?? ''))}
             paused={paused}
             onRetry={() => { retry(item.id).catch(() => {}); }} retrying={retryingId === item.id} retryDisabled={!canCompose || paused || retryingId !== null} />;
@@ -314,6 +286,9 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
         </View> : undefined}
       />
       <View style={{paddingHorizontal: theme.spacing.md, paddingTop: theme.spacing.sm, paddingBottom: theme.spacing.md}}>
+        {!blocked && registered && conversation.kind === 'direct' && messaging.status === 'offline' ? <View pointerEvents="none" style={[styles.offlineNotice, {left: theme.spacing.lg, right: theme.spacing.lg, bottom: '100%', backgroundColor: theme.colors.surfaceElevated, borderRadius: theme.radii.md, padding: theme.spacing.sm}]}>
+          <AppText variant="caption" color="textSecondary" accessibilityLiveRegion="polite" style={styles.centeredText}>You’re offline. Failed messages stay saved until you tap Resend.</AppText>
+        </View> : null}
         {sendError ? <AppText color="danger" variant="caption" accessibilityLiveRegion="polite" style={{marginBottom: theme.spacing.sm}}>{sendError}</AppText> : null}
         {diagnostic && paused && !blocked && registered ? <View style={[styles.paused, {paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm, marginBottom: theme.spacing.sm, backgroundColor: theme.colors.surface, borderRadius: theme.radii.md}]}>
           <View style={styles.flex}>
@@ -323,8 +298,8 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
           </View>
           {messaging.status !== 'offline' ? <Button title="Reconnect" variant="ghost" size="sm" loading={resuming} onPress={() => { resume().catch(() => {}); }} style={{marginLeft: theme.spacing.sm}} /> : null}
         </View> : null}
-        {blocked || !registered || conversation.kind !== 'direct' || messaging.status === 'offline' ? <AppText variant="caption" color="textMuted" accessibilityLiveRegion="polite" style={[styles.centeredText, {marginBottom: theme.spacing.sm}]}>
-          {blocked ? 'You blocked this person.' : !registered ? 'Create an account to send messages.' : conversation.kind !== 'direct' ? 'Group messaging is not available yet.' : 'You’re offline. Failed messages stay saved until you tap Resend.'}
+        {blocked || !registered || conversation.kind !== 'direct' ? <AppText variant="caption" color="textMuted" accessibilityLiveRegion="polite" style={[styles.centeredText, {marginBottom: theme.spacing.sm}]}>
+          {blocked ? 'You blocked this person.' : !registered ? 'Create an account to send messages.' : 'Group messaging is not available yet.'}
         </AppText> : null}
         <View style={styles.composerRow}>
           <TextInput accessibilityLabel="Message" placeholder={blocked ? 'Person blocked' : 'Message'} value={draft} onChangeText={setDraft}
@@ -342,23 +317,28 @@ const styles = StyleSheet.create({
   messages: {flexGrow: 1}, empty: {flex: 1, justifyContent: 'center', alignItems: 'center', minHeight: 160},
   day: {alignSelf: 'center'},
   messageGroup: {maxWidth: '86%'},
-  bubble: {maxWidth: '100%'},
+  bubbleRow: {flexDirection: 'row', alignItems: 'center', maxWidth: '100%'},
+  bubble: {flexShrink: 1, maxWidth: '100%'},
   outgoing: {alignSelf: 'flex-end', alignItems: 'flex-end'},
   incoming: {alignSelf: 'flex-start', alignItems: 'flex-start'},
   metadata: {alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end'},
-  deliveryStatus: {flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2},
-  deliveryLabel: {fontSize: 11, lineHeight: 16},
-  deliveryIcon: {width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center'},
-  deliveryFill: {position: 'absolute', width: 13, height: 13, borderRadius: 7},
-  deliveryPlaceholder: {width: 16, height: 16, marginTop: 2},
+  deliveryIcon: {width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center', transform: [{scale: 0.72}]},
+  mailIcon: {width: 19, height: 16, transform: [{scale: 0.72}]},
+  mailOutline: {position: 'absolute', left: 0, top: 2, width: 15, height: 11, borderWidth: 1.5, borderRadius: 2},
+  mailFlapLeft: {position: 'absolute', left: 1, top: 5, width: 8, height: 1.5, transform: [{rotate: '33deg'}]},
+  mailFlapRight: {position: 'absolute', left: 6, top: 5, width: 8, height: 1.5, transform: [{rotate: '-33deg'}]},
+  mailCheckBackground: {position: 'absolute', right: 0, bottom: 0, width: 10, height: 9, alignItems: 'center', justifyContent: 'center'},
+  mailCheck: {width: 7, height: 4, borderLeftWidth: 1.5, borderBottomWidth: 1.5, transform: [{rotate: '-45deg'}]},
   deliveryMark: {borderLeftWidth: 1.5, borderBottomWidth: 1.5},
   clockHands: {width: 4, height: 4, transform: [{translateX: 1}, {translateY: -1}]},
   checkmark: {width: 7, height: 4, transform: [{rotate: '-45deg'}]},
   exclamation: {alignItems: 'center', gap: 1.5},
   exclamationBar: {width: 1.5, height: 4, borderRadius: 1},
   exclamationDot: {width: 1.5, height: 1.5, borderRadius: 1},
-  retryRow: {alignSelf: 'flex-end', maxWidth: '86%', marginBottom: 8},
+  failureIndicator: {width: 20, height: 20, borderRadius: 10, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center'},
+  failureMark: {fontSize: 13, lineHeight: 17, fontWeight: '700'},
   composerRow: {flexDirection: 'row', alignItems: 'flex-end'},
+  offlineNotice: {position: 'absolute', zIndex: 1},
   paused: {flexDirection: 'row', alignItems: 'center'},
   timestamp: {fontVariant: ['tabular-nums'], textAlign: 'right'}, deletedText: {opacity: 0.6}, name: {fontWeight: '600'},
   centeredText: {textAlign: 'center'}, centeredSelf: {alignSelf: 'center'}, input: {maxHeight: 140, minHeight: 46, borderRadius: 24},

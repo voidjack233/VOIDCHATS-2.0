@@ -61,9 +61,11 @@ export function BottomTabBar({
       style={[
         styles.container,
         {
-          backgroundColor: colors.surface,
+          backgroundColor: colors.background,
           borderTopColor: colors.border,
-          padding: spacing.xs,
+          paddingHorizontal: spacing.md,
+          paddingVertical: spacing.sm,
+          gap: spacing.sm,
         },
       ]}>
       {tabs.map(tab => {
@@ -83,18 +85,15 @@ export function BottomTabBar({
             accessibilityState={{selected: isSelected}}
             onPress={() => onSelect(tab.key)}
             style={({pressed}) => [styles.tab, {
-              backgroundColor: pressed ? colors.surfaceElevated : 'transparent',
-              borderRadius: radii.md,
+              backgroundColor: pressed ? colors.surfaceElevated : isSelected ? colors.surface : 'transparent',
+              borderRadius: radii.lg,
               gap: spacing.xs,
               padding: spacing.xs,
             }]}>
             <View
               accessibilityElementsHidden
               importantForAccessibility="no-hide-descendants"
-              style={[styles.iconPill, {
-                backgroundColor: isSelected ? colors.surfaceElevated : 'transparent',
-                borderRadius: radii.full,
-              }]}>
+              style={styles.iconPill}>
               <TabIcon tab={tab.key} color={color} />
             </View>
             <View style={[styles.labelRow, {gap: spacing.xs}]}>
@@ -136,10 +135,11 @@ const styles = StyleSheet.create({
   tab: {
     flex: 1,
     minWidth: 0,
-    minHeight: 56,
+    minHeight: 60,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  iconPill: {width: 56, maxWidth: '100%', height: 30, alignItems: 'center', justifyContent: 'center'},
+  iconPill: {width: 32, height: 26, alignItems: 'center', justifyContent: 'center'},
   labelRow: {alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', width: '100%'},
   label: {
     flexShrink: 1,
