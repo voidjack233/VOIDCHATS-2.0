@@ -53,7 +53,7 @@ export function BottomTabBar({
   chatCount,
   requestCount,
 }: BottomTabBarProps): React.JSX.Element {
-  const theme = useTheme();
+  const {colors, radii, spacing} = useTheme();
 
   return (
     <View
@@ -61,35 +61,64 @@ export function BottomTabBar({
       style={[
         styles.container,
         {
-          backgroundColor: theme.colors.background,
-          borderTopColor: theme.colors.border,
+          backgroundColor: colors.surface,
+          borderTopColor: colors.border,
+          padding: spacing.xs,
         },
       ]}>
       {tabs.map(tab => {
         const isSelected = selected === tab.key;
         const count = tab.key === 'conversations' ? chatCount : tab.key === 'requests' ? requestCount : 0;
-        const color = isSelected
-          ? theme.colors.accent
-          : theme.colors.textMuted;
+        const color = isSelected ? colors.accent : colors.textSecondary;
+        const countLabel = tab.key === 'conversations' ? 'unread message' : 'request';
+        const accessibilityLabel = count > 0
+          ? `${tab.label}, ${count} ${countLabel}${count === 1 ? '' : 's'}`
+          : tab.label;
 
         return (
           <Pressable
             key={tab.key}
             accessibilityRole="tab"
-            accessibilityLabel={count ? `${tab.label}, ${count} ${tab.key === 'conversations' ? 'unread messages' : 'requests'}` : tab.label}
+            accessibilityLabel={accessibilityLabel}
             accessibilityState={{selected: isSelected}}
             onPress={() => onSelect(tab.key)}
-            style={styles.tab}>
-            <View>
+            style={({pressed}) => [styles.tab, {
+              backgroundColor: pressed ? colors.surfaceElevated : 'transparent',
+              borderRadius: radii.md,
+              gap: spacing.xs,
+              padding: spacing.xs,
+            }]}>
+            <View
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+              style={[styles.iconPill, {
+                backgroundColor: isSelected ? colors.surfaceElevated : 'transparent',
+                borderRadius: radii.full,
+              }]}>
               <TabIcon tab={tab.key} color={color} />
-              {count > 0 ? <View style={[styles.badge, {backgroundColor: theme.colors.accent}]}><AppText color="accentText" style={styles.badgeText}>{count > 99 ? '99+' : count}</AppText></View> : null}
             </View>
-            <AppText
-              variant="caption"
-              color={isSelected ? 'accent' : 'textMuted'}
-              style={styles.label}>
-              {tab.label}
-            </AppText>
+            <View style={[styles.labelRow, {gap: spacing.xs}]}>
+              <AppText
+                variant="caption"
+                color={isSelected ? 'accent' : 'textSecondary'}
+                style={[styles.label, isSelected && styles.selectedLabel]}>
+                {tab.label}
+              </AppText>
+              {count > 0 ? (
+                <View
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                  style={[styles.badge, {
+                    backgroundColor: colors.accent,
+                    borderRadius: radii.full,
+                    paddingHorizontal: spacing.xs,
+                  }]}>
+                  <AppText variant="caption" color="accentText" style={styles.badgeText}>
+                    {count > 99 ? '99+' : count}
+                  </AppText>
+                </View>
+              ) : null}
+            </View>
           </Pressable>
         );
       })}
@@ -98,34 +127,35 @@ export function BottomTabBar({
 }
 
 const styles = StyleSheet.create({
-  badge: {position: 'absolute', top: -5, left: 16, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center'},
-  badgeText: {fontSize: 10, lineHeight: 13, fontWeight: '700'},
+  badge: {minWidth: 20, minHeight: 20, maxWidth: '100%', alignItems: 'center', justifyContent: 'center'},
+  badgeText: {fontWeight: '700', fontVariant: ['tabular-nums'], textAlign: 'center'},
   container: {
     flexDirection: 'row',
     borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 9,
-    paddingBottom: 4,
   },
   tab: {
     flex: 1,
-    minHeight: 49,
+    minWidth: 0,
+    minHeight: 56,
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
   },
+  iconPill: {width: 56, maxWidth: '100%', height: 30, alignItems: 'center', justifyContent: 'center'},
+  labelRow: {alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', width: '100%'},
   label: {
-    fontSize: 11,
+    flexShrink: 1,
+    textAlign: 'center',
   },
+  selectedLabel: {fontWeight: '600'},
   iconFrame: {
     width: 24,
-    height: 23,
+    height: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },
   chatOutline: {
     width: 20,
     height: 16,
-    borderWidth: 1.7,
+    borderWidth: 2,
     borderRadius: 5,
     marginBottom: 3,
   },
@@ -135,14 +165,14 @@ const styles = StyleSheet.create({
     height: 5,
     left: 4,
     bottom: 1,
-    borderLeftWidth: 1.7,
-    borderBottomWidth: 1.7,
+    borderLeftWidth: 2,
+    borderBottomWidth: 2,
     transform: [{skewY: '-30deg'}],
   },
   requestOutline: {
     width: 20,
     height: 17,
-    borderWidth: 1.7,
+    borderWidth: 2,
     borderRadius: 4,
     marginTop: 2,
   },
@@ -151,7 +181,7 @@ const styles = StyleSheet.create({
     top: 8,
     left: 6,
     width: 8,
-    height: 1.7,
+    height: 2,
     borderRadius: 1,
   },
   requestDot: {
@@ -168,7 +198,7 @@ const styles = StyleSheet.create({
     height: 8,
     left: 4,
     top: 3,
-    borderWidth: 1.6,
+    borderWidth: 2,
     borderRadius: 5,
   },
   contactShoulders: {
@@ -177,7 +207,7 @@ const styles = StyleSheet.create({
     height: 8,
     left: 1,
     bottom: 2,
-    borderWidth: 1.6,
+    borderWidth: 2,
     borderBottomWidth: 0,
     borderTopLeftRadius: 8,
     borderTopRightRadius: 8,
@@ -188,7 +218,7 @@ const styles = StyleSheet.create({
     height: 7,
     right: 3,
     top: 5,
-    borderWidth: 1.6,
+    borderWidth: 2,
     borderRadius: 5,
   },
 });

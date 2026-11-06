@@ -9,44 +9,51 @@ interface ConversationRowProps {
   onPress: () => void;
 }
 
-export function ConversationRow({ conversation, onPress }: ConversationRowProps) {
-  const theme = useTheme();
+export function ConversationRow({conversation, onPress}: ConversationRowProps) {
+  const {colors, radii, spacing} = useTheme();
+  const {name, preview, updatedAtLabel, unreadCount} = conversation;
+  const unread = unreadCount > 0;
 
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open ${conversation.name}`}
+      accessibilityLabel={`Open ${name}`}
+      accessibilityValue={unread ? {text: `${unreadCount} unread ${unreadCount === 1 ? 'message' : 'messages'}`} : undefined}
       onPress={onPress}
-      style={({ pressed }) => [styles.row, {
-        paddingVertical: theme.spacing.lg,
-        opacity: pressed ? 0.7 : 1,
-      }]}
-    >
-      <Avatar name={conversation.name} size={48} />
-      <View style={[styles.content, { marginLeft: theme.spacing.md }]}>
-        <View style={styles.headingRow}>
-          <AppText variant="body" numberOfLines={1} style={styles.headingText}>
-            {conversation.name}
+      style={({pressed}) => [styles.row, {
+        paddingVertical: spacing.md,
+        paddingHorizontal: spacing.md,
+        marginHorizontal: -spacing.md,
+        borderRadius: radii.md,
+        backgroundColor: pressed ? colors.surface : 'transparent',
+      }]}>
+      <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+        <Avatar name={name} size={44} />
+      </View>
+      <View style={[styles.content, {marginLeft: spacing.md}]}>
+        <View style={styles.copy}>
+          <AppText numberOfLines={2} style={unread ? styles.unreadName : styles.name}>
+            {name}
           </AppText>
-          <AppText variant="caption" color="textMuted" style={{ marginLeft: theme.spacing.sm }}>
-            {conversation.updatedAtLabel}
-          </AppText>
+          {preview ? (
+            <AppText variant="caption" color={unread ? 'textPrimary' : 'textSecondary'} numberOfLines={2}
+              style={{marginTop: spacing.xs}}>
+              {preview}
+            </AppText>
+          ) : null}
         </View>
-        <View style={[styles.previewRow, { marginTop: theme.spacing.xs }]}>
-          <AppText variant="body" color="textSecondary" numberOfLines={1} style={styles.previewText}>
-            {conversation.preview}
-          </AppText>
-          {conversation.unreadCount > 0 ? (
-            <View
-              style={[styles.badge, {
-                borderRadius: theme.radii.full,
-                backgroundColor: theme.colors.accent,
-                paddingHorizontal: theme.spacing.xs,
-                marginLeft: theme.spacing.sm,
-              }]}
-            >
-              <AppText variant="caption" color="accentText" style={styles.badgeText}>
-                {conversation.unreadCount}
+        <View style={[styles.meta, {marginLeft: spacing.sm}]}>
+          <AppText variant="caption" color="textSecondary" style={styles.timestamp}>{updatedAtLabel}</AppText>
+          {unread ? (
+            <View style={[styles.badge, {
+              borderRadius: radii.full,
+              backgroundColor: colors.accent,
+              paddingHorizontal: spacing.sm,
+              paddingVertical: spacing.xs,
+              marginTop: spacing.xs,
+            }]}>
+              <AppText variant="caption" color="accentText" numberOfLines={1} style={styles.badgeText}>
+                {unreadCount > 99 ? '99+' : unreadCount}
               </AppText>
             </View>
           ) : null}
@@ -57,12 +64,13 @@ export function ConversationRow({ conversation, onPress }: ConversationRowProps)
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center' },
-  content: { flex: 1 },
-  headingRow: { flexDirection: 'row', alignItems: 'baseline' },
-  headingText: { flex: 1, fontWeight: '600' },
-  previewRow: { flexDirection: 'row', alignItems: 'center' },
-  previewText: { flex: 1 },
-  badge: { minWidth: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
-  badgeText: { fontWeight: '700' },
+  row: {flexDirection: 'row', alignItems: 'center', minHeight: 64},
+  content: {flex: 1, flexDirection: 'row', alignItems: 'flex-start', minWidth: 0},
+  copy: {flex: 1, minWidth: 0},
+  name: {fontWeight: '600'},
+  unreadName: {fontWeight: '700'},
+  meta: {alignItems: 'flex-end', maxWidth: '42%'},
+  timestamp: {textAlign: 'right'},
+  badge: {minWidth: 24, minHeight: 24, alignItems: 'center', justifyContent: 'center'},
+  badgeText: {fontWeight: '700', fontVariant: ['tabular-nums']},
 });

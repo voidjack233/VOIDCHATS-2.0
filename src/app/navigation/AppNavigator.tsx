@@ -30,8 +30,13 @@ function MainTabHeader({title, onOpenSettings}: {title: string; onOpenSettings: 
   const {colors, spacing} = useTheme();
   const line = [styles.menuLine, {backgroundColor: colors.textPrimary}];
   return (
-    <View style={[styles.header, {paddingHorizontal: spacing.xl, paddingVertical: spacing.md}]}>
-      <AppText variant="title" accessibilityRole="header" style={styles.headerTitle}>{title}</AppText>
+    <View style={[styles.header, {
+      borderBottomColor: colors.border,
+      gap: spacing.sm,
+      paddingHorizontal: spacing.xl,
+      paddingVertical: spacing.md,
+    }]}>
+      <AppText variant="display" accessibilityRole="header" style={styles.headerTitle}>{title}</AppText>
       <IconButton
         accessibilityLabel="Open settings"
         onPress={onOpenSettings}
@@ -165,7 +170,7 @@ function MessengerNavigator(): React.JSX.Element {
 
 const styles = StyleSheet.create({
   container: {flex: 1},
-  header: {flexDirection: 'row', alignItems: 'center'},
+  header: {flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth},
   headerTitle: {flex: 1},
   menuIcon: {gap: 4},
   menuLine: {width: 20, height: 2, borderRadius: 1},

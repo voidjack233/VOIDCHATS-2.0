@@ -47,7 +47,8 @@ function useRecords<T>(load: () => Promise<T[]>, collection: string) {
     return () => { current = false; };
   }, [load, collection, localDeviceId, storage.status, storage.revision, refreshVersion]);
   const refresh = useCallback(() => setRefreshVersion(value => value + 1), []);
-  return {items: storage.status === 'ready' && isCurrentScope(data.scope, localDeviceId, collection) ? data.items : [], loading: storage.status === 'ready' && loading, error, refresh};
+  const hasLoaded = storage.status === 'ready' && isCurrentScope(data.scope, localDeviceId, collection);
+  return {items: hasLoaded ? data.items : [], hasLoaded, loading: storage.status === 'ready' && loading, error, refresh};
 }
 
 const conversationCursorKey = (cursor: ConversationCursor) => cursor.updatedAt + ':' + cursor.id;
@@ -154,7 +155,7 @@ function usePagedRecords<T extends {id: string}, Cursor>(
     }
   }, [load, storage.status, localDeviceId, collection, data, limit]);
   const refresh = useCallback(() => setRefreshVersion(value => value + 1), []);
-  const visible = storage.status === 'ready' && isCurrentScope(data.scope, localDeviceId, collection);
-  return {items: visible ? data.items : [], loading: storage.status === 'ready' && loading,
-    error, loadMore, hasMore: visible && data.nextCursor !== null, refresh};
+  const hasLoaded = storage.status === 'ready' && isCurrentScope(data.scope, localDeviceId, collection);
+  return {items: hasLoaded ? data.items : [], hasLoaded, loading: storage.status === 'ready' && loading,
+    error, loadMore, hasMore: hasLoaded && data.nextCursor !== null, refresh};
 }

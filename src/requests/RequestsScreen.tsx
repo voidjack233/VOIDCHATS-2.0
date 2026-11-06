@@ -23,9 +23,11 @@ export function RequestsScreen({onOpenConversation}: RequestsScreenProps) {
 
   return <Screen>
     <FlatList
+      accessibilityState={{busy: storage.status === 'ready' && Boolean(storage.identity?.localDeviceId) &&
+        !conversations.hasLoaded && !conversations.error}}
       data={items}
       keyExtractor={item => item.id}
-      refreshing={conversations.loading && storage.status === 'ready'}
+      refreshing={conversations.hasLoaded && conversations.loading}
       onRefresh={() => { conversations.refresh(); messaging.refresh().catch(() => {}); }}
       contentContainerStyle={{paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.xxl}}
       ItemSeparatorComponent={Divider}
@@ -42,8 +44,8 @@ export function RequestsScreen({onOpenConversation}: RequestsScreenProps) {
         if (item.peerVoidId && item.title === `VOID-${item.peerVoidId}`) { conversation.name = item.peerVoidId; }
         return <ConversationRow conversation={conversation} onPress={() => onOpenConversation(conversation)} />;
       }}
-      ListEmptyComponent={storage.status === 'ready' && !conversations.error ? <View style={{paddingVertical: theme.spacing.xxxl}}>
-        <AppText variant="heading">{conversations.loading ? 'Loading requests…' : 'No requests'}</AppText>
+      ListEmptyComponent={conversations.hasLoaded && !conversations.error && !conversations.hasMore ? <View style={{paddingVertical: theme.spacing.xxxl}}>
+        <AppText variant="heading">No requests</AppText>
         <AppText color="textSecondary" style={{marginTop: theme.spacing.sm}}>First messages from new people will appear here. Open one to read or reply.</AppText>
       </View> : undefined}
       ListFooterComponent={conversations.hasMore ? <Button title="Load more" variant="ghost" loading={conversations.loading} onPress={() => { conversations.loadMore(); }} style={{marginTop: theme.spacing.lg}} /> : undefined}

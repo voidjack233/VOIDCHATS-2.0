@@ -25,6 +25,8 @@ export function ContactsScreen({onOpenConversation}: ContactsScreenProps) {
 
   return <Screen>
     <FlatList
+      accessibilityState={{busy: storage.status === 'ready' && Boolean(storage.identity?.localDeviceId) &&
+        !conversations.hasLoaded && !conversations.error}}
       data={items}
       keyExtractor={item => item.id}
       contentContainerStyle={{paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.xxxl}}
@@ -49,7 +51,11 @@ export function ContactsScreen({onOpenConversation}: ContactsScreenProps) {
           {!blocked ? <AppText color="textMuted">›</AppText> : null}
         </Pressable>;
       }}
-      ListEmptyComponent={storage.status === 'ready' && !conversations.error ? <AppText color="textMuted" style={{paddingVertical: theme.spacing.lg}}>{conversations.loading ? 'Loading contacts…' : 'People you message will appear here.'}</AppText> : undefined}
+      ListEmptyComponent={conversations.hasLoaded && !conversations.error ? (
+        <AppText color="textMuted" style={{paddingVertical: theme.spacing.lg}}>
+          People you message will appear here.
+        </AppText>
+      ) : undefined}
     />
   </Screen>;
 }

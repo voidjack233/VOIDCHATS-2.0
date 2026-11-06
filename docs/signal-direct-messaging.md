@@ -114,8 +114,24 @@ Only successful commit returns the ACK token. Same-ID/same-payload redelivery
 returns its committed ACK; conflicting payloads and all failed/ambiguous events
 return no ACK and do not overwrite history.
 
-Only backend `accepted` changes outgoing UI state to **Sent to server**.
-Recipient delivery receipts remain deferred.
+The clock marks a locally pending send. The outlined check marks **Sent** after
+the relay's matching `accepted` response is committed. A failed send shows a
+danger-colored exclamation, with a separate warning for uncertain acceptance.
+
+Sender-visible delivery and read receipts remain deferred. The recipient's
+queue ACK clears the relay's queued event after durable processing. Its
+`ack_ok` confirms queue handling to the recipient. The sender's **Sent**
+indicator records relay acceptance.
+
+A future delivery receipt can use the existing opaque `send` relay. The
+recipient would durably enqueue a separate Signal-encrypted control event
+referencing the original event ID after committing the incoming message. The
+sender would verify the receipt's authenticated peer against the original
+outgoing message, then record delivery idempotently before ACKing the receipt's
+own queue event. The receipt would be stored as delivery metadata, and only
+user messages would generate delivery receipts. Clients would need to establish
+receipt support before emitting this payload, since existing clients expect a
+chat message body.
 
 An explicit Send saves locally and starts the upload attempt immediately.
 Existing ciphertext is sent before unrelated public-key publication or session
