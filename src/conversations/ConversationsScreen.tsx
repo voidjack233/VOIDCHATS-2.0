@@ -9,11 +9,11 @@ import {ConversationRow} from './ConversationRow';
 import {conversationFromRecord, type Conversation} from './types';
 
 export interface ConversationsScreenProps {
-  onOpenRequests: () => void; onOpenContacts: () => void;
+  onOpenRequests: () => void; onNewMessage: () => void;
   onOpenConversation: (conversation: Conversation) => void;
 }
 
-export function ConversationsScreen({onOpenRequests, onOpenContacts, onOpenConversation}: ConversationsScreenProps) {
+export function ConversationsScreen({onOpenRequests, onNewMessage, onOpenConversation}: ConversationsScreenProps) {
   const theme = useTheme();
   const storage = useStorage();
   const messaging = useMessaging();
@@ -30,25 +30,18 @@ export function ConversationsScreen({onOpenRequests, onOpenContacts, onOpenConve
     <FlatList
       data={items}
       keyExtractor={item => item.id}
-      refreshing={conversations.loading && storage.status === 'ready'}
-      onRefresh={() => { conversations.refresh(); if (registered) { messaging.refresh().catch(() => {}); } }}
-      contentContainerStyle={{paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.xxl}}
+      contentContainerStyle={{paddingHorizontal: theme.spacing.xl, paddingBottom: 96}}
       ItemSeparatorComponent={Divider}
       ListHeaderComponent={<>
-        <View style={[styles.heading, {paddingTop: theme.spacing.xl, paddingBottom: theme.spacing.lg}]}>
-          <AppText variant="title" style={styles.flex}>Messages</AppText>
-          <Button title="New message" variant="ghost" size="sm" onPress={onOpenContacts} />
-        </View>
         <StorageStatus />
-        <Pressable accessibilityRole="button" accessibilityLabel={`Requests${requestCount ? `, ${requestCount} chats` : ''}`} onPress={onOpenRequests}
+        {requestCount > 0 ? <Pressable accessibilityRole="button" accessibilityLabel={`Requests, ${requestCount} chats`} onPress={onOpenRequests}
           style={({pressed}) => [styles.requests, {paddingVertical: theme.spacing.lg, marginBottom: theme.spacing.md, borderBottomColor: theme.colors.border, opacity: pressed ? 0.65 : 1}]}>
           <AppText variant="label" color="textSecondary" style={styles.flex}>Requests</AppText>
           {requestCount > 0 ? <View style={[styles.badge, {backgroundColor: theme.colors.accent, marginRight: theme.spacing.sm}]}><AppText variant="caption" color="accentText">{requestCount}</AppText></View> : null}
           <AppText color="textMuted">›</AppText>
-        </Pressable>
+        </Pressable> : null}
         {registered && (messaging.error || connecting || messaging.status === 'offline') ? <View style={{paddingBottom: theme.spacing.lg}}>
           <AppText variant="caption" color={messaging.error ? 'warning' : 'textMuted'} accessibilityLiveRegion="polite">{messaging.error ?? (connecting ? 'Connecting…' : 'You’re offline.')}</AppText>
-          {!connecting ? <Button title="Retry connection" variant="ghost" size="sm" onPress={() => { messaging.reconnect().catch(() => {}); }} style={{marginTop: theme.spacing.xs}} /> : null}
         </View> : null}
         {conversations.error ? <View style={{paddingVertical: theme.spacing.lg}}><AppText color="danger">Could not load messages.</AppText><Button title="Try again" variant="ghost" onPress={conversations.refresh} /></View> : null}
       </>}
@@ -60,11 +53,14 @@ export function ConversationsScreen({onOpenRequests, onOpenContacts, onOpenConve
       }}
       ListEmptyComponent={storage.status === 'ready' && !conversations.error ? <View style={{paddingVertical: theme.spacing.xxxl}}>
         <AppText variant="heading">{conversations.loading ? 'Loading messages…' : 'Your messages, right here'}</AppText>
-        <AppText color="textSecondary" style={{marginTop: theme.spacing.sm}}>Start with someone’s VOID-ID.</AppText>
-        <Button title="New message" onPress={onOpenContacts} style={{marginTop: theme.spacing.xl}} />
+        <AppText color="textSecondary" style={{marginTop: theme.spacing.sm}}>Start a conversation with someone’s VOID-ID.</AppText>
       </View> : undefined}
       ListFooterComponent={conversations.hasMore ? <Button title="Load more" variant="ghost" loading={conversations.loading} onPress={() => { conversations.loadMore(); }} style={{marginTop: theme.spacing.lg}} /> : undefined}
     />
+    <Pressable accessibilityRole="button" accessibilityLabel="New message" onPress={onNewMessage}
+      style={({pressed}) => [styles.compose, {backgroundColor: theme.colors.accent, opacity: pressed ? 0.7 : 1}]}>
+      <AppText color="accentText" style={styles.plus}>+</AppText>
+    </Pressable>
   </Screen>;
 }
-const styles = StyleSheet.create({heading: {flexDirection: 'row', alignItems: 'center'}, flex: {flex: 1}, requests: {flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth}, badge: {borderRadius: 12, minWidth: 22, paddingHorizontal: 6, alignItems: 'center'}});
+const styles = StyleSheet.create({flex: {flex: 1}, requests: {flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth}, badge: {borderRadius: 12, minWidth: 22, paddingHorizontal: 6, alignItems: 'center'}, compose: {position: 'absolute', right: 24, bottom: 24, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', elevation: 4}, plus: {fontSize: 32, lineHeight: 38}});

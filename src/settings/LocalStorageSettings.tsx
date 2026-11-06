@@ -2,7 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {Alert, StyleSheet, View} from 'react-native';
 import {useStorage} from '../storage';
 import {useTheme} from '../theme';
-import {AppText, Button, Surface} from '../ui';
+import {AppText, Button, Divider} from '../ui';
 
 export function LocalStorageSettings() {
   const theme = useTheme();
@@ -41,20 +41,24 @@ export function LocalStorageSettings() {
     );
   }
 
-  const title = storage.status === 'ready' ? 'Local storage open'
-    : storage.status === 'opening' ? 'Opening local storage'
-    : storage.status === 'not_initialized' ? 'Local storage not set up'
-    : storage.status === 'locked' ? 'Local storage closed' : 'Local storage unavailable';
+  const status = storage.status === 'ready' ? 'Open'
+    : storage.status === 'opening' ? 'Opening…'
+    : storage.status === 'not_initialized' ? 'Not set up'
+    : storage.status === 'locked' ? 'Closed' : 'Unavailable';
 
   return (
     <View style={{marginTop: theme.spacing.xxl}}>
       <AppText variant="caption" color="textMuted" style={[styles.label, {marginBottom: theme.spacing.sm}]}>LOCAL STORAGE</AppText>
-      <Surface bordered padded>
-        <AppText variant="heading">{title}</AppText>
+      <Divider />
+      <View style={{paddingVertical: theme.spacing.lg}}>
+        <View style={styles.statusRow}>
+          <AppText variant="body" style={styles.flex}>Storage status</AppText>
+          <AppText color="textSecondary">{status}</AppText>
+        </View>
         <AppText variant="body" color="textSecondary" style={{marginTop: theme.spacing.sm}}>
           {storage.message ?? (storage.status === 'ready'
-            ? 'Conversations, messages, contacts, and requests are stored encrypted on this device.'
-            : 'Existing local identities are restored when storage opens.')}
+            ? 'Your messages and contacts are encrypted on this device.'
+            : 'Your local data is stored on this device.')}
         </AppText>
         {storage.identity && !storage.identity.accountVoidId ? (
           <AppText variant="caption" color="warning" style={{marginTop: theme.spacing.sm}}>This local identity is not a registered VOID account.</AppText>
@@ -67,17 +71,18 @@ export function LocalStorageSettings() {
           </>
         ) : null}
         {storage.status === 'locked' || storage.status === 'error' ? (
-          <Button title="Open existing storage" variant="secondary" loading={busy} onPress={() => { update(storage.openExisting); }} style={{marginTop: theme.spacing.lg}} />
+          <Button title="Open existing storage" variant="secondary" fullWidth loading={busy} onPress={() => { update(storage.openExisting); }} style={{marginTop: theme.spacing.lg}} />
         ) : null}
         {storage.status === 'ready' ? (
-          <Button title="Close local storage" variant="secondary" loading={busy} onPress={() => { update(storage.closeStore); }} style={{marginTop: theme.spacing.lg}} />
+          <Button title="Close local storage" variant="secondary" fullWidth loading={busy} onPress={() => { update(storage.closeStore); }} style={{marginTop: theme.spacing.lg}} />
         ) : null}
         {storage.status !== 'opening' && storage.status !== 'not_initialized' ? (
-          <Button title="Delete local data" variant="danger" disabled={busy} onPress={removeData} style={{marginTop: theme.spacing.md}} />
+          <Button title="Delete local data" variant="danger" fullWidth disabled={busy} onPress={removeData} style={{marginTop: theme.spacing.md}} />
         ) : null}
-      </Surface>
+      </View>
+      <Divider />
     </View>
   );
 }
 
-const styles = StyleSheet.create({label: {letterSpacing: 1}});
+const styles = StyleSheet.create({label: {letterSpacing: 1}, statusRow: {flexDirection: 'row', alignItems: 'center'}, flex: {flex: 1}});

@@ -3,68 +3,67 @@ import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useAccount } from '../account';
 import { useStorage } from '../storage';
 import { useTheme } from '../theme';
-import { AppText, Avatar, Divider, Screen, Surface } from '../ui';
+import { AppText, Divider, Screen } from '../ui';
+import { StorageStatus } from '../ui/StorageStatus';
 
 export interface ProfileScreenProps {
   onOpenSettings: () => void;
 }
 
 export function ProfileScreen({ onOpenSettings }: ProfileScreenProps) {
-  const theme = useTheme();
+  const { colors, spacing } = useTheme();
   const account = useAccount();
   const storage = useStorage();
+  const name = account.username?.trim();
   const voidId = storage.status === 'ready' ? storage.identity?.accountVoidId : null;
 
   return (
     <Screen>
-      <ScrollView contentContainerStyle={{ paddingHorizontal: theme.spacing.xl, paddingTop: theme.spacing.xl, paddingBottom: theme.spacing.xxl }}>
-        <AppText variant="title">Profile</AppText>
-        <View style={[styles.profileHeader, { paddingVertical: theme.spacing.xxxl }]}>
-          <Avatar name={account.username ?? 'VOID'} size={76} />
-          <AppText variant="heading" style={{ marginTop: theme.spacing.lg }}>
-            {account.username ?? (voidId ? `VOID ${voidId}` : 'Your space on VOID')}
-          </AppText>
-          <AppText variant="body" color="textSecondary" style={[styles.centerText, { marginTop: theme.spacing.sm }]}>
-            {voidId ? 'Your account is initialized on this device.' : 'Development preview. Your account has not been initialized.'}
-          </AppText>
+      <AppText
+        accessibilityRole="header"
+        variant="title"
+        style={{ paddingHorizontal: spacing.xl, paddingTop: spacing.xl, paddingBottom: spacing.lg }}>
+        Profile
+      </AppText>
+      <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.xl, paddingBottom: spacing.xxl }}>
+        {storage.status === 'ready' ? (
+          <>
+            {name ? (
+              <AppText variant="heading" style={{ marginBottom: spacing.md }}>{name}</AppText>
+            ) : null}
+            <AppText accessibilityRole="header" variant="label" color="textSecondary">VOID-ID</AppText>
+            {voidId ? (
+              <AppText variant="title" selectable style={[styles.id, { marginTop: spacing.xs }]}>{voidId}</AppText>
+            ) : (
+              <AppText color="textSecondary" style={{ marginTop: spacing.xs }}>Not set up yet</AppText>
+            )}
+          </>
+        ) : <StorageStatus />}
+
+        <View style={{ marginTop: spacing.xxl }}>
+          <Divider />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open settings"
+            onPress={onOpenSettings}
+            style={({ pressed }) => [styles.row, {
+              paddingVertical: spacing.md,
+              backgroundColor: pressed ? colors.surface : 'transparent',
+            }]}>
+            <AppText style={styles.flex}>Settings</AppText>
+            <AppText variant="heading" color="textMuted" accessibilityElementsHidden importantForAccessibility="no">
+              ›
+            </AppText>
+          </Pressable>
+          <Divider />
         </View>
-
-        <AppText variant="caption" color="textMuted" style={[styles.sectionLabel, { marginBottom: theme.spacing.sm }]}>
-          IDENTITY
-        </AppText>
-        <Surface bordered padded>
-          <AppText variant="label">VOID-ID</AppText>
-          <AppText variant="body" color="textSecondary" selectable style={{ marginTop: theme.spacing.xs }}>
-            {voidId ?? 'Not set up yet'}
-          </AppText>
-        </Surface>
-
-        <AppText variant="caption" color="textMuted" style={[styles.sectionLabel, { marginTop: theme.spacing.xxl, marginBottom: theme.spacing.sm }]}>
-          PREFERENCES
-        </AppText>
-        <Divider />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Open settings"
-          onPress={onOpenSettings}
-          style={({ pressed }) => [styles.settingsRow, {
-            paddingVertical: theme.spacing.lg,
-            opacity: pressed ? 0.7 : 1,
-          }]}
-        >
-          <AppText variant="body" style={styles.flex}>Settings</AppText>
-          <AppText variant="body" color="textMuted">›</AppText>
-        </Pressable>
-        <Divider />
       </ScrollView>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  profileHeader: { alignItems: 'center' },
-  centerText: { textAlign: 'center' },
-  sectionLabel: { letterSpacing: 1 },
-  settingsRow: { flexDirection: 'row', alignItems: 'center' },
+  id: { fontVariant: ['tabular-nums'] },
+  row: { flexDirection: 'row', alignItems: 'center', minHeight: 48 },
   flex: { flex: 1 },
 });

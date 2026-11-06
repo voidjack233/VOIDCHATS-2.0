@@ -8,6 +8,8 @@
     "android": "react-native run-android --no-packager",
     "android:build": "node scripts/android-build.mjs",
     "android:apk": "node scripts/android-build.mjs --release",
+    "android:apk:x86_64": "node scripts/android-build.mjs --x86_64",
+    "android:apk:both": "npm run android:apk && npm run android:apk:x86_64",
     "native:android": "node scripts/build-openmls-android.mjs",
     "crypto:test": "node scripts/test-openmls.mjs",
     "crypto:bridgecheck": "node scripts/check-openmls-bindings.mjs",

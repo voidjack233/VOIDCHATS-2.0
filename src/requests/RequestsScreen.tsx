@@ -29,9 +29,7 @@ export function RequestsScreen({onOpenConversation}: RequestsScreenProps) {
       onRefresh={() => { conversations.refresh(); messaging.refresh().catch(() => {}); }}
       contentContainerStyle={{paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.xxl}}
       ItemSeparatorComponent={Divider}
-      ListHeaderComponent={<View style={{paddingTop: theme.spacing.xl, paddingBottom: theme.spacing.xl}}>
-        <AppText variant="title">Requests</AppText>
-        <AppText color="textSecondary" style={{marginTop: theme.spacing.sm}}>Messages from people you haven’t replied to.</AppText>
+      ListHeaderComponent={<View style={{paddingBottom: theme.spacing.xl}}>
         <StorageStatus />
         {issueMessage ? <View style={{marginTop: theme.spacing.lg}}>
           <AppText variant="caption" color="warning" accessibilityLiveRegion="polite">{incomingIssue ? 'An incoming message could not be processed. ' : ''}{issueMessage}</AppText>

@@ -2,14 +2,15 @@ import {spawnSync} from 'node:child_process';
 import {existsSync, mkdirSync, readdirSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {publishReleaseApk} from './apk-artifacts.mjs';
+import {publishDevelopmentApk, publishReleaseApk} from './apk-artifacts.mjs';
 
 const android = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'android');
 const args = process.argv.slice(2);
-if (args.length > 1 || (args.length === 1 && args[0] !== '--release')) {
-  throw new Error('Usage: node scripts/android-build.mjs [--release]');
+if (args.length > 1 || (args.length === 1 && !['--release', '--x86_64'].includes(args[0]))) {
+  throw new Error('Usage: node scripts/android-build.mjs [--release | --x86_64]');
 }
-const release = args[0] === '--release';
+const emulatorApk = args[0] === '--x86_64';
+const release = emulatorApk || args[0] === '--release';
 const tooling = path.join(android, 'build', 'tooling');
 const env = {...process.env};
 const javaName = process.platform === 'win32' ? 'java.exe' : 'java';
@@ -44,9 +45,11 @@ executablePaths.push(pathKey && env[pathKey]);
 if (pathKey && pathKey !== 'PATH') { delete env[pathKey]; }
 env.PATH = executablePaths.filter(Boolean).join(path.delimiter);
 const task = release ? 'assembleRelease' : 'assembleDebug';
+const gradleArgs = [task, '--console=plain'];
+if (emulatorApk) { gradleArgs.push('-PreactNativeArchitectures=x86_64'); }
 const result = process.platform === 'win32'
-  ? spawnSync(env.ComSpec || 'cmd.exe', ['/d', '/c', 'gradlew.bat', task, '--console=plain'], {cwd: android, env, stdio: 'inherit'})
-  : spawnSync(path.join(android, 'gradlew'), [task, '--console=plain'], {cwd: android, env, stdio: 'inherit'});
+  ? spawnSync(env.ComSpec || 'cmd.exe', ['/d', '/c', 'gradlew.bat', ...gradleArgs], {cwd: android, env, stdio: 'inherit'})
+  : spawnSync(path.join(android, 'gradlew'), gradleArgs, {cwd: android, env, stdio: 'inherit'});
 if (result.error) {
   throw result.error;
 }
@@ -54,6 +57,12 @@ if (result.status === 0) {
   const variant = release ? 'release' : 'debug';
   const apk = path.join(android, 'app', 'build', 'outputs', 'apk', variant, `app-${variant}.apk`);
   if (!existsSync(apk)) { throw new Error('Gradle finished without producing the expected APK.'); }
-  console.log(`APK: ${release ? publishReleaseApk(apk) : apk}`);
+  let output = apk;
+  if (emulatorApk) {
+    output = publishDevelopmentApk(apk);
+  } else if (release) {
+    output = publishReleaseApk(apk);
+  }
+  console.log(`APK: ${output}`);
 }
 process.exit(result.status ?? 1);

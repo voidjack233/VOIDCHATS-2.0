@@ -58,6 +58,11 @@ export function useConversations(limit = 50) {
   const load = useCallback((before: ConversationCursor | null, size: number) => repositories.conversations.page(before, size), [repositories]);
   return usePagedRecords<ConversationRecord, ConversationCursor>(load, 'conversations', limit, conversationCursorKey);
 }
+export function useAllConversations() {
+  const {repositories} = useStorage();
+  const load = useCallback(() => repositories.conversations.list(), [repositories]);
+  return useRecords<ConversationRecord>(load, 'all-conversations');
+}
 export function useContacts() {
   const {repositories} = useStorage();
   const load = useCallback(() => repositories.contacts.list(), [repositories]);

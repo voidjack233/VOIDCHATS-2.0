@@ -1,4 +1,4 @@
-import {createHash} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -71,4 +71,22 @@ export function publishReleaseApk(apk) {
   const element = metadata.elements?.find(item => item.outputFile === path.basename(apk));
   if (!element) { throw new Error('Gradle APK version metadata is missing.'); }
   return publishApk(apk, element.versionName, element.versionCode);
+}
+
+export function publishDevelopmentApk(apk) {
+  directory(build, workspace);
+  directory(artifacts, build);
+  const output = path.join(artifacts, 'Development');
+  directory(output, artifacts);
+  const destination = path.join(output, 'VOID-x86_64.apk');
+  const temporary = destination + '.' + randomUUID() + '.tmp';
+  const source = statSync(apk);
+  if (!source.isFile() || source.size === 0) { throw new Error('APK is missing or empty.'); }
+  try {
+    copyFileSync(apk, temporary);
+    renameSync(temporary, destination);
+  } finally {
+    rmSync(temporary, {force: true});
+  }
+  return destination;
 }

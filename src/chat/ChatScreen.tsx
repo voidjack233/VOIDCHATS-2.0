@@ -77,8 +77,8 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   const canCompose = registered && conversation.kind === 'direct' && !blocked;
   const list = useRef<FlatList<MessageRecord>>(null);
   const initiallyScrolled = useRef(false);
-  const scrollAfterSend = useRef(false);
   const nearBottom = useRef(true);
+  const userScrolling = useRef(false);
   const readBatch = useRef('');
   const chronological = useMemo(() => [...messages.items].reverse(), [messages.items]);
   const name = conversation.name === `VOID-${conversation.voidId}` ? conversation.voidId : conversation.name;
@@ -86,7 +86,7 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    initiallyScrolled.current = false; scrollAfterSend.current = false; nearBottom.current = true; readBatch.current = '';
+    initiallyScrolled.current = false; nearBottom.current = true; userScrolling.current = false; readBatch.current = '';
     setDraft(''); setSendError(null); setSending(false); setRetryingId(null); setResuming(false);
     sendingRef.current = false; retryingRef.current = false; resumingRef.current = false;
   }, [scope]);
@@ -94,13 +94,13 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   async function send() {
     if (!draft.trim() || !canCompose || sendingRef.current) { return; }
     const body = draft;
-    sendingRef.current = true; setSending(true); setSendError(null); scrollAfterSend.current = true;
+    sendingRef.current = true; setSending(true); setSendError(null);
     try {
       // Native storage saves the message immediately; network work continues separately.
       await messaging.sendMessage(conversation.id, body);
-      if (active()) { setDraft(''); list.current?.scrollToEnd({animated: true}); }
+      if (active()) { setDraft(''); }
     } catch (value) {
-      if (active()) { scrollAfterSend.current = false; setSendError(value instanceof Error ? value.message : 'Could not save your message. Your text is still here.'); }
+      if (active()) { setSendError(value instanceof Error ? value.message : 'Could not save your message. Your text is still here.'); }
     } finally { if (active()) { sendingRef.current = false; setSending(false); } }
   }
   async function retry(messageId: string) {
@@ -143,7 +143,7 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   }, [conversation.id, messages.items, messages.loading, messages.error, storage.status, storage.repositories]);
 
   return <Screen>
-    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={[styles.header, {paddingHorizontal: theme.spacing.sm, paddingVertical: theme.spacing.sm, borderBottomColor: theme.colors.border}]}>
         <IconButton accessibilityLabel="Back to messages" onPress={onBack} icon={<AppText variant="title">‹</AppText>} />
         <Avatar name={name ?? conversation.voidId ?? 'VOID'} size={36} />
@@ -167,10 +167,18 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
         maintainVisibleContentPosition={{minIndexForVisible: 0}}
         contentContainerStyle={[styles.messages, {paddingHorizontal: theme.spacing.lg, paddingBottom: theme.spacing.lg}]}
         scrollEventThrottle={100}
-        onScroll={({nativeEvent}) => { nearBottom.current = nativeEvent.contentSize.height - nativeEvent.layoutMeasurement.height - nativeEvent.contentOffset.y < 80; }}
+        onScrollBeginDrag={() => { userScrolling.current = true; }}
+        onScrollEndDrag={() => { userScrolling.current = false; }}
+        onMomentumScrollBegin={() => { userScrolling.current = true; }}
+        onMomentumScrollEnd={() => { userScrolling.current = false; }}
+        onScroll={({nativeEvent}) => {
+          if (userScrolling.current) {
+            nearBottom.current = nativeEvent.contentSize.height - nativeEvent.layoutMeasurement.height - nativeEvent.contentOffset.y < 80;
+          }
+        }}
         onContentSizeChange={() => {
-          if ((!initiallyScrolled.current || scrollAfterSend.current || nearBottom.current) && chronological.length > 0) {
-            initiallyScrolled.current = true; scrollAfterSend.current = false; list.current?.scrollToEnd({animated: false});
+          if ((!initiallyScrolled.current || nearBottom.current) && chronological.length > 0) {
+            initiallyScrolled.current = true; list.current?.scrollToEnd({animated: false});
           }
         }}
         ListHeaderComponent={<>
@@ -191,7 +199,7 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
             {diagnostic.code === 'identity_changed' ? <AppText variant="caption" color="textSecondary" style={{marginTop: theme.spacing.xs}}>{diagnostic.message}</AppText> : null}
             {session?.diagnosticCode ? <AppText variant="caption" color="textMuted" selectable style={{marginTop: theme.spacing.xs}}>Error code: {session.diagnosticCode}</AppText> : null}
           </View>
-          <Button title="Reconnect" variant="ghost" size="sm" loading={resuming} onPress={() => { resume().catch(() => {}); }} style={{marginLeft: theme.spacing.sm}} />
+          {messaging.status !== 'offline' ? <Button title="Reconnect" variant="ghost" size="sm" loading={resuming} onPress={() => { resume().catch(() => {}); }} style={{marginLeft: theme.spacing.sm}} /> : null}
         </View> : null}
         {blocked || !registered || conversation.kind !== 'direct' || messaging.status === 'offline' ? <AppText variant="caption" color="textMuted" accessibilityLiveRegion="polite" style={[styles.centeredText, {marginBottom: theme.spacing.sm}]}>
           {blocked ? 'You blocked this person.' : !registered ? 'Create an account to send messages.' : conversation.kind !== 'direct' ? 'Group messaging is not available yet.' : 'You’re offline. Failed messages stay saved until you tap Resend.'}

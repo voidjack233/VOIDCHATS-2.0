@@ -29,19 +29,20 @@ function SettingRow({ label, value }: SettingRowProps) {
 export function SettingsScreen({ onBack }: SettingsScreenProps) {
   const theme = useTheme();
   const storage = useStorage();
+  const voidId = storage.status === 'ready' ? storage.identity?.accountVoidId : null;
 
   return (
     <Screen>
-      <ScrollView contentContainerStyle={{ paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.xxl }}>
-        <View style={[styles.row, { marginTop: theme.spacing.md, marginBottom: theme.spacing.lg }]}>
+      <View style={[styles.row, { paddingHorizontal: theme.spacing.xl, marginTop: theme.spacing.md, marginBottom: theme.spacing.lg }]}>
           <IconButton
-            accessibilityLabel="Back to profile"
+            accessibilityLabel="Go back"
             onPress={onBack}
             icon={<AppText variant="heading">‹</AppText>}
             style={{ marginLeft: -theme.spacing.md, marginRight: theme.spacing.sm }}
           />
           <AppText variant="title">Settings</AppText>
-        </View>
+      </View>
+      <ScrollView contentContainerStyle={{ paddingHorizontal: theme.spacing.xl, paddingBottom: theme.spacing.xxl }}>
 
         <AppText variant="caption" color="textMuted" style={[styles.sectionLabel, { marginBottom: theme.spacing.sm }]}>
           APPEARANCE
@@ -54,7 +55,12 @@ export function SettingsScreen({ onBack }: SettingsScreenProps) {
           ACCOUNT
         </AppText>
         <Divider />
-        <SettingRow label="VOID-ID" value={storage.status === 'ready' ? storage.identity?.accountVoidId ?? 'Not set up' : 'Local storage unavailable'} />
+        <View style={{ paddingVertical: theme.spacing.lg }}>
+          <AppText variant="label">VOID-ID</AppText>
+          <AppText color="textSecondary" selectable={Boolean(voidId)} style={{ marginTop: theme.spacing.xs }}>
+            {voidId ?? (storage.status === 'ready' ? 'Not set up' : 'Local storage unavailable')}
+          </AppText>
+        </View>
         <Divider />
 
         <AppText variant="caption" color="textMuted" style={[styles.sectionLabel, { marginTop: theme.spacing.xxl, marginBottom: theme.spacing.sm }]}>

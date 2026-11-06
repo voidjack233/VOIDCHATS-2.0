@@ -3,18 +3,19 @@ import {Pressable, StyleSheet, View} from 'react-native';
 import {useTheme} from '../../theme';
 import {AppText} from '../../ui';
 
-export type MainTab = 'conversations' | 'requests' | 'contacts' | 'profile';
+export type MainTab = 'conversations' | 'requests' | 'contacts';
 
 const tabs: ReadonlyArray<{key: MainTab; label: string}> = [
   {key: 'conversations', label: 'Chats'},
   {key: 'requests', label: 'Requests'},
   {key: 'contacts', label: 'Contacts'},
-  {key: 'profile', label: 'Profile'},
 ];
 
 type BottomTabBarProps = {
   selected: MainTab;
   onSelect: (tab: MainTab) => void;
+  chatCount: number;
+  requestCount: number;
 };
 
 function TabIcon({tab, color}: {tab: MainTab; color: string}): React.JSX.Element {
@@ -37,20 +38,11 @@ function TabIcon({tab, color}: {tab: MainTab; color: string}): React.JSX.Element
     );
   }
 
-  if (tab === 'contacts') {
-    return (
-      <View style={styles.iconFrame}>
-        <View style={[styles.contactHead, {borderColor: color}]} />
-        <View style={[styles.contactShoulders, {borderColor: color}]} />
-        <View style={[styles.contactSecondHead, {borderColor: color}]} />
-      </View>
-    );
-  }
-
   return (
     <View style={styles.iconFrame}>
-      <View style={[styles.profileHead, {borderColor: color}]} />
-      <View style={[styles.profileShoulders, {borderColor: color}]} />
+      <View style={[styles.contactHead, {borderColor: color}]} />
+      <View style={[styles.contactShoulders, {borderColor: color}]} />
+      <View style={[styles.contactSecondHead, {borderColor: color}]} />
     </View>
   );
 }
@@ -58,6 +50,8 @@ function TabIcon({tab, color}: {tab: MainTab; color: string}): React.JSX.Element
 export function BottomTabBar({
   selected,
   onSelect,
+  chatCount,
+  requestCount,
 }: BottomTabBarProps): React.JSX.Element {
   const theme = useTheme();
 
@@ -73,6 +67,7 @@ export function BottomTabBar({
       ]}>
       {tabs.map(tab => {
         const isSelected = selected === tab.key;
+        const count = tab.key === 'conversations' ? chatCount : tab.key === 'requests' ? requestCount : 0;
         const color = isSelected
           ? theme.colors.accent
           : theme.colors.textMuted;
@@ -81,11 +76,14 @@ export function BottomTabBar({
           <Pressable
             key={tab.key}
             accessibilityRole="tab"
-            accessibilityLabel={tab.label}
+            accessibilityLabel={count ? `${tab.label}, ${count} ${tab.key === 'conversations' ? 'unread messages' : 'requests'}` : tab.label}
             accessibilityState={{selected: isSelected}}
             onPress={() => onSelect(tab.key)}
             style={styles.tab}>
-            <TabIcon tab={tab.key} color={color} />
+            <View>
+              <TabIcon tab={tab.key} color={color} />
+              {count > 0 ? <View style={[styles.badge, {backgroundColor: theme.colors.accent}]}><AppText color="accentText" style={styles.badgeText}>{count > 99 ? '99+' : count}</AppText></View> : null}
+            </View>
             <AppText
               variant="caption"
               color={isSelected ? 'accent' : 'textMuted'}
@@ -100,6 +98,8 @@ export function BottomTabBar({
 }
 
 const styles = StyleSheet.create({
+  badge: {position: 'absolute', top: -5, left: 16, minWidth: 18, height: 18, borderRadius: 9, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center'},
+  badgeText: {fontSize: 10, lineHeight: 13, fontWeight: '700'},
   container: {
     flexDirection: 'row',
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -190,23 +190,5 @@ const styles = StyleSheet.create({
     top: 5,
     borderWidth: 1.6,
     borderRadius: 5,
-  },
-  profileHead: {
-    position: 'absolute',
-    width: 9,
-    height: 9,
-    top: 2,
-    borderWidth: 1.7,
-    borderRadius: 6,
-  },
-  profileShoulders: {
-    position: 'absolute',
-    width: 18,
-    height: 9,
-    bottom: 2,
-    borderWidth: 1.7,
-    borderBottomWidth: 0,
-    borderTopLeftRadius: 10,
-    borderTopRightRadius: 10,
   },
 });
