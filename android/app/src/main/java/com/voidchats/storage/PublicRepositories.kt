@@ -141,10 +141,19 @@ internal class PublicRepositories(private val db: SQLiteDatabase) {
     return message(id)!!
   }
 
-  private fun message(id: String): JSONObject? = single("SELECT id,conversation_id,sender_void_id,body,direction,delivery_state,created_at,edited_at,deleted_at,read_at FROM messages WHERE id=?", arrayOf(id)) { c ->
+  private fun message(id: String): JSONObject? = single("""
+    SELECT m.id,m.conversation_id,m.sender_void_id,m.body,m.direction,m.delivery_state,m.created_at,m.edited_at,m.deleted_at,m.read_at,
+      (SELECT r.recorded_at FROM signal_control_inbox r
+        JOIN signal_outbox o ON o.event_id=r.original_message_id AND o.peer_void_id=r.sender_void_id AND o.receipt_requested=1
+        JOIN signal_threads t ON t.peer_void_id=r.sender_void_id
+        WHERE r.original_message_id=m.id AND r.disposition='applied' AND t.conversation_id=m.conversation_id
+          AND m.direction='outgoing' AND m.sender_void_id=(SELECT account_void_id FROM local_identity WHERE slot=1))
+    FROM messages m WHERE m.id=?
+  """.trimIndent(), arrayOf(id)) { c ->
     JSONObject().apply {
       put("id", c.getString(0)); put("conversationId", c.getString(1)); put("senderVoidId", c.getString(2)); put("body", nullable(c, 3)); put("direction", c.getString(4)); put("deliveryState", c.getString(5))
       put("createdAt", c.getLong(6)); put("editedAt", nullable(c, 7, true)); put("deletedAt", nullable(c, 8, true)); put("readAt", nullable(c, 9, true))
+      put("verifiedDeliveredAt", nullable(c, 10, true))
       put("reactions", array("SELECT reactor_void_id,emoji,created_at FROM message_reactions WHERE message_id=? ORDER BY created_at,reactor_void_id,emoji", arrayOf(id)) {
         JSONObject().put("reactorVoidId", it.getString(0)).put("emoji", it.getString(1)).put("createdAt", it.getLong(2))
       })

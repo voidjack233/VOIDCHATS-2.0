@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
-import {Alert, FlatList, KeyboardAvoidingView, Platform, StyleSheet, View} from 'react-native';
+import {AccessibilityInfo, Alert, Animated, Easing, FlatList, KeyboardAvoidingView, Platform, Pressable, StyleSheet, View} from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import type {Conversation} from '../conversations';
 import {useMessaging} from '../messaging';
@@ -37,46 +37,89 @@ function dayLabel(timestamp: number): string {
 const deliveryIndicators = {
   pending: {label: 'Waiting to send', color: 'textMuted'},
   sent: {label: 'Sent', color: 'textMuted'},
+  delivered: {label: 'Delivered', color: 'accent'},
   failed: {label: 'Failed to send', color: 'danger'},
   unknown: {label: 'Send status unknown', color: 'warning'},
 } as const;
 
-function DeliveryIndicator({status, label}: {status: keyof typeof deliveryIndicators; label: string}) {
+function DeliveryIndicator({status, label, animateDelivery, onFillComplete}: {status: keyof typeof deliveryIndicators; label: string; animateDelivery: boolean; onFillComplete: () => void}) {
   const {colors} = useTheme();
   const stroke = colors[deliveryIndicators[status].color];
+  const filled = status === 'delivered';
+  const fill = useRef(new Animated.Value(0)).current;
+  const onComplete = useRef(onFillComplete); onComplete.current = onFillComplete;
+  useEffect(() => {
+    let active = true;
+    fill.setValue(filled && !animateDelivery ? 1 : 0);
+    if (filled && animateDelivery) {
+      AccessibilityInfo.isReduceMotionEnabled().then(reduced => {
+        if (!active) { return; }
+        if (reduced) { fill.setValue(1); onComplete.current(); return; }
+        Animated.timing(fill, {toValue: 1, duration: 450, easing: Easing.out(Easing.cubic), useNativeDriver: true}).start(({finished}) => {
+          if (active && finished) { onComplete.current(); }
+        });
+      }).catch(() => { if (active) { fill.setValue(1); onComplete.current(); } });
+    }
+    return () => { active = false; fill.stopAnimation(); };
+  }, [fill, filled, animateDelivery]);
   return (
     <View
       accessible
       accessibilityRole="image"
       accessibilityLabel={label}
       style={[styles.deliveryIcon, {borderColor: stroke}]}>
+      {filled ? <Animated.View style={[styles.deliveryFill, {backgroundColor: stroke, opacity: fill, transform: [{scale: fill}]}]} /> : null}
       {status === 'failed' || status === 'unknown' ? (
         <View style={styles.exclamation}>
           <View style={[styles.exclamationBar, {backgroundColor: stroke}]} />
           <View style={[styles.exclamationDot, {backgroundColor: stroke}]} />
         </View>
       ) : (
-        <View style={[styles.deliveryMark, status === 'pending' ? styles.clockHands : styles.checkmark, {borderColor: stroke}]} />
+        <View style={[styles.deliveryMark, status === 'pending' ? styles.clockHands : styles.checkmark, {borderColor: filled ? colors.accentText : stroke}]} />
       )}
     </View>
   );
 }
 
-function MessageRow({message, day, startsGroup, endsGroup, latestOutgoing, uncertain, paused, onRetry, retrying, retryDisabled}: {
-  message: MessageRecord; day: boolean; startsGroup: boolean; endsGroup: boolean; latestOutgoing: boolean;
+function MessageRow({message, day, startsGroup, endsGroup, selected, onSelect, uncertain, paused, onRetry, retrying, retryDisabled}: {
+  message: MessageRecord; day: boolean; startsGroup: boolean; endsGroup: boolean; selected: boolean; onSelect: () => void;
   uncertain: boolean; paused: boolean;
   onRetry: () => void; retrying: boolean; retryDisabled: boolean;
 }) {
   const theme = useTheme();
   const outgoing = message.direction === 'outgoing';
   const {deliveryState} = message;
-  const failed = outgoing && deliveryState === 'failed';
+  const delivered = outgoing && typeof message.verifiedDeliveredAt === 'number';
+  const previousDelivery = useRef({id: message.id, delivered});
+  const [animatingDelivery, setAnimatingDelivery] = useState(false);
+  const [showPending, setShowPending] = useState(false);
+  const justDelivered = previousDelivery.current.id === message.id && !previousDelivery.current.delivered && delivered;
+  useEffect(() => {
+    if (previousDelivery.current.id !== message.id) {
+      setAnimatingDelivery(false);
+    } else if (!previousDelivery.current.delivered && delivered) {
+      setAnimatingDelivery(true);
+    } else if (!delivered) {
+      setAnimatingDelivery(false);
+    }
+    previousDelivery.current = {id: message.id, delivered};
+  }, [delivered, message.id]);
+  useEffect(() => {
+    setShowPending(false);
+    if (outgoing && deliveryState === 'pending' && !delivered) {
+      const timer = setTimeout(() => setShowPending(true), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [message.id, outgoing, deliveryState, delivered]);
+  const failed = outgoing && !delivered && deliveryState === 'failed';
   const status = !outgoing ? null
+    : delivered ? 'delivered'
     : uncertain ? 'unknown'
     : failed ? 'failed'
     : deliveryState === 'pending' || deliveryState === 'sent' ? deliveryState
     : null;
-  const visibleStatus = latestOutgoing || status === 'failed' || status === 'unknown' ? status : null;
+  const visibleStatus = (status === 'pending' && !showPending) ||
+    (status === 'delivered' && !selected && !justDelivered && !animatingDelivery) ? null : status;
   const statusLabel = status === 'pending' && paused ? 'Sending paused' : status ? deliveryIndicators[status].label : '';
   const timestamp = new Date(message.createdAt);
   const metadataColor = outgoing ? theme.colors.accentText : theme.colors.textSecondary;
@@ -97,7 +140,11 @@ function MessageRow({message, day, startsGroup, endsGroup, latestOutgoing, uncer
       <AppText variant="caption" color="textSecondary">{dayLabel(message.createdAt)}</AppText>
     </View> : null}
     <View style={[styles.messageGroup, outgoing ? styles.outgoing : styles.incoming]}>
-      <View style={[styles.bubble, joinedCorners, {
+      <Pressable disabled={!outgoing} onPress={onSelect} accessibilityRole={outgoing ? 'button' : undefined}
+        accessibilityLabel={outgoing ? `${message.deletedAt !== null ? 'Message deleted' : message.body ?? ''}, ${statusLabel || 'Status unavailable'}` : undefined}
+        accessibilityHint={outgoing ? 'Double tap to toggle message status.' : undefined}
+        accessibilityState={outgoing ? {selected} : undefined}
+        style={[styles.bubble, joinedCorners, {
         backgroundColor: outgoing ? theme.colors.accent : theme.colors.surface,
         paddingHorizontal: theme.spacing.md, paddingVertical: theme.spacing.sm,
       }]}>
@@ -112,8 +159,11 @@ function MessageRow({message, day, startsGroup, endsGroup, latestOutgoing, uncer
             {timestamp.toLocaleTimeString(undefined, {hour: 'numeric', minute: '2-digit'})}
           </AppText>
         </View>
-      </View>
-      {visibleStatus ? <DeliveryIndicator status={visibleStatus} label={statusLabel} /> : null}
+      </Pressable>
+      {visibleStatus ? <View style={styles.deliveryStatus} accessible accessibilityLabel={statusLabel}>
+        <AppText variant="caption" color="textMuted" style={styles.deliveryLabel}>{statusLabel}</AppText>
+        <DeliveryIndicator status={visibleStatus} label={statusLabel} animateDelivery={justDelivered || animatingDelivery} onFillComplete={() => setAnimatingDelivery(false)} />
+      </View> : outgoing ? <View style={styles.deliveryPlaceholder} /> : null}
     </View>
     {failed ? (
       <View style={styles.retryRow}>
@@ -139,6 +189,7 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   const [sendError, setSendError] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState<{id: string; delivered: boolean} | null>(null);
   const sendingRef = useRef(false);
   const retryingRef = useRef(false);
   const resumingRef = useRef(false);
@@ -153,16 +204,20 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
   const canCompose = registered && conversation.kind === 'direct' && !blocked;
   const readBatch = useRef('');
   const messageLayout = useMemo(() => getMessageLayout(messages.items, messages.hasMore), [messages.items, messages.hasMore]);
-  const latestOutgoingId = messages.items.find(message => message.direction === 'outgoing')?.id;
+  const selectedMessage = selectedStatus && messages.items.find(message => message.id === selectedStatus.id);
+  const deliveredSinceSelection = Boolean(selectedStatus && !selectedStatus.delivered && typeof selectedMessage?.verifiedDeliveredAt === 'number');
   const name = conversation.name === `VOID-${conversation.voidId}` ? conversation.voidId : conversation.name;
   const active = () => mounted.current && currentScope.current === scope;
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     readBatch.current = '';
-    setDraft(''); setSendError(null); setSending(false); setRetryingId(null); setResuming(false);
+    setDraft(''); setSendError(null); setSending(false); setRetryingId(null); setResuming(false); setSelectedStatus(null);
     sendingRef.current = false; retryingRef.current = false; resumingRef.current = false;
   }, [scope]);
+  useEffect(() => {
+    if (deliveredSinceSelection) { setSelectedStatus(null); }
+  }, [deliveredSinceSelection]);
 
   async function send() {
     if (!draft.trim() || !canCompose || sendingRef.current) { return; }
@@ -240,7 +295,8 @@ export function ChatScreen({conversation, onBack}: ChatScreenProps) {
             day={layout?.showDateSeparator ?? false}
             startsGroup={layout?.startsGroup ?? true}
             endsGroup={newer ? messageLayout.get(newer.id)?.startsGroup ?? true : true}
-            latestOutgoing={item.id === latestOutgoingId}
+            selected={selectedStatus?.id === item.id && !deliveredSinceSelection}
+            onSelect={() => setSelectedStatus(current => current?.id === item.id ? null : {id: item.id, delivered: typeof item.verifiedDeliveredAt === 'number'})}
             uncertain={messaging.outbox.some(operation => operation.id === item.id && ['duplicate_event', 'send_unknown'].includes(operation.errorCode ?? ''))}
             paused={paused}
             onRetry={() => { retry(item.id).catch(() => {}); }} retrying={retryingId === item.id} retryDisabled={!canCompose || paused || retryingId !== null} />;
@@ -290,7 +346,11 @@ const styles = StyleSheet.create({
   outgoing: {alignSelf: 'flex-end', alignItems: 'flex-end'},
   incoming: {alignSelf: 'flex-start', alignItems: 'flex-start'},
   metadata: {alignSelf: 'flex-end', flexDirection: 'row', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end'},
-  deliveryIcon: {width: 16, height: 16, marginTop: 2, borderRadius: 8, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center'},
+  deliveryStatus: {flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2},
+  deliveryLabel: {fontSize: 11, lineHeight: 16},
+  deliveryIcon: {width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center'},
+  deliveryFill: {position: 'absolute', width: 13, height: 13, borderRadius: 7},
+  deliveryPlaceholder: {width: 16, height: 16, marginTop: 2},
   deliveryMark: {borderLeftWidth: 1.5, borderBottomWidth: 1.5},
   clockHands: {width: 4, height: 4, transform: [{translateX: 1}, {translateY: -1}]},
   checkmark: {width: 7, height: 4, transform: [{rotate: '-45deg'}]},

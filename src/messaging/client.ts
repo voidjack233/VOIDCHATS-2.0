@@ -118,12 +118,14 @@ export class MessagingClient {
     if (generation === this.generation && !this.authenticated) { this.connecting = promise; }
     return promise;
   }
-  private command(command: object, match: (frame: ServerFrame) => boolean, errorRequestId?: string): Promise<ServerFrame> {
+  private command(command: object, match: (frame: ServerFrame) => boolean, errorRequestId?: string,
+    canTransmit?: () => boolean): Promise<ServerFrame> {
     const generation = this.generation;
     const result = this.commands.then(async () => {
       if (generation !== this.generation) { throw new MessagingError('unavailable'); }
       await this.connect();
       if (generation !== this.generation || !this.authenticated || !this.socket) { throw new MessagingError('unavailable'); }
+      if (canTransmit && !canTransmit()) { throw new MessagingError('unavailable'); }
       return new Promise<ServerFrame>((resolve, reject) => {
         const timer = setTimeout(() => this.shutdown(new MessagingError('deadline_exceeded'), true), this.options.timeoutMs ?? 20000);
         this.waiting = {match, errorRequestId, resolve: frame => { clearTimeout(timer); resolve(frame); }, reject: error => { clearTimeout(timer); reject(error); }};
@@ -166,10 +168,11 @@ export class MessagingClient {
     decode.exchangeId(exchange_id); decode.voidId(to_void_id); decode.base64(payload_base64);
     return await this.command({type: 'relay_online', exchange_id, to_void_id, payload_base64}, frame => frame.type === 'online_result' && frame.exchange_id === exchange_id) as OnlineResult;
   }
-  async send(event_id: string, to_void_id: string, payload_base64: string): Promise<Accepted> {
+  async send(event_id: string, to_void_id: string, payload_base64: string, canTransmit?: () => boolean): Promise<Accepted> {
     decode.uuid(event_id); decode.voidId(to_void_id); decode.base64(payload_base64);
     logMessagingDiagnostic('send_submit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id, recipient_void_id: to_void_id}));
-    const result = await this.command({type: 'send', event_id, to_void_id, payload_base64}, frame => frame.type === 'accepted' && frame.event_id === event_id) as Accepted;
+    const result = await this.command({type: 'send', event_id, to_void_id, payload_base64},
+      frame => frame.type === 'accepted' && frame.event_id === event_id, undefined, canTransmit) as Accepted;
     logMessagingDiagnostic('send_accepted', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id, recipient_void_id: to_void_id,
       created_at: result.created_at, expires_at: result.expires_at}));
     return result;

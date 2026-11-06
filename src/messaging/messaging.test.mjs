@@ -25,7 +25,8 @@ const peerId = '9223372036854775806';
 const b64 = value => Buffer.from(value).toString('base64');
 const plain = value => JSON.parse(JSON.stringify(value));
 const tick = () => new Promise(resolve => setImmediate(resolve));
-async function until(condition) { for (let count = 0; count < 100; count++) { if (condition()) { return; } await tick(); } assert.fail('Condition was not reached'); }
+const timerTick = () => new Promise(resolve => setTimeout(resolve, 15));
+async function until(condition, wait = tick) { for (let count = 0; count < 100; count++) { if (condition()) { return; } await wait(); } assert.fail('Condition was not reached'); }
 function fixture(overrides = {}) {
   const keys = generateKeyPairSync('ed25519');
   const publicKey = keys.publicKey.export({type: 'spki', format: 'der'}).subarray(-32).toString('base64');
@@ -123,6 +124,18 @@ test('accepted means server acceptance only, and duplicate_event remains an erro
   assert.equal((await f.client.send(eventId, peerId, b64('opaque'))).type, 'accepted');
   await assert.rejects(f.client.send(eventId, peerId, b64('opaque')), error => error.code === 'duplicate_event');
 });
+test('a queued receipt rechecks eligibility before transmitting behind an ACK', async t => {
+  const f = fixture(); t.after(() => f.client.reset());
+  let eligible = true;
+  const ack = f.client.ack({sender_void_id: peerId, event_id: eventId});
+  const receiptId = '22222222-2222-4222-8222-222222222222';
+  const cancelled = assert.rejects(f.client.send(receiptId, peerId, b64('receipt'), () => eligible), error => error.code === 'unavailable');
+  await until(() => f.sent.some(frame => frame.type === 'ack'));
+  eligible = false;
+  f.socket.emit({type: 'ack_ok', sender_void_id: peerId, event_id: eventId});
+  await ack; await cancelled;
+  assert.equal(f.sent.some(frame => frame.type === 'send'), false);
+});
 test('malformed numeric IDs and unknown fields close the socket', async () => {
   for (const response of [{type: 'person', void_id: 123, auth_public_key: b64(Buffer.alloc(32))}, {type: 'person', void_id: peerId, auth_public_key: b64(Buffer.alloc(32)), trusted: 'true'}]) {
     const f = fixture({command(_frame, socket) { socket.emit(response); }});
@@ -136,8 +149,8 @@ function controllerFixture(overrides = {}) {
     signAuthChallenge: async message => b64(sign(null, Buffer.from(message, 'base64'), overrides.keys?.privateKey)),
     getState: async () => ({sessions: [], outbox: [], blockedVoidIds: []}),
     openConversation: async peer => ({id: eventId, kind: 'direct', title: peer.void_id, peerVoidId: peer.void_id, mlsGroupId: null, createdAt: 1, updatedAt: 1, unreadCount: 0, members: [], lastMessage: null}),
-    resumePending: async () => {}, blockPeer: async () => {}, queueMessage: async () => {},
-    completeOperation: async (...args) => { operations.push(args); }, failOperation: async () => {}, retryOperation: async () => {},
+    resumePending: async () => {}, getPreKeyPublication: async () => null, blockPeer: async () => {}, queueMessage: async () => {},
+    completeOperation: async (...args) => { operations.push(args); }, failOperation: async () => {}, failPending: async () => {}, retryOperation: async () => {},
     applyOnline: async () => {}, applyEvent: async event => ({event_id: event.event_id, sender_void_id: event.from_void_id, changed: true}),
     ...overrides.driver,
   };
@@ -158,7 +171,10 @@ function controllerFixture(overrides = {}) {
             socket.emit({type: 'auth_challenge', challenge_id: id, expires_at, message: b64(`VOID-NOTHINGNESS:authenticate:v2\n${id}\n${identity.accountVoidId}\n${identity.signaturePublicKeyBase64}\n${expires_at}\n${b64(base)}\n${randomBytes(32).toString('base64url')}\n`)});
           } else if (frame.type === 'auth_proof') { socket.emit({type: 'auth_ok', void_id: identity.accountVoidId}); }
           else if (frame.type === 'lookup') { socket.emit({type: 'person', void_id: frame.void_id, auth_public_key: identity.signaturePublicKeyBase64}); }
-          else if (frame.type === 'ack') { socket.emit({type: 'ack_ok', sender_void_id: frame.sender_void_id, event_id: frame.event_id}); }
+          else if (frame.type === 'ack') {
+            if (overrides.ack) { overrides.ack(frame, socket); }
+            else { socket.emit({type: 'ack_ok', sender_void_id: frame.sender_void_id, event_id: frame.event_id}); }
+          }
           else { overrides.command?.(frame, socket); }
         },
       }; queueMicrotask(() => socket.onopen?.()); return socket;
@@ -183,11 +199,69 @@ test('failed native processing never sends an ACK', async t => {
   assert.equal(f.operations.some(op => op.type === 'ack'), false); assert.match(f.controller.getSnapshot().error, /could not be verified/);
 });
 test('a replay already committed by native dedup is ACKed without a new visible write', async t => {
-  const f = controllerFixture({driver: {applyEvent: async event => ({event_id: event.event_id, sender_void_id: event.from_void_id, changed: false})}});
-  t.after(() => f.controller.stop()); f.controller.start(); await until(() => f.controller.getSnapshot().status === 'online'); await tick();
+  const f = controllerFixture({driver: {applyEvent: async event => ({event_id: event.event_id, sender_void_id: event.from_void_id, changed: false})},
+    ack() { /* Hold the reply so the assertion measures inbound processing, before the subsequent send flush. */ }});
+  t.after(() => f.controller.stop()); f.controller.start(); await f.controller.refresh();
   const committed = f.commits.length; f.emit(incoming()); await until(() => f.operations.some(op => op.type === 'ack'));
   assert.equal(f.commits.length, committed);
 });
+test('a receipt survives a lost original ACK response and uploads without redelivery', async t => {
+  const receipt = {id: '22222222-2222-4222-8222-222222222222', peerVoidId: peerId, payloadBase64: b64('saved receipt')};
+  let committed = false; let claimed = false; let completed = false; let applied = 0;
+  const f = controllerFixture({driver: {
+    applyEvent: async event => {
+      applied++; committed = true;
+      return {event_id: event.event_id, sender_void_id: event.from_void_id, changed: true, receiptQueued: true};
+    },
+    claimReceiptUpload: async () => {
+      claimed = claimed || committed;
+      return {operation: committed && !completed ? receipt : null, nextAttemptAt: null};
+    },
+    completeReceiptUpload: async (id, accepted) => {
+      assert.equal(id, receipt.id); assert.equal(accepted.event_id, receipt.id); completed = true;
+    },
+    stopReceiptUpload: async () => { assert.fail('An interrupted upload must remain recoverable'); },
+  }, ack() { /* Relay deleted the event, but its response is lost. */ }, command(frame, socket) {
+    if (frame.type === 'send') {
+      assert.deepEqual(frame, {type: 'send', event_id: receipt.id, to_void_id: peerId, payload_base64: receipt.payloadBase64});
+      socket.emit({type: 'accepted', event_id: receipt.id, created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 100000).toISOString()});
+    }
+  }});
+  t.after(() => f.controller.stop());
+  f.controller.start(); await until(() => f.controller.getSnapshot().status === 'online');
+  f.emit(incoming()); await until(() => f.operations.some(op => op.type === 'ack'));
+  await until(() => claimed, timerTick);
+  assert.equal(f.operations.some(op => op.type === 'send'), false);
+  f.disconnect(); await f.controller.reconnect(); await until(() => completed, timerTick);
+  assert.equal(applied, 1);
+  assert.equal(f.operations.filter(op => op.type === 'ack').length, 1);
+});
+
+test('ambiguous receipt acceptance retries the saved event without completing it early', async t => {
+  const receipt = {id: '22222222-2222-4222-8222-222222222222', peerVoidId: peerId, payloadBase64: b64('saved receipt')};
+  let due = true; let completed = 0;
+  const sends = [];
+  const f = controllerFixture({driver: {
+    claimReceiptUpload: async () => {
+      const operation = due ? receipt : null; due = false;
+      return {operation, nextAttemptAt: null};
+    },
+    completeReceiptUpload: async () => { completed++; },
+    stopReceiptUpload: async () => { assert.fail('duplicate_event is ambiguous'); },
+  }, command(frame, socket) {
+    if (frame.type === 'send') {
+      sends.push(frame);
+      socket.emit(sends.length === 1 ? {type: 'error', code: 'duplicate_event'} :
+        {type: 'accepted', event_id: receipt.id, created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 100000).toISOString()});
+    }
+  }});
+  t.after(() => f.controller.stop());
+  f.controller.start(); await until(() => sends.length === 1, timerTick); await tick();
+  assert.equal(completed, 0);
+  due = true; await f.controller.reconnect(); await until(() => completed === 1, timerTick);
+  assert.deepEqual(sends, [sends[0], sends[0]]);
+});
+
 test('restart resumes durable native work without a conversation-acceptance action', async t => {
   let resumed = 0;
   const f = controllerFixture({driver: {resumePending: async () => { resumed++; }}});

@@ -66,7 +66,16 @@ internal class SignalStore(private val db: SQLiteDatabase) :
     writing()
     val exists = db.rawQuery("SELECT 1 FROM signal_local_identity WHERE slot=1", emptyArray()).use { it.moveToFirst() }
     if (exists) { getIdentityKeyPair(); getLocalRegistrationId(); return }
-    val previous = db.rawQuery("SELECT 1 FROM signal_sessions UNION ALL SELECT 1 FROM signal_prekeys UNION ALL SELECT 1 FROM signal_identities UNION ALL SELECT 1 FROM signal_kyber_uses UNION ALL SELECT 1 FROM signal_threads UNION ALL SELECT 1 FROM signal_publication UNION ALL SELECT 1 FROM signal_outbox UNION ALL SELECT 1 FROM signal_inbox UNION ALL SELECT 1 FROM signal_drafts LIMIT 1", emptyArray()).use { it.moveToFirst() }
+    val previous = db.rawQuery(
+      """
+      SELECT 1 FROM signal_sessions UNION ALL SELECT 1 FROM signal_prekeys
+      UNION ALL SELECT 1 FROM signal_identities UNION ALL SELECT 1 FROM signal_kyber_uses
+      UNION ALL SELECT 1 FROM signal_threads UNION ALL SELECT 1 FROM signal_publication
+      UNION ALL SELECT 1 FROM signal_outbox UNION ALL SELECT 1 FROM signal_inbox
+      UNION ALL SELECT 1 FROM signal_drafts UNION ALL SELECT 1 FROM signal_control_outbox
+      UNION ALL SELECT 1 FROM signal_control_inbox LIMIT 1
+      """.trimIndent(), emptyArray()
+    ).use { it.moveToFirst() }
     if (previous) throw StorageFailure("SIGNAL_IDENTITY_MISSING")
     val pair = IdentityKeyPair.generate().serialize()
     try {

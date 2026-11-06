@@ -118,20 +118,40 @@ The clock marks a locally pending send. The outlined check marks **Sent** after
 the relay's matching `accepted` response is committed. A failed send shows a
 danger-colored exclamation, with a separate warning for uncertain acceptance.
 
-Sender-visible delivery and read receipts remain deferred. The recipient's
-queue ACK clears the relay's queued event after durable processing. Its
-`ack_ok` confirms queue handling to the recipient. The sender's **Sent**
-indicator records relay acceptance.
+The recipient's queue ACK clears the relay's queued event after durable
+processing. Its `ack_ok` confirms queue handling to the recipient. The
+sender's **Sent** indicator records relay acceptance. **Delivered** uses the
+private native proof of a verified receipt. Read receipts remain deferred.
 
-A future delivery receipt can use the existing opaque `send` relay. The
-recipient would durably enqueue a separate Signal-encrypted control event
-referencing the original event ID after committing the incoming message. The
-sender would verify the receipt's authenticated peer against the original
-outgoing message, then record delivery idempotently before ACKing the receipt's
-own queue event. The receipt would be stored as delivery metadata, and only
-user messages would generate delivery receipts. Clients would need to establish
-receipt support before emitting this payload, since existing clients expect a
-chat message body.
+An application message that explicitly opts in with the encrypted field
+`request_delivery_receipt: 1` commits a receipt obligation with the incoming
+message, Signal state and inbox record. New Android direct messages include
+this opt-in in their ciphertext. Older receivers can still save and ACK the
+ordinary message, and upgraded receivers emit receipts only when asked.
+The existing ACK is queued first. The receipt pump discovers the obligation
+after commit and on reconnect, even if the relay deleted the original event
+and its `ack_ok` was lost.
+
+The native store encrypts a version 1 `delivery_receipt` using the existing
+Signal session and commits the new ratchet state with the exact ciphertext.
+It uses a separate stable UUID in the existing opaque `send` relay and keeps
+the original message UUID inside the ciphertext. The receiving device checks
+the authenticated peer and the original send's opt-in, then commits verified
+delivery before ACKing the control event. Receipts create neither chat rows
+nor receipt obligations. The filled check reads the verified delivery record.
+
+Receipt attempts are accounted for before upload and reuse the committed UUID
+and bytes. A matching `accepted` completes the upload. A lost response or
+`duplicate_event` leaves it ambiguous and eligible for bounded retry. Control
+recovery has its own schedule and does not change manual application Resend.
+The native pump reserves up to eight attempts per obligation within 30 days.
+The retry delay starts at 30 seconds and doubles up to a one-hour cap. A crash
+or unavailable session can consume a reserved attempt before transmission.
+Accepted or stopped rows release ciphertext immediately and are pruned after
+seven days. Ignored or orphaned control inbox entries are pruned after 61 days,
+covering the sender's retry window, the relay's 30-day queue and a day's margin.
+Applied proof stays with the original message. Pruning runs when the pump
+checks for work.
 
 An explicit Send saves locally and starts the upload attempt immediately.
 Existing ciphertext is sent before unrelated public-key publication or session

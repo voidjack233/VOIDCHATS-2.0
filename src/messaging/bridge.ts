@@ -19,6 +19,9 @@ interface NativeModule {
   failOperation(id: string, code: string): Promise<string>;
   failPending(code: string, peerVoidId: string | null): Promise<string>;
   retryOperation(id: string): Promise<string>;
+  claimReceiptUpload?(): Promise<string>;
+  completeReceiptUpload?(id: string, response: string): Promise<string>;
+  stopReceiptUpload?(id: string): Promise<string>;
   applyOnline(fromId: string, exchangeId: string, payload: string, peer: string): Promise<string>;
   applyEvent(event: string, peer: string): Promise<string>;
 }
@@ -59,13 +62,25 @@ export function createMessagingDriver(getModule: () => NativeModule | undefined,
     failOperation: (id, code) => mutation('failOperation', decode.uuid(id), code),
     failPending: (code, peerVoidId) => mutation('failPending', code, peerVoidId === undefined ? null : decode.voidId(peerVoidId)),
     retryOperation: id => mutation('retryOperation', decode.uuid(id)),
+    claimReceiptUpload: async () => {
+      const native = getModule();
+      if (!['android', 'ios'].includes(platform) || typeof native?.claimReceiptUpload !== 'function' ||
+          typeof native.completeReceiptUpload !== 'function' || typeof native.stopReceiptUpload !== 'function') {
+        return {operation: null, nextAttemptAt: null};
+      }
+      return decode.receiptUpload(await call('claimReceiptUpload'));
+    },
+    completeReceiptUpload: (id, response) => mutation('completeReceiptUpload', decode.uuid(id), JSON.stringify(response)),
+    stopReceiptUpload: id => mutation('stopReceiptUpload', decode.uuid(id)),
     applyOnline: async () => { throw new MessagingError('unsupported_message'); },
     applyEvent: async (event: QueueEvent, peer: Person) => {
       const row = decode.record(await call('applyEvent', [JSON.stringify(event), JSON.stringify(decode.person(peer))]));
       if (typeof row.changed !== 'boolean' || row.event_id !== event.event_id || row.sender_void_id !== event.from_void_id) { throw new MessagingError('invalid_response'); }
+      if (row.receiptQueued !== undefined && typeof row.receiptQueued !== 'boolean') { throw new MessagingError('invalid_response'); }
       const diagnosticCode = row.diagnosticCode == null ? null : decode.string(row.diagnosticCode);
       if (diagnosticCode !== null && !/^[A-Z][A-Z0-9_]{0,95}$/.test(diagnosticCode)) { throw new MessagingError('invalid_response'); }
-      return {event_id: decode.uuid(row.event_id), sender_void_id: decode.voidId(row.sender_void_id), changed: row.changed, diagnosticCode};
+      return {event_id: decode.uuid(row.event_id), sender_void_id: decode.voidId(row.sender_void_id), changed: row.changed,
+        diagnosticCode, receiptQueued: row.receiptQueued === true};
     },
   };
 }

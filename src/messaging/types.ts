@@ -32,6 +32,10 @@ export interface NativeOperation {
   purpose: 'setup' | 'application';
   status: 'pending' | 'failed'; errorCode?: string;
 }
+export interface ReceiptUpload {
+  operation: {id: string; peerVoidId: string; payloadBase64: string} | null;
+  nextAttemptAt: number | null;
+}
 export interface MessagingSnapshot {
   sessions: LocalSession[]; outbox: NativeOperation[]; blockedVoidIds: string[];
   prekeyRequests?: PreKeyRequest[];
@@ -49,8 +53,11 @@ export interface MessagingDriver {
   queueMessage(id: string, body: string): Promise<void>;
   completeOperation(id: string, response: unknown): Promise<void>;
   applyOnline(fromId: string, exchangeId: string, payload: string, peer: Person): Promise<void>;
-  applyEvent(event: QueueEvent, peer: Person): Promise<RecipientAck & {changed: boolean; diagnosticCode?: string | null}>;
+  applyEvent(event: QueueEvent, peer: Person): Promise<RecipientAck & {changed: boolean; diagnosticCode?: string | null; receiptQueued?: boolean}>;
   failOperation(id: string, code: string): Promise<void>;
   failPending(code: string, peerVoidId?: string): Promise<void>;
   retryOperation(id: string): Promise<void>;
+  claimReceiptUpload?(): Promise<ReceiptUpload>;
+  completeReceiptUpload?(id: string, response: Accepted): Promise<void>;
+  stopReceiptUpload?(id: string): Promise<void>;
 }

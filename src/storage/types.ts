@@ -124,6 +124,8 @@ export interface MessageRecord {
   body: string | null;
   direction: 'incoming' | 'outgoing';
   deliveryState: DeliveryState;
+  /** Time at which the native store committed authenticated delivery proof. */
+  readonly verifiedDeliveredAt: number | null;
   createdAt: number;
   editedAt: number | null;
   deletedAt: number | null;

@@ -1,6 +1,6 @@
 import {isTimestamp, isVoidId} from '../account/validation';
 import {MessagingError} from './errors';
-import type {MessagingSnapshot, Person, PreKeyErrorCode, ServerFrame} from './types';
+import type {MessagingSnapshot, Person, PreKeyErrorCode, ReceiptUpload, ServerFrame} from './types';
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const invalid = (): never => { throw new MessagingError('invalid_response'); };
@@ -117,4 +117,13 @@ export function snapshot(value: unknown): MessagingSnapshot {
   if (new Set(prekeyRequests.map(item => item.id)).size !== prekeyRequests.length ||
       new Set(prekeyRequests.map(item => item.peer.void_id)).size !== prekeyRequests.length) { return invalid(); }
   return {sessions, outbox, blockedVoidIds: row.blockedVoidIds.map(voidId), prekeyRequests};
+}
+
+export function receiptUpload(value: unknown): ReceiptUpload {
+  const row = record(value, ['operation', 'nextAttemptAt']);
+  const nextAttemptAt = row.nextAttemptAt;
+  if (nextAttemptAt !== null && (typeof nextAttemptAt !== 'number' || !Number.isSafeInteger(nextAttemptAt) || nextAttemptAt < 0)) { return invalid(); }
+  if (row.operation === null) { return {operation: null, nextAttemptAt}; }
+  const item = record(row.operation, ['id', 'peerVoidId', 'payloadBase64']);
+  return {operation: {id: uuid(item.id), peerVoidId: voidId(item.peerVoidId), payloadBase64: base64(item.payloadBase64)}, nextAttemptAt};
 }

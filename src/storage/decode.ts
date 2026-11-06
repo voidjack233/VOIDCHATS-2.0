@@ -111,6 +111,7 @@ export function decodeMessage(value: unknown): MessageRecord {
     id: text(row.id), conversationId: text(row.conversationId), senderVoidId: text(row.senderVoidId),
     body: nullableText(row.body), direction: enumeration(row.direction, ['incoming', 'outgoing']),
     deliveryState: enumeration(row.deliveryState, ['received', 'pending', 'sent', 'delivered', 'read', 'failed']),
+    verifiedDeliveredAt: nullableNumber(row.verifiedDeliveredAt ?? null),
     createdAt: number(row.createdAt), editedAt: nullableNumber(row.editedAt), deletedAt: nullableNumber(row.deletedAt), readAt: nullableNumber(row.readAt),
     reactions: decodeList(row.reactions, entry => {
       const reaction = object(entry);

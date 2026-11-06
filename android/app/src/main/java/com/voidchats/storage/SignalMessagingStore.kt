@@ -1,5 +1,9 @@
 package com.voidchats.storage
 
+import android.util.JsonReader
+import android.util.JsonToken
+import java.io.IOException
+import java.io.StringReader
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
@@ -19,7 +23,20 @@ internal class SignalFailure(val code: String) : RuntimeException("The protected
 /** Signal callbacks, history and transport bookkeeping share a SQLCipher commit.
  * A fresh SignalStore loads every record; a rolled-back operation leaves no
  * cached ratchet that could run ahead of durable state. */
-internal class SignalMessagingStore(private val storage: AppStorage) {
+internal class SignalMessagingStore(
+  private val storage: AppStorage,
+  private val requestDeliveryReceipts: Boolean = false
+) {
+  private companion object {
+    const val DAY_MS = 86_400_000L
+    const val RECEIPT_DEADLINE_MS = 30 * DAY_MS
+    const val RECEIPT_TERMINAL_RETENTION_MS = 7 * DAY_MS
+    const val RECEIPT_DEDUP_RETENTION_MS = 61 * DAY_MS
+    const val RECEIPT_MAX_ATTEMPTS = 8
+    const val RECEIPT_INITIAL_DELAY_MS = 30_000L
+    const val RECEIPT_MAX_DELAY_MS = 3_600_000L
+  }
+
   private enum class VerificationStage { BINDING, BUNDLE_PROCESS, ENCRYPT, PREKEY_PARSE, PREKEY_DECRYPT, MESSAGE_PARSE, MESSAGE_DECRYPT }
   private val db get() = storage.requireDatabase()
   private val manualRetryErrors = setOf(
@@ -125,7 +142,7 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
   fun signAuthChallenge(messageBase64: String): String = MessagingProtocol.base64(
     AccountKeyStore(db).sign(MessagingProtocol.authMessage(messageBase64, identity())))
 
-  private fun ensureThread(person: JSONObject, incoming: Boolean): JSONObject {
+  private fun verifiedThread(person: JSONObject): JSONObject? {
     check(db.inTransaction())
     MessagingProtocol.person(person)
     val peerId = person.getString("void_id")
@@ -134,10 +151,16 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     val contact = one("SELECT identity_public_key FROM contacts WHERE void_id=?", peerId)
     if (contact != null && contact.getString("identity_public_key") != accountKey) throw SignalFailure("SIGNAL_IDENTITY_CHANGED")
     val old = one("SELECT * FROM signal_threads WHERE peer_void_id=?", peerId)
-    if (old != null) {
-      if (old.getString("account_key_base64") != accountKey) throw SignalFailure("SIGNAL_IDENTITY_CHANGED")
-      return old
-    }
+    if (old != null && old.getString("account_key_base64") != accountKey) throw SignalFailure("SIGNAL_IDENTITY_CHANGED")
+    return old
+  }
+
+  private fun ensureThread(person: JSONObject, incoming: Boolean): JSONObject =
+    verifiedThread(person) ?: createThread(person, incoming)
+
+  private fun createThread(person: JSONObject, incoming: Boolean): JSONObject {
+    val peerId = person.getString("void_id")
+    val accountKey = person.getString("auth_public_key")
     val existing = one("SELECT id FROM conversations WHERE kind='direct' AND peer_void_id=?", peerId)
     val conversationId = existing?.getString("id") ?: id()
     if (existing == null) PublicRepositories(db).execute("conversations.save", JSONObject()
@@ -200,6 +223,13 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     val signature = AccountKeyStore(db).sign(bindingMessage(ownId(), 1, registration, key))
     return JSONObject().put("device_id", 1).put("registration_id", registration).put("identity_key", key)
       .put("account_signature", MessagingProtocol.base64(signature))
+  }
+
+  private fun encodeSignalPayload(store: SignalStore, eventId: String, peerId: String, encrypted: CiphertextMessage): String {
+    val payload = ownBinding(store).put("v", 2).put("kind", "signal").put("client_message_id", eventId)
+      .put("from_void_id", ownId()).put("to_void_id", peerId).put("message_type", encrypted.type)
+      .put("ciphertext_base64", MessagingProtocol.base64(encrypted.serialize()))
+    return MessagingProtocol.base64(payload.toString().toByteArray(Charsets.UTF_8))
   }
   private fun verifyBinding(binding: JSONObject, person: JSONObject, store: SignalStore): IdentityKey {
     MessagingProtocol.person(person)
@@ -307,19 +337,18 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
       val store = SignalStore(db)
       if (!store.containsSession(address(peerId))) return@transaction
       val messageId = current.getString("id")
-      val content = JSONObject().put("v", 2).put("client_message_id", messageId).put("from_void_id", ownId())
-        .put("to_void_id", peerId).put("body", current.getString("body")).put("created_at", current.getLong("created_at")).toString().toByteArray(Charsets.UTF_8)
+      val message = JSONObject().put("v", 2).put("client_message_id", messageId).put("from_void_id", ownId())
+        .put("to_void_id", peerId).put("body", current.getString("body")).put("created_at", current.getLong("created_at"))
+      if (requestDeliveryReceipts) message.put("request_delivery_receipt", 1)
+      val content = message.toString().toByteArray(Charsets.UTF_8)
       try {
         val encrypted = signal(VerificationStage.ENCRYPT) {
           SessionCipher(store, store, store, store, store, address(ownId()), address(peerId)).encrypt(content)
         }
         encryptedAt = now()
-        val payload = ownBinding(store).put("v", 2).put("kind", "signal").put("client_message_id", messageId)
-          .put("from_void_id", ownId()).put("to_void_id", peerId).put("message_type", encrypted.type)
-          .put("ciphertext_base64", MessagingProtocol.base64(encrypted.serialize()))
-        val encoded = MessagingProtocol.base64(payload.toString().toByteArray(Charsets.UTF_8))
-        db.execSQL("INSERT INTO signal_outbox(event_id,peer_void_id,payload_base64,status,created_at) VALUES(?,?,?,'pending',?)",
-          arrayOf(messageId, peerId, encoded, current.getLong("created_at")))
+        val encoded = encodeSignalPayload(store, messageId, peerId, encrypted)
+        db.execSQL("INSERT INTO signal_outbox(event_id,peer_void_id,payload_base64,status,created_at,receipt_requested) VALUES(?,?,?,'pending',?,?)",
+          arrayOf(messageId, peerId, encoded, current.getLong("created_at"), if (requestDeliveryReceipts) 1 else 0))
         db.execSQL("DELETE FROM signal_drafts WHERE message_id=?", arrayOf(messageId))
         committedEventId = messageId
         committedPayload = encoded
@@ -350,32 +379,173 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     return state()
   }
 
+  private fun saveReceiptObligation(sender: String, originalId: String) {
+    check(db.inTransaction())
+    val createdAt = now()
+    db.execSQL("INSERT INTO signal_control_outbox(event_id,peer_void_id,original_message_id,created_at,next_attempt_at,deadline_at) VALUES(?,?,?,?,?,?)",
+      arrayOf(id(), sender, originalId, createdAt, createdAt, createdAt + RECEIPT_DEADLINE_MS))
+  }
+
+  private fun pruneReceiptRecovery(at: Long) {
+    db.execSQL("""
+      UPDATE signal_control_outbox SET status='stopped',payload_base64=NULL,next_attempt_at=?
+      WHERE status IN ('ready','pending') AND (deadline_at<=? OR (attempts>=? AND next_attempt_at<=?)
+        OR EXISTS (SELECT 1 FROM messaging_blocks WHERE peer_void_id=signal_control_outbox.peer_void_id))
+    """.trimIndent(), arrayOf(at, at, RECEIPT_MAX_ATTEMPTS, at))
+    db.execSQL("DELETE FROM signal_control_outbox WHERE status IN ('accepted','stopped') AND next_attempt_at<=?",
+      arrayOf(at - RECEIPT_TERMINAL_RETENTION_MS))
+    db.execSQL("""
+      DELETE FROM signal_control_inbox WHERE recorded_at<=? AND (disposition='ignored'
+        OR NOT EXISTS (SELECT 1 FROM messages WHERE id=signal_control_inbox.original_message_id))
+    """.trimIndent(), arrayOf(at - RECEIPT_DEDUP_RETENTION_MS))
+  }
+
+  private fun encryptReceipt(claim: JSONObject, sender: String): String? = storage.transaction {
+    val eventId = claim.getString("event_id")
+    val peerId = claim.getString("peer_void_id")
+    val remote = address(peerId)
+    val store = SignalStore(db)
+    val pinned = store.getIdentity(remote) ?: return@transaction null
+    val session = store.loadSession(remote)
+    if (!session.hasSenderChain() || session.remoteIdentityKey != pinned) return@transaction null
+    val content = JSONObject().put("v", 1).put("type", "delivery_receipt").put("client_message_id", eventId)
+      .put("original_message_id", claim.getString("original_message_id")).put("from_void_id", sender)
+      .put("to_void_id", peerId).toString().toByteArray(Charsets.UTF_8)
+    try {
+      val encrypted = signal(VerificationStage.ENCRYPT) {
+        SessionCipher(store, store, store, store, store, address(sender), remote).encrypt(content)
+      }
+      val payload = encodeSignalPayload(store, eventId, peerId, encrypted)
+      db.execSQL("UPDATE signal_control_outbox SET status='pending',payload_base64=? WHERE event_id=? AND status='ready'",
+        arrayOf(payload, eventId))
+      payload
+    } finally { content.fill(0) }
+  }
+
+  fun claimReceiptUpload(): JSONObject = signal {
+    val sender = ownId()
+    val at = now()
+    val claim = storage.transaction {
+      pruneReceiptRecovery(at)
+      val row = one("""
+        SELECT event_id,peer_void_id,original_message_id,payload_base64,attempts FROM signal_control_outbox
+        WHERE status IN ('ready','pending') AND attempts<? AND next_attempt_at<=? AND deadline_at>?
+        ORDER BY next_attempt_at,created_at,event_id LIMIT 1
+      """.trimIndent(), RECEIPT_MAX_ATTEMPTS.toString(), at.toString(), at.toString()) ?: return@transaction null
+      val attempts = row.getInt("attempts")
+      val delay = minOf(RECEIPT_MAX_DELAY_MS, RECEIPT_INITIAL_DELAY_MS shl attempts)
+      // Reserve before encryption or network work so a crash or unavailable
+      // session cannot leave this receipt immediately due on every restart.
+      db.execSQL("UPDATE signal_control_outbox SET attempts=attempts+1,next_attempt_at=? WHERE event_id=?",
+        arrayOf(at + delay, row.getString("event_id")))
+      row
+    }
+    val operation = claim?.let { row ->
+      val payload = if (!row.isNull("payload_base64")) row.getString("payload_base64") else {
+        // The encryption transaction has rolled back if libsignal fails. The
+        // retry reservation still stands and other obligations can proceed.
+        try { signal { encryptReceipt(row, sender) } } catch (_: SignalFailure) { null }
+      }
+      payload?.let { JSONObject().put("id", row.getString("event_id")).put("peerVoidId", row.getString("peer_void_id")).put("payloadBase64", it) }
+    }
+    val next = one("""
+      SELECT MIN(MIN(next_attempt_at,deadline_at)) AS next_at FROM signal_control_outbox WHERE status IN ('ready','pending')
+    """.trimIndent())?.opt("next_at")
+    JSONObject().put("operation", operation ?: JSONObject.NULL).put("nextAttemptAt", next ?: JSONObject.NULL)
+  }
+
+  fun completeReceiptUpload(operationId: String, response: Any): JSONObject {
+    validateAcceptance(operationId, response)
+    storage.transaction {
+      db.execSQL("UPDATE signal_control_outbox SET status='accepted',payload_base64=NULL,next_attempt_at=? WHERE event_id=? AND status='pending'",
+        arrayOf(now(), operationId))
+    }
+    return JSONObject()
+  }
+
+  fun stopReceiptUpload(operationId: String): JSONObject {
+    storage.transaction {
+      db.execSQL("UPDATE signal_control_outbox SET status='stopped',payload_base64=NULL,next_attempt_at=? WHERE event_id=? AND status IN ('ready','pending')",
+        arrayOf(now(), MessagingProtocol.uuid(operationId)))
+    }
+    return JSONObject()
+  }
+
+  private fun receiptOriginalId(text: String, sender: String, recipient: String, eventId: String): String {
+    // Read controls strictly so coercion, duplicate fields or trailing data
+    // cannot change the meaning of an authenticated receipt.
+    require(text.length <= 1024)
+    val fields = mutableMapOf<String, String>()
+    try {
+      JsonReader(StringReader(text)).use { reader ->
+        reader.beginObject()
+        while (reader.hasNext()) {
+          val key = reader.nextName()
+          val token = if (key == "v") JsonToken.NUMBER else JsonToken.STRING
+          require(key !in fields && reader.peek() == token)
+          fields[key] = reader.nextString()
+        }
+        reader.endObject()
+        require(reader.peek() == JsonToken.END_DOCUMENT)
+      }
+    } catch (_: IOException) { throw IllegalArgumentException() }
+    require(fields.size == 6 && fields["v"] == "1" && fields["type"] == "delivery_receipt" &&
+      fields["from_void_id"] == sender && fields["to_void_id"] == recipient && fields["client_message_id"] == eventId)
+    return MessagingProtocol.uuid(requireNotNull(fields["original_message_id"])).also { require(it != eventId) }
+  }
+
+  private fun applyDeliveryReceipt(sender: String, recipient: String, eventId: String, originalId: String,
+    digest: String, conversationId: String): Boolean {
+    check(db.inTransaction())
+    val eligible = one("""
+      SELECT m.id FROM messages m JOIN signal_outbox o ON o.event_id=m.id
+      WHERE m.id=? AND m.conversation_id=? AND m.direction='outgoing' AND m.sender_void_id=? AND m.deleted_at IS NULL
+        AND o.peer_void_id=? AND o.receipt_requested=1
+        AND NOT EXISTS (SELECT 1 FROM signal_control_inbox WHERE original_message_id=m.id AND disposition='applied')
+    """.trimIndent(), originalId, conversationId, recipient, sender) != null
+    if (eligible) {
+      // The existing trigger requires pending/failed to advance through sent.
+      db.execSQL("UPDATE messages SET delivery_state='sent' WHERE id=? AND delivery_state IN ('pending','failed')", arrayOf(originalId))
+      db.execSQL("UPDATE messages SET delivery_state='delivered' WHERE id=? AND delivery_state='sent'", arrayOf(originalId))
+      db.execSQL("UPDATE signal_outbox SET status='done',error_code=NULL WHERE event_id=?", arrayOf(originalId))
+    }
+    db.execSQL("INSERT INTO signal_control_inbox(sender_void_id,event_id,original_message_id,payload_hash,disposition,recorded_at) VALUES(?,?,?,?,?,?)",
+      arrayOf(sender, eventId, originalId, digest, if (eligible) "applied" else "ignored", now()))
+    return eligible
+  }
+
   fun applyEvent(event: JSONObject, person: JSONObject): JSONObject = signal {
-    identity(); require(event.optString("type") == "event")
+    val recipient = ownId(); require(event.optString("type") == "event")
     val sender = MessagingProtocol.voidId(MessagingProtocol.text(event, "from_void_id", 19))
     val eventId = MessagingProtocol.uuid(MessagingProtocol.text(event, "event_id", 36))
-    require(person.getString("void_id") == sender && sender != ownId())
+    require(person.getString("void_id") == sender && sender != recipient)
     val encoded = MessagingProtocol.text(event, "payload_base64", 1_398_104)
     val digest = MessagingProtocol.hash(encoded)
     val created = RegistrationProof.timestampMillis(MessagingProtocol.text(event, "created_at", 40))
     require(RegistrationProof.timestampMillis(MessagingProtocol.text(event, "expires_at", 40)) > created)
     // All failure paths roll back and throw; none returns an ACK token.
+    var stage = SignalDecryptDiagnostics.CommitStage.RECEIVE
     val result = storage.transaction {
-      val old = one("SELECT payload_hash FROM signal_inbox WHERE sender_void_id=? AND event_id=?", sender, eventId)
+      val old = one("SELECT payload_hash FROM signal_inbox WHERE sender_void_id=? AND event_id=? " +
+        "UNION ALL SELECT payload_hash FROM signal_control_inbox WHERE sender_void_id=? AND event_id=? LIMIT 1",
+        sender, eventId, sender, eventId)
       if (old != null) {
         if (old.getString("payload_hash") != digest) throw SignalFailure("SIGNAL_EVENT_ID_CONFLICT")
+        stage = SignalDecryptDiagnostics.CommitStage.DUPLICATE
         return@transaction JSONObject().put("sender_void_id", sender).put("event_id", eventId).put("changed", false)
       }
       if (one("SELECT id FROM messages WHERE id=?", eventId) != null) throw SignalFailure("SIGNAL_EVENT_ID_CONFLICT")
-      available(sender)
+      val existingThread = verifiedThread(person)
       val payload = JSONObject(MessagingProtocol.bytes(encoded).toString(Charsets.UTF_8))
       require(payload.getInt("v") == 2 && payload.getString("kind") == "signal" &&
-        payload.getString("from_void_id") == sender && payload.getString("to_void_id") == ownId() &&
+        payload.getString("from_void_id") == sender && payload.getString("to_void_id") == recipient &&
         payload.getString("client_message_id") == eventId)
-      val row = ensureThread(person, true); val store = SignalStore(db)
+      val store = SignalStore(db)
+      val senderAddress = address(sender)
+      val previousIdentity = existingThread?.let { store.getIdentity(senderAddress) }
       val boundKey = signal(VerificationStage.BINDING) { verifyBinding(payload, person, store) }
       val ciphertext = MessagingProtocol.bytes(MessagingProtocol.text(payload, "ciphertext_base64", 1_398_104))
-      val cipher = SessionCipher(store, store, store, store, store, address(ownId()), address(sender))
+      val cipher = SessionCipher(store, store, store, store, store, address(recipient), senderAddress)
       val plaintext = when (payload.getInt("message_type")) {
         CiphertextMessage.PREKEY_TYPE -> {
           val message = signal(VerificationStage.PREKEY_PARSE) { PreKeySignalMessage(ciphertext) }
@@ -393,25 +563,38 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
         else -> throw SignalFailure("SIGNAL_UNSUPPORTED_MESSAGE")
       }
       try {
-        val session = store.loadSession(address(sender))
+        val session = store.loadSession(senderAddress)
         if (session.remoteIdentityKey != boundKey) throw SignalFailure("SIGNAL_ACCOUNT_BINDING_FAILED")
-        val content = JSONObject(plaintext.toString(Charsets.UTF_8))
+        val text = plaintext.toString(Charsets.UTF_8)
+        val content = JSONObject(text)
+        if (content.has("type")) {
+          if (content.opt("type") != "delivery_receipt") throw SignalFailure("SIGNAL_UNSUPPORTED_MESSAGE")
+          if (existingThread == null || previousIdentity != boundKey) throw SignalFailure("SIGNAL_ACCOUNT_BINDING_FAILED")
+          val originalId = receiptOriginalId(text, sender, recipient, eventId)
+          val changed = applyDeliveryReceipt(sender, recipient, eventId, originalId, digest, existingThread.getString("conversation_id"))
+          stage = SignalDecryptDiagnostics.CommitStage.RECEIPT
+          return@transaction JSONObject().put("sender_void_id", sender).put("event_id", eventId).put("changed", changed)
+        }
         val at = content.getLong("created_at")
         require(content.getInt("v") == 2 && content.getString("client_message_id") == eventId &&
-          content.getString("from_void_id") == sender && content.getString("to_void_id") == ownId() && at in 0..9_007_199_254_740_991L)
+          content.getString("from_void_id") == sender && content.getString("to_void_id") == recipient && at in 0..9_007_199_254_740_991L)
         val body = MessagingProtocol.text(content, "body", 60_000)
         require(body.isNotBlank() && body.toByteArray(Charsets.UTF_8).size <= 60_000)
+        val row = existingThread ?: createThread(person, true)
         PublicRepositories(db).execute("messages.save", JSONObject().put("id", eventId).put("conversationId", row.getString("conversation_id"))
           .put("senderVoidId", sender).put("body", body).put("direction", "incoming").put("deliveryState", "received").put("createdAt", at))
         db.execSQL("INSERT INTO crypto_events(id,local_id,operation,outcome,plaintext,ciphertext,sender_identity,sender_signature_public_key,created_at) VALUES(?,?,'signal_decrypt','ok',?,?,?,?,?)",
           arrayOf(id(), identity().getString("localDeviceId"), plaintext, ciphertext, boundKey.serialize(), MessagingProtocol.bytes(person.getString("auth_public_key"), 32), now()))
         db.execSQL("INSERT INTO signal_inbox(sender_void_id,event_id,payload_hash,message_id) VALUES(?,?,?,?)", arrayOf(sender, eventId, digest, eventId))
+        val receiptQueued = content.opt("v") == 2 && content.opt("request_delivery_receipt") == 1
+        if (receiptQueued) saveReceiptObligation(sender, eventId)
         db.execSQL("UPDATE signal_threads SET last_error=NULL WHERE conversation_id=?", arrayOf(row.getString("conversation_id")))
+        JSONObject().put("sender_void_id", sender).put("event_id", eventId).put("changed", true).apply {
+          if (receiptQueued) put("receiptQueued", true)
+        }
       } finally { plaintext.fill(0) }
-      JSONObject().put("sender_void_id", sender).put("event_id", eventId).put("changed", true)
     }
     diagnosticAfterCommit {
-      val stage = if (result.getBoolean("changed")) SignalDecryptDiagnostics.CommitStage.RECEIVE else SignalDecryptDiagnostics.CommitStage.DUPLICATE
       SignalDecryptDiagnostics.logCommittedEvent(stage, ownId(), eventId, encoded)
     }
     result
@@ -437,10 +620,14 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     return JSONObject().put("count", count)
   }
 
-  fun completeOperation(operationId: String, response: Any): JSONObject {
+  private fun validateAcceptance(operationId: String, response: Any) {
     val accepted = MessagingProtocol.objectValue(response)
     require(accepted.getString("type") == "accepted" && accepted.getString("event_id") == MessagingProtocol.uuid(operationId))
     require(RegistrationProof.timestampMillis(accepted.getString("expires_at")) > RegistrationProof.timestampMillis(accepted.getString("created_at")))
+  }
+
+  fun completeOperation(operationId: String, response: Any): JSONObject {
+    validateAcceptance(operationId, response)
     storage.transaction {
       if (one("SELECT event_id FROM signal_outbox WHERE event_id=?", operationId) == null) throw SignalFailure("SIGNAL_OPERATION_MISSING")
       db.execSQL("UPDATE signal_outbox SET status='done',error_code=NULL WHERE event_id=?", arrayOf(operationId))
@@ -488,7 +675,12 @@ internal class SignalMessagingStore(private val storage: AppStorage) {
     return state()
   }
   fun blockPeer(peerId: String): JSONObject {
-    storage.transaction { db.execSQL("INSERT OR IGNORE INTO messaging_blocks(peer_void_id,created_at) VALUES(?,?)", arrayOf(MessagingProtocol.voidId(peerId), now())) }
+    storage.transaction {
+      val at = now()
+      db.execSQL("INSERT OR IGNORE INTO messaging_blocks(peer_void_id,created_at) VALUES(?,?)", arrayOf(MessagingProtocol.voidId(peerId), at))
+      db.execSQL("UPDATE signal_control_outbox SET status='stopped',payload_base64=NULL,next_attempt_at=? WHERE peer_void_id=? AND status IN ('ready','pending')",
+        arrayOf(at, peerId))
+    }
     return state()
   }
 }

@@ -7,12 +7,19 @@ import com.facebook.react.bridge.ReactMethod
 
 /** Public transport artifacts only; private Signal keys never cross this bridge. */
 internal class VoidMessagingModule(context: ReactApplicationContext, private val storage: AppStorage) : ReactContextBaseJavaModule(context) {
-  private val messaging = SignalMessagingStore(storage)
+  // Older readers ignore the encrypted opt-in. Only a recipient that supports
+  // receipts will answer it, and a sender without this opt-in receives none.
+  private val messaging = SignalMessagingStore(storage, requestDeliveryReceipts = true)
   override fun getName() = "VoidMessaging"
   @ReactMethod fun signAuthChallenge(messageBase64: String, promise: Promise) = storage.submit(promise) { messaging.signAuthChallenge(messageBase64) }
   @ReactMethod fun getState(promise: Promise) = storage.submit(promise) { messaging.state().toString() }
   @ReactMethod fun logSendDiagnostics(conversationId: String, promise: Promise) = storage.submit(promise) { messaging.logSendDiagnostics(conversationId).toString() }
   @ReactMethod fun resumePending(promise: Promise) = storage.submit(promise) { messaging.resumePending().toString() }
+  @ReactMethod fun claimReceiptUpload(promise: Promise) = storage.submit(promise) { messaging.claimReceiptUpload().toString() }
+  @ReactMethod fun completeReceiptUpload(operationId: String, responseJSON: String, promise: Promise) = storage.submit(promise) {
+    messaging.completeReceiptUpload(operationId, MessagingProtocol.parse(responseJSON)).toString()
+  }
+  @ReactMethod fun stopReceiptUpload(operationId: String, promise: Promise) = storage.submit(promise) { messaging.stopReceiptUpload(operationId).toString() }
   @ReactMethod fun getPreKeyPublication(promise: Promise) = storage.submit(promise) { messaging.getPreKeyPublication().toString() }
   @ReactMethod fun completePreKeyPublication(publicationId: String, promise: Promise) = storage.submit(promise) { messaging.completePreKeyPublication(publicationId).toString() }
   @ReactMethod fun establishSignalSession(peerJSON: String, bundleBase64: String, promise: Promise) = storage.submit(promise) {

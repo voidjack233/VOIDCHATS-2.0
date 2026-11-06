@@ -3,7 +3,7 @@ import {MessagingClient, type Socket} from './client';
 import {MessagingError, retryable, safeMessagingError} from './errors';
 import {logMessagingDiagnostic} from './diagnostics';
 import {createPreKeyDirectory, type PreKeyDirectory} from './prekeys';
-import type {MessagingDriver, MessagingSnapshot, OnlineEvent, Person, QueueEvent} from './types';
+import type {Accepted, MessagingDriver, MessagingSnapshot, OnlineEvent, Person, QueueEvent} from './types';
 
 export interface MessagingState extends MessagingSnapshot {
   status: 'disabled' | 'connecting' | 'online' | 'offline'; error: string | null;
@@ -30,6 +30,11 @@ export class MessagingController {
   private flushRequested = false;
   private inbound: Promise<void> = Promise.resolve();
   private inboundCount = 0;
+  private ackPriority: {ready: Promise<void>; release(): void} | null = null;
+  private receiptTimer: {id: ReturnType<typeof setTimeout>; at: number} | null = null;
+  private receiptUploading = false;
+  private receiptWakeRequested = false;
+  private receiptNotBefore = 0;
   private readonly client: MessagingClient;
   private readonly prekeys: PreKeyDirectory;
   constructor(private readonly options: Options) {
@@ -38,6 +43,7 @@ export class MessagingController {
       onDisconnect: error => {
         if (this.active) {
           const generation = this.generation;
+          this.clearReceiptTimer();
           this.publish({status: 'offline', error: error.message});
           this.pendingFailure = this.options.driver.failPending(error.code);
           this.pendingFailure.then(() => this.reload(generation, true)).catch(value => {
@@ -70,6 +76,9 @@ export class MessagingController {
     const interruptedScope = this.active ? this.scope : null;
     this.active = false; this.generation++; this.scope = '';
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.clearReceiptTimer();
+    this.ackPriority?.release(); this.ackPriority = null;
+    this.receiptUploading = false; this.receiptWakeRequested = false; this.receiptNotBefore = 0;
     this.client.reset(); this.refreshing = null; this.flushing = null; this.flushRequested = false;
     this.inbound = Promise.resolve(); this.inboundCount = 0;
     if (interruptedScope) { this.recordInterruptedSends(interruptedScope); }
@@ -109,6 +118,7 @@ export class MessagingController {
         await this.client.connect();
         if (!this.current(generation)) { return; }
         this.backoff = 1000; this.publish({status: 'online', error: null});
+        this.wakeReceiptUploads(generation);
         // Encrypt drafts for existing sessions before publishing or claiming
         // public prekeys for new contacts over this authenticated connection.
         await this.options.driver.resumePending();
@@ -234,6 +244,76 @@ export class MessagingController {
     }).catch(() => {});
     return action;
   }
+  private clearReceiptTimer() {
+    if (this.receiptTimer) { clearTimeout(this.receiptTimer.id); this.receiptTimer = null; }
+  }
+  private canUploadReceipts(generation: number): boolean {
+    return this.current(generation) && this.state.status === 'online';
+  }
+  private wakeReceiptUploads(generation: number, at = Date.now()) {
+    const {driver} = this.options;
+    if (!this.canUploadReceipts(generation) || !driver.claimReceiptUpload || !driver.completeReceiptUpload || !driver.stopReceiptUpload) { return; }
+    if (this.receiptUploading) { this.receiptWakeRequested = true; return; }
+    const scheduledAt = Math.max(at, this.receiptNotBefore);
+    if (this.receiptTimer && this.receiptTimer.at <= scheduledAt) { return; }
+    this.clearReceiptTimer();
+    const id = setTimeout(() => {
+      this.receiptTimer = null;
+      this.uploadReceipt(generation).catch(() => {});
+    }, Math.min(2_147_483_647, Math.max(0, scheduledAt - Date.now())));
+    this.receiptTimer = {id, at: scheduledAt};
+  }
+  private async uploadReceipt(generation: number) {
+    const {driver} = this.options;
+    if (!this.canUploadReceipts(generation) || this.receiptUploading || !driver.claimReceiptUpload ||
+        !driver.completeReceiptUpload || !driver.stopReceiptUpload) { return; }
+    this.receiptUploading = true;
+    let nextAttemptAt: number | null = null;
+    try {
+      // Yield only until inbound processing queues its ACK on the shared socket.
+      while (this.ackPriority && this.canUploadReceipts(generation)) { await this.ackPriority.ready; }
+      if (!this.canUploadReceipts(generation)) { return; }
+      const {operation, nextAttemptAt: nativeNextAttemptAt} = await driver.claimReceiptUpload();
+      nextAttemptAt = nativeNextAttemptAt;
+      if (!operation) { return; }
+      // A new inbound event can arrive while SQLCipher is preparing the upload.
+      while (this.ackPriority && this.canUploadReceipts(generation)) { await this.ackPriority.ready; }
+      if (!this.canUploadReceipts(generation)) { return; }
+      nextAttemptAt = Date.now();
+      this.receiptNotBefore = nextAttemptAt + 1000;
+      if (this.state.blockedVoidIds.includes(operation.peerVoidId)) {
+        await driver.stopReceiptUpload(operation.id);
+        return;
+      }
+      let accepted: Accepted;
+      try {
+        accepted = await this.client.send(operation.id, operation.peerVoidId, operation.payloadBase64,
+          () => this.canUploadReceipts(generation) && !this.state.blockedVoidIds.includes(operation.peerVoidId));
+      } catch (value) {
+        const error = safeMessagingError(value);
+        if (this.current(generation) && (error.code === 'invalid_frame' || error.code === 'not_found')) {
+          await driver.stopReceiptUpload(operation.id);
+        }
+        // Ambiguous acceptance leaves the same saved ciphertext eligible on the native schedule.
+        throw error;
+      }
+      if (this.current(generation)) { await driver.completeReceiptUpload(operation.id, accepted); }
+    } catch (value) {
+      if (!this.current(generation)) { return; }
+      const error = safeMessagingError(value);
+      logMessagingDiagnostic('receipt_upload_failed', () => ({code: error.code, diagnostic_code: error.diagnosticCode}));
+      // Give the connection time to recover without draining other ready receipts in a tight loop.
+      this.receiptNotBefore = Date.now() + 5000;
+      nextAttemptAt = this.receiptNotBefore;
+    } finally {
+      if (generation === this.generation) {
+        this.receiptUploading = false;
+        const requested = this.receiptWakeRequested; this.receiptWakeRequested = false;
+        if (requested) { this.wakeReceiptUploads(generation); }
+        else if (nextAttemptAt !== null) { this.wakeReceiptUploads(generation, nextAttemptAt); }
+      }
+    }
+  }
   private receive(event: OnlineEvent | QueueEvent) {
     if (!this.active) { return; }
     if (this.inboundCount >= 32) { this.client.reset(); this.publish({status: 'offline', error: new MessagingError('overloaded').message}); this.schedule(); return; }
@@ -244,18 +324,33 @@ export class MessagingController {
       if (event.type === 'online_event') {
         throw new MessagingError('unsupported_message');
       } else {
-        const peer = await this.client.lookup(event.from_void_id);
-        if (!this.current(generation)) { return; }
-        logMessagingDiagnostic('event_apply', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: event.event_id,
-          sender_void_id: event.from_void_id, created_at: event.created_at, expires_at: event.expires_at}));
-        const ack = await this.options.driver.applyEvent(event, peer);
-        if (!this.current(generation)) { return; }
-        logMessagingDiagnostic('event_local_commit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: ack.event_id,
-          sender_void_id: ack.sender_void_id, changed: ack.changed}));
-        if (ack.diagnosticCode) { incomingError = safeMessagingError({code: ack.diagnosticCode}); }
-        await this.reload(generation, ack.changed);
-        // The native result is returned only after history/dedup commits.
-        await this.client.ack({sender_void_id: ack.sender_void_id, event_id: ack.event_id});
+        let release!: () => void;
+        const ready = new Promise<void>(resolve => { release = resolve; });
+        const priority = {ready, release};
+        this.ackPriority = priority;
+        let receiptQueued = false;
+        let acknowledgement: Promise<void>;
+        try {
+          const peer = await this.client.lookup(event.from_void_id);
+          if (!this.current(generation)) { return; }
+          logMessagingDiagnostic('event_apply', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: event.event_id,
+            sender_void_id: event.from_void_id, created_at: event.created_at, expires_at: event.expires_at}));
+          const ack = await this.options.driver.applyEvent(event, peer);
+          if (!this.current(generation)) { return; }
+          receiptQueued = ack.receiptQueued === true;
+          logMessagingDiagnostic('event_local_commit', () => ({local_void_id: this.options.identity()?.accountVoidId, event_id: ack.event_id,
+            sender_void_id: ack.sender_void_id, changed: ack.changed}));
+          if (ack.diagnosticCode) { incomingError = safeMessagingError({code: ack.diagnosticCode}); }
+          await this.reload(generation, ack.changed);
+          if (!this.current(generation)) { return; }
+          // The native result is returned only after history/dedup commits.
+          acknowledgement = this.client.ack({sender_void_id: ack.sender_void_id, event_id: ack.event_id});
+        } finally {
+          priority.release();
+          if (this.ackPriority === priority) { this.ackPriority = null; }
+          if (receiptQueued) { this.wakeReceiptUploads(generation); }
+        }
+        await acknowledgement;
       }
       if (this.current(generation)) { await this.flush(); }
       if (this.current(generation) && incomingError) { this.publish({error: incomingError.message}); }

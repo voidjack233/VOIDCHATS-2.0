@@ -18,7 +18,8 @@ internal object SignalDecryptDiagnostics {
     MESSAGE("message_decrypt", "SIGNAL_MESSAGE_DECRYPT_INVALID_MESSAGE")
   }
   enum class CommitStage(val label: String) {
-    ENCRYPT("encrypt_committed"), RECEIVE("receive_committed"), DUPLICATE("receive_duplicate_committed")
+    ENCRYPT("encrypt_committed"), RECEIVE("receive_committed"), RECEIPT("receive_receipt_committed"),
+    DUPLICATE("receive_duplicate_committed")
   }
   private enum class Reason {
     MAC_MISMATCH, PQ_RATCHET_ERROR, CIPHERTEXT_DECRYPT_ERROR, FUTURE_COUNTER,

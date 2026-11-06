@@ -2,6 +2,7 @@ const stages = new Set([
   'socket_connect', 'auth_ok', 'socket_disconnect', 'socket_reset', 'socket_transmit', 'reconnect',
   'prekeys_publish', 'prekeys_published', 'prekeys_claim', 'prekeys_claimed', 'prekey_setup_failed',
   'send_submit', 'send_accepted', 'send_local_commit', 'send_failed', 'pending_sends_failed',
+  'receipt_upload_failed',
   'event_received', 'event_apply', 'event_local_commit', 'event_failed', 'ack_submit', 'ack_ok', 'retry',
 ] as const);
 type DiagnosticStage = typeof stages extends Set<infer T> ? T : never;
