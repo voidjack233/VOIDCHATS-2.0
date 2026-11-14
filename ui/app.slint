@@ -1,0 +1,1028 @@
+import { CheckBox, LineEdit, ScrollView, Spinner } from "std-widgets.slint";
+
+export struct Conversation { name: string, initials: string, preview: string, time: string, unread: string, index: int }
+export struct Message { text: string, time: string, outgoing: bool }
+
+global Theme {
+    out property <color> background: #0c1118;
+    out property <color> surface: #151c25;
+    out property <color> elevated: #1d2732;
+    out property <color> primary: #f4f6f8;
+    out property <color> secondary: #b0bac5;
+    out property <color> accent: #95afe9;
+    out property <color> sidebar: #101720;
+    out property <color> divider: #26313d;
+    out property <color> selected: #263448;
+    out property <color> outgoing: #344969;
+    out property <color> avatar: #405471;
+    out property <color> avatar-text: #e4edff;
+    out property <color> message-time: #c5d1e1;
+    out property <color> error: #ffb4a9;
+}
+
+component Clickable inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> selected;
+    out property <bool> hovered: hit-area.has-hover;
+    out property <bool> pressed: hit-area.pressed;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: key-focus;
+    border-radius: 10px;
+    border-width: key-focus.has-focus ? 2px : 0px;
+    border-color: Theme.accent;
+    background: root.pressed ? Theme.outgoing : root.selected ? Theme.selected : root.hovered ? Theme.elevated : transparent;
+
+    hit-area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { key-focus.focus(); root.clicked(); }
+    }
+    key-focus := FocusScope {
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component Action inherits Clickable {
+    in property <bool> primary;
+    in property <string> caption: root.label;
+    height: 44px;
+    min-width: action-text.preferred-width + 28px;
+    horizontal-stretch: 0;
+    background: !root.enabled ? Theme.elevated
+        : root.primary && !root.pressed && !root.hovered ? Theme.accent
+        : root.pressed ? Theme.outgoing : root.selected || root.hovered ? Theme.selected : Theme.elevated;
+
+    action-text := Text {
+        text: root.caption;
+        color: !root.enabled ? Theme.secondary
+            : root.primary && !root.pressed && !root.hovered ? Theme.background : Theme.primary;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+component Avatar inherits Rectangle {
+    in property <string> initials;
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    background: Theme.avatar;
+
+    Text {
+        text: root.initials;
+        color: Theme.avatar-text;
+        font-size: 13px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+enum NavIcon { chats, requests, contacts, settings }
+
+component NavItem inherits Clickable {
+    in property <NavIcon> icon;
+    in property <float> label-opacity;
+    height: 44px;
+    clip: true;
+
+    Image {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: 20px;
+        height: 20px;
+        source: root.icon == NavIcon.chats ? @image-url("icons/chats.svg")
+            : root.icon == NavIcon.requests ? @image-url("icons/requests.svg")
+            : root.icon == NavIcon.contacts ? @image-url("icons/contacts.svg")
+            : @image-url("icons/settings.svg");
+        colorize: root.selected ? Theme.accent : Theme.secondary;
+        accessible-role: none;
+    }
+
+    if root.selected: Rectangle {
+        x: 4px;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+
+    Text {
+        x: 44px;
+        width: self.preferred-width;
+        opacity: root.label-opacity;
+        text: root.label;
+        color: root.selected ? Theme.primary : Theme.secondary;
+        font-size: 14px;
+        font-weight: root.selected ? 600 : 400;
+        vertical-alignment: center;
+        overflow: clip;
+        accessible-role: none;
+    }
+}
+
+component SettingDetail inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> description;
+    min-height: content.min-height;
+    background: Theme.elevated;
+    border-radius: 12px;
+
+    content := VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+        Text { text: root.label; color: Theme.primary; font-size: 14px; font-weight: 600; }
+        Text { text: root.value; color: Theme.accent; font-size: 14px; }
+        Text { text: root.description; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
+    }
+}
+
+component ConversationRow inherits Clickable {
+    in property <Conversation> entry;
+    height: 64px;
+    label: root.entry.name + (root.entry.unread != "" ? ", " + root.entry.unread + " unread" : "");
+
+    Avatar {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        initials: root.entry.initials;
+    }
+
+    VerticalLayout {
+        x: 64px;
+        width: parent.width - 76px;
+        height: parent.height;
+        alignment: center;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            Text {
+                text: root.entry.name;
+                color: Theme.primary;
+                font-size: 14px;
+                font-weight: 600;
+                overflow: elide;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            if root.entry.time != "": Text {
+                text: root.entry.time;
+                color: Theme.secondary;
+                font-size: 11px;
+                horizontal-stretch: 0;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            height: 20px;
+            spacing: 8px;
+
+            Text {
+                text: root.entry.preview;
+                color: Theme.secondary;
+                font-size: 12px;
+                overflow: elide;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+            if root.entry.unread != "": Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                background: Theme.accent;
+                Text {
+                    text: root.entry.unread;
+                    color: Theme.sidebar;
+                    font-size: 10px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+}
+
+component SetupStep inherits Rectangle {
+    in property <string> label;
+    in property <int> number;
+    in property <int> current-page;
+    private property <bool> current: root.number == root.current-page;
+    private property <bool> completed: root.number < root.current-page;
+
+    width: 28px;
+    height: 28px;
+    border-radius: 14px;
+    background: root.current ? Theme.accent : Theme.elevated;
+    accessible-role: text;
+    accessible-label: root.label + (root.current ? ", current step" : root.completed ? ", completed" : "");
+    animate background { duration: 160ms; easing: ease-out; }
+
+    Text {
+        text: root.completed ? "✓" : "" + root.number;
+        color: root.current ? Theme.background : root.completed ? Theme.accent : Theme.secondary;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+component SetupPage inherits Rectangle {
+    in property <int> page;
+    in property <int> current-page;
+    in property <bool> show-steps;
+    in property <bool> busy;
+    in property <bool> can-retry;
+    in property <bool> retry-storage;
+    in property <string> status;
+    in property <string> error;
+    in-out property <bool> security-acknowledged;
+    in-out property <bool> terms-acknowledged;
+    in property <length> gutter;
+    in property <length> reading-width;
+    in property <length> heading-size;
+    in property <length> top-padding;
+
+    private property <bool> active: root.page == root.current-page;
+
+    changed active => {
+        if root.active { setup-content.content-y = 0px; }
+    }
+
+    setup-content := ScrollView {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.active;
+        horizontal-scrollbar-policy: always-off;
+        content-width: self.visible-width;
+
+        VerticalLayout {
+            padding-top: root.page == 1 ? setup-content.visible-height * 0.34
+                : root.top-padding;
+            padding-bottom: 32px;
+            padding-left: root.gutter;
+            padding-right: root.gutter;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                max-width: root.reading-width;
+                min-height: step-content.min-height;
+
+                step-content := VerticalLayout {
+                    spacing: 16px;
+
+                    Text {
+                        text: root.page == -1 ? "Opening VOID"
+                            : root.page == 1 ? "Welcome to VOID"
+                            : root.page == 2 ? "How VOID works"
+                            : root.page == 3 ? "Security notice"
+                            : root.page == 4 ? "Terms of service"
+                            : root.retry-storage ? "Open your local identity"
+                            : !root.can-retry ? "Account setup needs attention"
+                            : "Create your VOID account";
+                        color: Theme.primary;
+                        font-size: root.heading-size;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+
+                    if root.show-steps: Text {
+                        text: root.page == 1 ? "Set up a desktop account to get your VOID-ID."
+                            : root.page == 2 ? "Your VOID-ID is the public identifier issued by VOID. Your private account key proves ownership."
+                            : root.page == 3 ? "Windows protects your private key under your Windows user profile. Keep your local VOID data. Account recovery and enrollment from Android are unavailable in this release."
+                            : root.page == 4 ? "The final Terms of Service are unavailable in this preview. The next step lets you choose whether to register a real VOID account."
+                            : "VOID receives your public key and proof of ownership. Your private key stays on this device.";
+                        color: Theme.secondary;
+                        font-size: 16px;
+                        wrap: word-wrap;
+                    }
+                    if root.page == 2: Text {
+                        text: "Messaging in this desktop preview uses example conversations.";
+                        color: Theme.secondary;
+                        font-size: 16px;
+                        wrap: word-wrap;
+                    }
+                    if root.page == 3: CheckBox {
+                        min-height: 44px;
+                        enabled: root.active;
+                        text: "I understand how my account key is protected.";
+                        checked <=> root.security-acknowledged;
+                    }
+                    if root.page == 4: CheckBox {
+                        min-height: 44px;
+                        enabled: root.active;
+                        text: "I understand the current preview limitations.";
+                        checked <=> root.terms-acknowledged;
+                    }
+                    if root.active && root.busy: HorizontalLayout {
+                        spacing: 12px;
+                        min-height: 44px;
+                        Spinner { width: 20px; height: 20px; }
+                        Text {
+                            text: root.status;
+                            color: Theme.secondary;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if root.active && root.error != "": Text {
+                        text: root.error;
+                        color: Theme.error;
+                        font-size: 15px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+}
+
+component AccountSetup inherits Rectangle {
+    in-out property <int> page;
+    in property <bool> busy;
+    in property <bool> can-retry;
+    in property <bool> retry-storage;
+    in property <string> status;
+    in property <string> error;
+    in property <string> action;
+    callback submit();
+
+    private property <bool> security-acknowledged;
+    private property <bool> terms-acknowledged;
+    private property <bool> show-steps: root.page > 0 && !root.retry-storage && root.can-retry;
+    private property <length> gutter: max(40px, (root.width - root.reading-width) / 2);
+    private property <length> reading-width: 600px;
+    private property <float> slide-position: max(0, root.page);
+    animate slide-position { duration: 360ms; easing: ease-in-out; }
+
+    background: Theme.background;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        VerticalLayout {
+            Rectangle {
+                height: 80px;
+                background: Theme.sidebar;
+
+                HorizontalLayout {
+                    padding-left: root.gutter;
+                    padding-right: root.gutter;
+                    spacing: 12px;
+
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 10px;
+                        background: Theme.accent;
+                        Text {
+                            text: "V";
+                            color: Theme.sidebar;
+                            font-size: 21px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        text: "VOID";
+                        color: Theme.primary;
+                        font-size: 20px;
+                        font-weight: 800;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.divider; }
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+
+                // Move all pages together so outgoing and incoming content cannot overlap.
+                for step in [-1, 1, 2, 3, 4, 5]: SetupPage {
+                    x: (max(0, step) - root.slide-position) * self.width;
+                    visible: self.x > -self.width && self.x < self.width;
+                    width: parent.width;
+                    height: parent.height;
+                    page: step;
+                    current-page: root.page;
+                    show-steps: root.show-steps;
+                    busy: root.busy;
+                    can-retry: root.can-retry;
+                    retry-storage: root.retry-storage;
+                    status: root.status;
+                    error: root.error;
+                    security-acknowledged <=> root.security-acknowledged;
+                    terms-acknowledged <=> root.terms-acknowledged;
+                    gutter: root.gutter;
+                    reading-width: root.reading-width;
+                    heading-size: root.width < 960px ? 32px : 38px;
+                    top-padding: root.height < 600px ? 40px : 64px;
+                }
+            }
+
+            if root.page > 0 && (root.show-steps || root.can-retry): Rectangle {
+                height: 84px;
+                background: Theme.sidebar;
+
+                Rectangle { y: 0; height: 1px; background: Theme.divider; }
+
+                if root.show-steps: HorizontalLayout {
+                    alignment: center;
+                    padding-top: 20px;
+                    padding-bottom: 20px;
+                    spacing: 8px;
+
+                    for step[index] in ["Welcome", "How VOID works", "Security notice", "Terms of service", "Create account"]: HorizontalLayout {
+                        spacing: 8px;
+                        if index > 0: Rectangle {
+                            width: 14px;
+                            height: 1px;
+                            y: (parent.height - self.height) / 2;
+                            background: index < root.page ? Theme.accent : Theme.divider;
+                        }
+                        SetupStep {
+                            y: (parent.height - self.height) / 2;
+                            label: step;
+                            number: index + 1;
+                            current-page: root.page;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: root.gutter;
+                    padding-right: root.gutter;
+                    padding-top: 20px;
+                    padding-bottom: 20px;
+                    spacing: 12px;
+
+                    if root.page > 1 && (root.page < 5 || (root.error == "" && !root.retry-storage)): Action {
+                        label: "Back";
+                        enabled: !root.busy;
+                        clicked => { root.page -= 1; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.page < 5: Action {
+                        label: root.page == 1 ? "Get started" : "Continue";
+                        primary: true;
+                        enabled: (root.page != 3 || root.security-acknowledged)
+                            && (root.page != 4 || root.terms-acknowledged);
+                        clicked => { root.page += 1; }
+                    }
+                    if root.page == 5: Action {
+                        label: root.action;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => { root.submit(); }
+                    }
+                }
+            }
+        }
+    }
+}
+export component AppWindow inherits Window {
+    title: root.setup-page == 0 ? "VOID — Desktop preview" : "VOID — Account setup";
+    preferred-width: 1080px;
+    preferred-height: 680px;
+    min-width: 850px;
+    min-height: 560px;
+    background: Theme.background;
+    in property <string> account-void-id;
+    in-out property <int> setup-page: -1;
+    in property <bool> setup-busy: true;
+    in property <bool> setup-can-retry: true;
+    in property <bool> setup-retry-storage;
+    in property <string> setup-status: "Opening protected local storage…";
+    in property <string> setup-error;
+    in property <string> setup-action: "Create account";
+    callback submit-setup();
+
+    in property <[Conversation]> conversations;
+    in property <[Message]> messages;
+    in property <string> selected-name: "Maya Chen";
+    in property <string> selected-initials: "MC";
+    in property <int> selected-index: 0;
+    in-out property <int> request-index: -1;
+    in-out property <string> section: "Chats";
+    in-out property <string> search: "";
+    in-out property <string> new-id: "";
+    in-out property <string> id-error: "";
+    in-out property <string> draft: "";
+    in property <int> row-count: 0;
+    in property <int> message-count: 0;
+    callback select-conversation(int);
+    callback change-section(string);
+    callback open-new-chat(string);
+    callback search-changed(string);
+    callback send-message(string);
+    callback draft-changed(string);
+
+    private property <bool> compact: self.width < 1000px;
+    private property <bool> show-list: root.section == "Chats" || root.section == "Contacts" || root.section == "Requests";
+    private property <bool> reviewing-requests: root.section == "Requests";
+    private property <bool> empty-request: root.reviewing-requests && root.request-index < 0;
+    private property <string> settings-section: "Appearance";
+    private property <length> collapsed-rail-width: 64px;
+    private property <length> list-start: root.collapsed-rail-width + 1px;
+    private property <length> requested-list-width: 280px;
+    private property <length> divider-width: 9px;
+    private property <length> min-list-width: 220px;
+    private property <length> max-list-width: min(480px, root.width - root.list-start - root.divider-width - 330px);
+    private property <length> header-height: 72px;
+    private property <length> list-gutter: 16px;
+    private property <length> chat-gutter: root.compact ? 20px : 28px;
+
+    if root.setup-page != 0: AccountSetup {
+        page <=> root.setup-page;
+        busy: root.setup-busy;
+        can-retry: root.setup-can-retry;
+        retry-storage: root.setup-retry-storage;
+        status: root.setup-status;
+        error: root.setup-error;
+        action: root.setup-action;
+        submit => { root.submit-setup(); }
+    }
+
+    if root.setup-page == 0: Rectangle {
+        sidebar := Rectangle {
+            private property <bool> section-hovered: main-navigation.has-hover || settings-navigation.has-hover;
+            private property <length> expanded-width: 168px;
+            private property <float> reveal-progress: clamp(
+                (self.width - root.collapsed-rail-width) / (self.expanded-width - root.collapsed-rail-width), 0, 1);
+            private property <float> label-opacity: self.reveal-progress * self.reveal-progress *
+                (3 - 2 * self.reveal-progress);
+            x: 0;
+            width: self.section-hovered ? self.expanded-width : root.collapsed-rail-width;
+            z: 1;
+            background: Theme.sidebar;
+            clip: true;
+            animate width {
+                duration: sidebar.section-hovered ? 180ms : 150ms;
+                easing: ease-in-out;
+            }
+
+            // Keep clicks on the overlay from reaching covered conversation rows.
+            TouchArea {}
+
+            VerticalLayout {
+                Rectangle {
+                    height: root.header-height;
+                    Rectangle {
+                        x: 14px;
+                        y: (parent.height - self.height) / 2;
+                        width: 36px;
+                        height: 36px;
+                        border-radius: 10px;
+                        background: Theme.accent;
+                        Text {
+                            text: "V";
+                            color: Theme.sidebar;
+                            font-size: 21px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        x: 62px;
+                        width: self.preferred-width;
+                        opacity: sidebar.label-opacity;
+                        text: "VOID";
+                        color: Theme.primary;
+                        font-size: 20px;
+                        font-weight: 800;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.divider; }
+
+                main-navigation := TouchArea {
+                    height: main-buttons.min-height;
+
+                    main-buttons := VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+                        NavItem {
+                            label: "Chats";
+                            icon: NavIcon.chats;
+                            label-opacity: sidebar.label-opacity;
+                            selected: root.section == "Chats" || root.section == "New message";
+                            clicked => { root.change-section("Chats"); }
+                        }
+                        NavItem {
+                            label: "Requests";
+                            icon: NavIcon.requests;
+                            label-opacity: sidebar.label-opacity;
+                            selected: root.section == "Requests";
+                            clicked => { root.change-section("Requests"); }
+                        }
+                        NavItem {
+                            label: "Contacts";
+                            icon: NavIcon.contacts;
+                            label-opacity: sidebar.label-opacity;
+                            selected: root.section == "Contacts";
+                            clicked => { root.change-section("Contacts"); }
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                settings-navigation := TouchArea {
+                    height: settings-buttons.min-height;
+
+                    settings-buttons := VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-bottom: 10px;
+                        spacing: 8px;
+                        Rectangle { height: 1px; background: Theme.divider; }
+                        NavItem {
+                            label: "Settings";
+                            icon: NavIcon.settings;
+                            label-opacity: sidebar.label-opacity;
+                            selected: root.section == "Settings";
+                            clicked => { root.change-section("Settings"); }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle { x: sidebar.width; z: 1; width: 1px; background: Theme.divider; }
+
+        list-pane := Rectangle {
+            x: root.list-start;
+            width: clamp(root.requested-list-width, root.min-list-width, root.max-list-width);
+            background: Theme.surface;
+
+            VerticalLayout {
+                Rectangle {
+                    height: root.header-height;
+                    HorizontalLayout {
+                        padding-left: root.list-gutter;
+                        padding-right: root.list-gutter;
+                        padding-top: (root.header-height - 44px) / 2;
+                        padding-bottom: self.padding-top;
+                        spacing: 8px;
+
+                        Text {
+                            text: root.section;
+                            color: Theme.primary;
+                            font-size: 22px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if root.show-list && !root.reviewing-requests: Action {
+                            label: "+ New message";
+                            caption: "+ New";
+                            primary: true;
+                            clicked => { root.change-section("New message"); }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.divider; }
+
+                if root.show-list: VerticalLayout {
+                    padding: root.list-gutter;
+                    spacing: 12px;
+
+                    LineEdit {
+                        height: 44px;
+                        placeholder-text: root.section == "Contacts" ? "Search contacts"
+                            : root.reviewing-requests ? "Search requests" : "Search conversations";
+                        text <=> root.search;
+                        edited => { root.search-changed(self.text); }
+                    }
+
+                    Text {
+                        text: root.section == "Contacts" ? "Example contacts"
+                            : root.reviewing-requests ? "Example incoming requests" : "Recent conversations";
+                        color: Theme.secondary;
+                        font-size: 12px;
+                        font-weight: 600;
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        horizontal-scrollbar-policy: always-off;
+                        content-width: self.visible-width;
+
+                        VerticalLayout {
+                            spacing: 4px;
+
+                            if root.row-count == 0: Text {
+                                text: root.search != "" ? "No results found."
+                                    : root.reviewing-requests ? "No incoming requests."
+                                    : root.section == "Contacts" ? "People you message will appear here."
+                                    : "Select New message to start a conversation.";
+                                color: Theme.secondary;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+
+                            for conversation in root.conversations: ConversationRow {
+                                entry: conversation;
+                                selected: root.reviewing-requests ? conversation.index == root.request-index
+                                    : root.section == "Chats" && conversation.index == root.selected-index;
+                                clicked => { root.select-conversation(conversation.index); }
+                            }
+
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                }
+
+                if root.section == "New message": VerticalLayout {
+                    padding: root.list-gutter;
+                    spacing: 12px;
+
+                    Action {
+                        label: "‹ Back to chats";
+                        clicked => { root.change-section("Chats"); }
+                    }
+                    Text {
+                        text: "VOID-ID";
+                        color: Theme.primary;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    LineEdit {
+                        height: 44px;
+                        placeholder-text: "Enter a VOID-ID";
+                        text <=> root.new-id;
+                        edited => { root.id-error = ""; }
+                        accepted => { root.open-new-chat(self.text); }
+                    }
+                    if root.id-error != "": Text {
+                        text: root.id-error;
+                        color: Theme.error;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Action {
+                        label: "Open conversation";
+                        enabled: root.new-id != "";
+                        primary: true;
+                        clicked => { root.open-new-chat(root.new-id); }
+                    }
+                    Text {
+                        text: "Preview only. VOID-IDs aren’t looked up and messages stay on this device.";
+                        color: Theme.secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.section == "Settings": VerticalLayout {
+                    padding: root.list-gutter;
+                    spacing: 8px;
+                    for category in ["Appearance", "Account", "About"]: Action {
+                        label: category;
+                        selected: root.settings-section == category;
+                        clicked => { root.settings-section = category; }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+        }
+
+        divider := TouchArea {
+            x: list-pane.x + list-pane.width;
+            width: root.divider-width;
+            mouse-cursor: col-resize;
+
+            moved => {
+                if self.pressed {
+                    root.requested-list-width = clamp(list-pane.width + self.mouse-x - self.pressed-x,
+                        root.min-list-width, root.max-list-width);
+                }
+            }
+
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                width: divider.pressed || divider.has-hover || resize-focus.has-focus ? 2px : 1px;
+                background: divider.pressed || divider.has-hover || resize-focus.has-focus ? Theme.accent : Theme.divider;
+            }
+
+            resize-focus := FocusScope {
+                width: 0;
+                key-pressed(event) => {
+                    if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                        root.requested-list-width = clamp(list-pane.width + (event.text == Key.LeftArrow ? -16px : 16px),
+                            root.min-list-width, root.max-list-width);
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+
+        chat-pane := Rectangle {
+            x: divider.x + divider.width;
+            width: parent.width - self.x;
+
+            if root.section == "Settings": VerticalLayout {
+                Rectangle {
+                    height: root.header-height;
+                    background: Theme.surface;
+                    Text {
+                        x: root.chat-gutter;
+                        text: root.settings-section;
+                        color: Theme.primary;
+                        font-size: 16px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                VerticalLayout {
+                    padding: root.chat-gutter;
+                    SettingDetail {
+                        label: root.settings-section == "Appearance" ? "Theme"
+                            : root.settings-section == "Account" ? "VOID-ID" : "VOID Desktop";
+                        value: root.settings-section == "Appearance" ? "Dark"
+                            : root.settings-section == "Account" ? root.account-void-id : "Native preview";
+                        description: root.settings-section == "Appearance" ? "The desktop preview uses the VOID dark palette."
+                            : root.settings-section == "Account" ? "Your account is stored on this device."
+                            : "Example conversations are available for this session only.";
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+
+            if root.empty-request: VerticalLayout {
+                padding: root.chat-gutter;
+                spacing: 8px;
+                alignment: center;
+                Text {
+                    text: "Select a request";
+                    color: Theme.primary;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Open an example request to read its first message.";
+                    color: Theme.secondary;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if root.section != "Settings" && !root.empty-request: VerticalLayout {
+                Rectangle {
+                    height: root.header-height;
+                    background: Theme.surface;
+
+                    Avatar {
+                        x: root.chat-gutter;
+                        y: (parent.height - self.height) / 2;
+                        initials: root.selected-initials;
+                    }
+
+                    VerticalLayout {
+                        x: root.chat-gutter + 52px;
+                        width: parent.width - self.x - root.chat-gutter;
+                        alignment: center;
+                        spacing: 4px;
+
+                        Text {
+                            text: root.selected-name;
+                            color: Theme.primary;
+                            font-size: 16px;
+                            font-weight: 700;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.reviewing-requests ? "Example incoming request"
+                                : "Local preview · Messages stay on this device";
+                            color: Theme.secondary;
+                            font-size: 12px;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.divider; }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.visible-width;
+
+                    VerticalLayout {
+                        padding: root.chat-gutter;
+                        spacing: 8px;
+
+                        Rectangle { vertical-stretch: 1; }
+
+                        if root.message-count == 0: Text {
+                            text: "No messages yet";
+                            color: Theme.secondary;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+
+                        for message in root.messages: HorizontalLayout {
+                            if message.outgoing: Rectangle { horizontal-stretch: 1; }
+                            Rectangle {
+                                width: min(380px, (chat-pane.width - 2 * root.chat-gutter) * 0.78,
+                                    max(body.preferred-width, timestamp.preferred-width) + 2 * bubble-content.padding-left);
+                                min-height: bubble-content.min-height;
+                                border-radius: 12px;
+                                background: message.outgoing ? Theme.outgoing : Theme.elevated;
+
+                                bubble-content := VerticalLayout {
+                                    padding: 8px;
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 2px;
+
+                                    body := Text {
+                                        text: message.text;
+                                        color: Theme.primary;
+                                        font-size: 14px;
+                                        wrap: word-wrap;
+                                    }
+                                    timestamp := Text {
+                                        text: message.time;
+                                        color: Theme.message-time;
+                                        font-size: 11px;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                            }
+                            if !message.outgoing: Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                }
+
+                if !root.reviewing-requests: Rectangle { height: 1px; background: Theme.divider; }
+
+                if !root.reviewing-requests: HorizontalLayout {
+                    padding-left: root.chat-gutter;
+                    padding-right: root.chat-gutter;
+                    padding-top: 14px;
+                    padding-bottom: 14px;
+                    spacing: 12px;
+
+                    composer := LineEdit {
+                        height: 44px;
+                        text <=> root.draft;
+                        placeholder-text: "Write a demo message…";
+                        edited => { root.draft-changed(self.text); }
+                        accepted => { root.send-message(self.text); }
+                    }
+                    Action {
+                        label: "Send";
+                        primary: true;
+                        enabled: composer.text != "";
+                        clicked => { root.send-message(composer.text); composer.focus(); }
+                    }
+                }
+            }
+        }
+    }
+}
