@@ -14,9 +14,17 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# A clean Windows GNU build of vendored OpenSSL needs MSYS2 Perl and GNU Make on PATH.
+rusqlite = { version = "0.42", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
 
 [build-dependencies]
 slint-build = "1"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.18.1"

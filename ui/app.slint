@@ -1,7 +1,8 @@
-import { CheckBox, LineEdit, ScrollView, Spinner } from "std-widgets.slint";
+import { CheckBox, LineEdit, ScrollView, Spinner, TextEdit } from "std-widgets.slint";
 
-export struct Conversation { name: string, initials: string, preview: string, time: string, unread: string, index: int }
-export struct Message { text: string, time: string, outgoing: bool }
+export struct StoredConversation { id: string, title: string, activity: string }
+export struct StoredContact { title: string, void-id: string }
+export struct StoredMessage { body: string, time: string, outgoing: bool }
 
 global Theme {
     out property <color> background: #0c1118;
@@ -14,9 +15,6 @@ global Theme {
     out property <color> divider: #26313d;
     out property <color> selected: #263448;
     out property <color> outgoing: #344969;
-    out property <color> avatar: #405471;
-    out property <color> avatar-text: #e4edff;
-    out property <color> message-time: #c5d1e1;
     out property <color> error: #ffb4a9;
 }
 
@@ -58,7 +56,6 @@ component Clickable inherits Rectangle {
 
 component Action inherits Clickable {
     in property <bool> primary;
-    in property <string> caption: root.label;
     height: 44px;
     min-width: action-text.preferred-width + 28px;
     horizontal-stretch: 0;
@@ -67,29 +64,11 @@ component Action inherits Clickable {
         : root.pressed ? Theme.outgoing : root.selected || root.hovered ? Theme.selected : Theme.elevated;
 
     action-text := Text {
-        text: root.caption;
+        text: root.label;
         color: !root.enabled ? Theme.secondary
             : root.primary && !root.pressed && !root.hovered ? Theme.background : Theme.primary;
         font-size: 13px;
         font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        accessible-role: none;
-    }
-}
-
-component Avatar inherits Rectangle {
-    in property <string> initials;
-    width: 40px;
-    height: 40px;
-    border-radius: 20px;
-    background: Theme.avatar;
-
-    Text {
-        text: root.initials;
-        color: Theme.avatar-text;
-        font-size: 13px;
-        font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
         accessible-role: none;
@@ -153,76 +132,31 @@ component SettingDetail inherits Rectangle {
         spacing: 8px;
         Text { text: root.label; color: Theme.primary; font-size: 14px; font-weight: 600; }
         Text { text: root.value; color: Theme.accent; font-size: 14px; }
-        Text { text: root.description; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
+        if root.description != "": Text { text: root.description; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
     }
 }
 
-component ConversationRow inherits Clickable {
-    in property <Conversation> entry;
-    height: 64px;
-    label: root.entry.name + (root.entry.unread != "" ? ", " + root.entry.unread + " unread" : "");
-
-    Avatar {
-        x: 12px;
-        y: (parent.height - self.height) / 2;
-        initials: root.entry.initials;
-    }
+component StorageRow inherits Clickable {
+    in property <string> detail;
+    height: 58px;
 
     VerticalLayout {
-        x: 64px;
-        width: parent.width - 76px;
-        height: parent.height;
-        alignment: center;
+        padding-left: 12px;
+        padding-right: 12px;
         spacing: 4px;
-
-        HorizontalLayout {
-            spacing: 8px;
-
-            Text {
-                text: root.entry.name;
-                color: Theme.primary;
-                font-size: 14px;
-                font-weight: 600;
-                overflow: elide;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-            }
-            if root.entry.time != "": Text {
-                text: root.entry.time;
-                color: Theme.secondary;
-                font-size: 11px;
-                horizontal-stretch: 0;
-                vertical-alignment: center;
-            }
+        alignment: center;
+        Text {
+            text: root.label;
+            color: Theme.primary;
+            font-size: 14px;
+            font-weight: 600;
+            overflow: elide;
         }
-
-        HorizontalLayout {
-            height: 20px;
-            spacing: 8px;
-
-            Text {
-                text: root.entry.preview;
-                color: Theme.secondary;
-                font-size: 12px;
-                overflow: elide;
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-            }
-            if root.entry.unread != "": Rectangle {
-                width: 20px;
-                height: 20px;
-                border-radius: 10px;
-                background: Theme.accent;
-                Text {
-                    text: root.entry.unread;
-                    color: Theme.sidebar;
-                    font-size: 10px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    accessible-role: none;
-                }
-            }
+        Text {
+            text: root.detail;
+            color: Theme.secondary;
+            font-size: 12px;
+            overflow: elide;
         }
     }
 }
@@ -313,17 +247,11 @@ component SetupPage inherits Rectangle {
                     }
 
                     if root.show-steps: Text {
-                        text: root.page == 1 ? "Set up a desktop account to get your VOID-ID."
+                        text: root.page == 1 ? "Create your VOID account to get a VOID-ID."
                             : root.page == 2 ? "Your VOID-ID is the public identifier issued by VOID. Your private account key proves ownership."
                             : root.page == 3 ? "Windows protects your private key under your Windows user profile. Keep your local VOID data. Account recovery and enrollment from Android are unavailable in this release."
                             : root.page == 4 ? "The final Terms of Service are unavailable in this preview. The next step lets you choose whether to register a real VOID account."
                             : "VOID receives your public key and proof of ownership. Your private key stays on this device.";
-                        color: Theme.secondary;
-                        font-size: 16px;
-                        wrap: word-wrap;
-                    }
-                    if root.page == 2: Text {
-                        text: "Messaging in this desktop preview uses example conversations.";
                         color: Theme.secondary;
                         font-size: 16px;
                         wrap: word-wrap;
@@ -515,7 +443,7 @@ component AccountSetup inherits Rectangle {
     }
 }
 export component AppWindow inherits Window {
-    title: root.setup-page == 0 ? "VOID — Desktop preview" : "VOID — Account setup";
+    title: root.setup-page == 0 ? "VOID" : "VOID — Account setup";
     preferred-width: 1080px;
     preferred-height: 680px;
     min-width: 850px;
@@ -530,31 +458,54 @@ export component AppWindow inherits Window {
     in property <string> setup-error;
     in property <string> setup-action: "Create account";
     callback submit-setup();
+    in property <string> connection-status: "Disconnected";
+    callback reconnect();
 
-    in property <[Conversation]> conversations;
-    in property <[Message]> messages;
-    in property <string> selected-name: "Maya Chen";
-    in property <string> selected-initials: "MC";
-    in property <int> selected-index: 0;
-    in-out property <int> request-index: -1;
     in-out property <string> section: "Chats";
-    in-out property <string> search: "";
-    in-out property <string> new-id: "";
-    in-out property <string> id-error: "";
-    in-out property <string> draft: "";
-    in property <int> row-count: 0;
-    in property <int> message-count: 0;
-    callback select-conversation(int);
-    callback change-section(string);
-    callback open-new-chat(string);
-    callback search-changed(string);
-    callback send-message(string);
-    callback draft-changed(string);
+
+    in property <bool> storage-ready;
+    in property <bool> storage-loading: true;
+    in property <string> storage-error;
+    in property <[StoredConversation]> stored-chats;
+    in property <[StoredConversation]> stored-requests;
+    in property <[StoredContact]> stored-contacts;
+    in property <[StoredMessage]> stored-messages;
+    in property <string> selected-conversation;
+    in property <string> conversation-title;
+    in property <bool> conversation-is-request;
+    in-out property <bool> conversation-loading;
+    in-out property <bool> creating-conversation;
+    in-out property <string> conversation-error;
+    in-out property <string> stored-draft;
+    in property <string> draft-status;
+    in property <bool> draft-save-failed;
+    in property <bool> unsaved-draft-failure;
+    in-out property <int> storage-selection-token;
+    in property <int> storage-draft-token;
+    callback retry-storage();
+    callback select-stored-conversation(string);
+    callback create-stored-conversation(string);
+    callback save-stored-draft(string);
+    callback load-stored-draft(string, string);
+    callback report-draft-saved(string, int, bool);
+
+    private property <[StoredConversation]> visible-conversations: root.section == "Requests"
+        ? root.stored-requests : root.stored-chats;
+    private property <bool> show-conversation: root.selected-conversation != "" && !root.creating-conversation
+        && ((root.section == "Requests" && root.conversation-is-request)
+            || (root.section == "Chats" && !root.conversation-is-request));
+
+    function navigate(section: string) {
+        if root.section != section {
+            root.section = section;
+            root.creating-conversation = false;
+            root.conversation-error = "";
+            root.storage-selection-token += 1;
+            root.conversation-loading = false;
+        }
+    }
 
     private property <bool> compact: self.width < 1000px;
-    private property <bool> show-list: root.section == "Chats" || root.section == "Contacts" || root.section == "Requests";
-    private property <bool> reviewing-requests: root.section == "Requests";
-    private property <bool> empty-request: root.reviewing-requests && root.request-index < 0;
     private property <string> settings-section: "Appearance";
     private property <length> collapsed-rail-width: 64px;
     private property <length> list-start: root.collapsed-rail-width + 1px;
@@ -595,7 +546,7 @@ export component AppWindow inherits Window {
                 easing: ease-in-out;
             }
 
-            // Keep clicks on the overlay from reaching covered conversation rows.
+            // Keep clicks on the overlay from reaching the covered pane.
             TouchArea {}
 
             VerticalLayout {
@@ -643,22 +594,22 @@ export component AppWindow inherits Window {
                             label: "Chats";
                             icon: NavIcon.chats;
                             label-opacity: sidebar.label-opacity;
-                            selected: root.section == "Chats" || root.section == "New message";
-                            clicked => { root.change-section("Chats"); }
+                            selected: root.section == "Chats";
+                            clicked => { root.navigate("Chats"); }
                         }
                         NavItem {
                             label: "Requests";
                             icon: NavIcon.requests;
                             label-opacity: sidebar.label-opacity;
                             selected: root.section == "Requests";
-                            clicked => { root.change-section("Requests"); }
+                            clicked => { root.navigate("Requests"); }
                         }
                         NavItem {
                             label: "Contacts";
                             icon: NavIcon.contacts;
                             label-opacity: sidebar.label-opacity;
                             selected: root.section == "Contacts";
-                            clicked => { root.change-section("Contacts"); }
+                            clicked => { root.navigate("Contacts"); }
                         }
                     }
                 }
@@ -679,7 +630,7 @@ export component AppWindow inherits Window {
                             icon: NavIcon.settings;
                             label-opacity: sidebar.label-opacity;
                             selected: root.section == "Settings";
-                            clicked => { root.change-section("Settings"); }
+                            clicked => { root.navigate("Settings"); }
                         }
                     }
                 }
@@ -711,107 +662,77 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        if root.show-list && !root.reviewing-requests: Action {
-                            label: "+ New message";
-                            caption: "+ New";
+                        if root.storage-ready && root.section == "Chats": Action {
+                            label: "+ New";
                             primary: true;
-                            clicked => { root.change-section("New message"); }
+                            enabled: !root.conversation-loading;
+                            clicked => {
+                                root.conversation-error = "";
+                                root.creating-conversation = true;
+                            }
                         }
                     }
                 }
 
                 Rectangle { height: 1px; background: Theme.divider; }
 
-                if root.show-list: VerticalLayout {
+                if root.section != "Settings" && !root.storage-ready: VerticalLayout {
                     padding: root.list-gutter;
                     spacing: 12px;
 
-                    LineEdit {
-                        height: 44px;
-                        placeholder-text: root.section == "Contacts" ? "Search contacts"
-                            : root.reviewing-requests ? "Search requests" : "Search conversations";
-                        text <=> root.search;
-                        edited => { root.search-changed(self.text); }
-                    }
-
                     Text {
-                        text: root.section == "Contacts" ? "Example contacts"
-                            : root.reviewing-requests ? "Example incoming requests" : "Recent conversations";
-                        color: Theme.secondary;
-                        font-size: 12px;
-                        font-weight: 600;
-                    }
-
-                    ScrollView {
-                        vertical-stretch: 1;
-                        horizontal-scrollbar-policy: always-off;
-                        content-width: self.visible-width;
-
-                        VerticalLayout {
-                            spacing: 4px;
-
-                            if root.row-count == 0: Text {
-                                text: root.search != "" ? "No results found."
-                                    : root.reviewing-requests ? "No incoming requests."
-                                    : root.section == "Contacts" ? "People you message will appear here."
-                                    : "Select New message to start a conversation.";
-                                color: Theme.secondary;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                            }
-
-                            for conversation in root.conversations: ConversationRow {
-                                entry: conversation;
-                                selected: root.reviewing-requests ? conversation.index == root.request-index
-                                    : root.section == "Chats" && conversation.index == root.selected-index;
-                                clicked => { root.select-conversation(conversation.index); }
-                            }
-
-                            Rectangle { vertical-stretch: 1; }
-                        }
-                    }
-                }
-
-                if root.section == "New message": VerticalLayout {
-                    padding: root.list-gutter;
-                    spacing: 12px;
-
-                    Action {
-                        label: "‹ Back to chats";
-                        clicked => { root.change-section("Chats"); }
-                    }
-                    Text {
-                        text: "VOID-ID";
-                        color: Theme.primary;
+                        text: root.storage-loading ? "Opening encrypted storage…" : root.storage-error;
+                        color: root.storage-loading ? Theme.secondary : Theme.error;
                         font-size: 13px;
-                        font-weight: 600;
-                    }
-                    LineEdit {
-                        height: 44px;
-                        placeholder-text: "Enter a VOID-ID";
-                        text <=> root.new-id;
-                        edited => { root.id-error = ""; }
-                        accepted => { root.open-new-chat(self.text); }
-                    }
-                    if root.id-error != "": Text {
-                        text: root.id-error;
-                        color: Theme.error;
-                        font-size: 12px;
                         wrap: word-wrap;
                     }
-                    Action {
-                        label: "Open conversation";
-                        enabled: root.new-id != "";
-                        primary: true;
-                        clicked => { root.open-new-chat(root.new-id); }
-                    }
-                    Text {
-                        text: "Preview only. VOID-IDs aren’t looked up and messages stay on this device.";
-                        color: Theme.secondary;
-                        font-size: 12px;
-                        wrap: word-wrap;
+                    if !root.storage-loading: Action {
+                        label: "Try again";
+                        clicked => { root.retry-storage(); }
                     }
                     Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.section != "Settings" && root.storage-ready: ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.visible-width;
+
+                    VerticalLayout {
+                        padding: root.list-gutter;
+                        spacing: 4px;
+
+                        if root.section == "Contacts" ? root.stored-contacts.length == 0 : root.visible-conversations.length == 0: Text {
+                            text: root.section == "Requests" ? "No incoming requests"
+                                : root.section == "Contacts" ? "No contacts yet"
+                                : "No conversations yet";
+                            color: Theme.secondary;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        if root.section == "Contacts": VerticalLayout {
+                            spacing: 4px;
+                            for contact in root.stored-contacts: StorageRow {
+                                label: contact.title;
+                                detail: "VOID-ID " + contact.void-id;
+                                enabled: !root.conversation-loading;
+                                clicked => { root.create-stored-conversation(contact.void-id); }
+                            }
+                        }
+                        if root.section != "Contacts": VerticalLayout {
+                            spacing: 4px;
+                            for chat in root.visible-conversations: StorageRow {
+                                label: chat.title;
+                                detail: chat.activity;
+                                selected: root.show-conversation && root.selected-conversation == chat.id;
+                                enabled: !root.conversation-loading;
+                                clicked => {
+                                    root.creating-conversation = false;
+                                    root.select-stored-conversation(chat.id);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if root.section == "Settings": VerticalLayout {
@@ -823,6 +744,42 @@ export component AppWindow inherits Window {
                         clicked => { root.settings-section = category; }
                     }
                     Rectangle { vertical-stretch: 1; }
+                }
+
+                if root.unsaved-draft-failure: VerticalLayout {
+                    padding-left: root.list-gutter;
+                    padding-right: root.list-gutter;
+                    padding-bottom: 8px;
+                    Text {
+                        text: "A draft could not be saved. Reopen its conversation to retry.";
+                        color: Theme.error;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                HorizontalLayout {
+                    height: 56px;
+                    padding-left: root.list-gutter;
+                    padding-right: root.list-gutter;
+                    padding-top: 6px;
+                    padding-bottom: 6px;
+                    spacing: 8px;
+
+                    Text {
+                        text: root.connection-status;
+                        accessible-label: "Relay connection: " + root.connection-status;
+                        color: root.connection-status == "Authentication failed" ? Theme.error
+                            : root.connection-status == "Connected" ? Theme.accent : Theme.secondary;
+                        font-size: 12px;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    if root.connection-status == "Disconnected" || root.connection-status == "Authentication failed": Action {
+                        label: "Reconnect";
+                        clicked => { root.reconnect(); }
+                    }
                 }
             }
         }
@@ -880,146 +837,163 @@ export component AppWindow inherits Window {
                     padding: root.chat-gutter;
                     SettingDetail {
                         label: root.settings-section == "Appearance" ? "Theme"
-                            : root.settings-section == "Account" ? "VOID-ID" : "VOID Desktop";
+                            : root.settings-section == "Account" ? "VOID-ID" : "VOID";
                         value: root.settings-section == "Appearance" ? "Dark"
-                            : root.settings-section == "Account" ? root.account-void-id : "Native preview";
-                        description: root.settings-section == "Appearance" ? "The desktop preview uses the VOID dark palette."
+                            : root.settings-section == "Account" ? root.account-void-id : "Native app";
+                        description: root.settings-section == "Appearance" ? "Uses the VOID dark palette."
                             : root.settings-section == "Account" ? "Your account is stored on this device."
-                            : "Example conversations are available for this session only.";
+                            : "";
                     }
                     Rectangle { vertical-stretch: 1; }
                 }
             }
 
-            if root.empty-request: VerticalLayout {
+            if root.section != "Settings" && !root.creating-conversation && !root.show-conversation: VerticalLayout {
                 padding: root.chat-gutter;
-                spacing: 8px;
                 alignment: center;
+
                 Text {
-                    text: "Select a request";
-                    color: Theme.primary;
-                    font-size: 18px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    text: "Open an example request to read its first message.";
-                    color: Theme.secondary;
-                    font-size: 13px;
+                    text: root.conversation-error != "" ? root.conversation-error
+                        : root.conversation-loading ? "Loading conversation…"
+                        : !root.storage-ready ? ""
+                        : root.section == "Chats" ? "Open a local conversation to view its history or write a draft."
+                        : root.section == "Requests" ? "Open a saved request to view it here."
+                        : "Open a saved contact to view their conversation.";
+                    color: root.conversation-error != "" ? Theme.error : Theme.secondary;
+                    font-size: 16px;
                     wrap: word-wrap;
                     horizontal-alignment: center;
                 }
             }
 
-            if root.section != "Settings" && !root.empty-request: VerticalLayout {
+            if root.creating-conversation && root.section == "Chats": VerticalLayout {
+                padding: root.chat-gutter;
+                spacing: 12px;
+
+                Text { text: "New local conversation"; color: Theme.primary; font-size: 20px; font-weight: 700; }
+                Text {
+                    text: "Save a conversation and draft on this device. Sending is unavailable in this build.";
+                    color: Theme.secondary;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                Text { text: "Peer VOID-ID"; color: Theme.primary; font-size: 14px; }
+                peer := LineEdit {
+                    accessible-label: "Peer VOID-ID";
+                    height: 44px;
+                    enabled: !root.conversation-loading;
+                    edited => { root.conversation-error = ""; }
+                    accepted => { root.create-stored-conversation(self.text); }
+                }
+                if root.conversation-error != "": Text {
+                    text: root.conversation-error;
+                    color: Theme.error;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Action {
+                        label: "Cancel";
+                        enabled: !root.conversation-loading;
+                        clicked => { root.creating-conversation = false; root.conversation-error = ""; }
+                    }
+                    Action {
+                        label: root.conversation-loading ? "Opening…" : "Open conversation";
+                        primary: true;
+                        enabled: !root.conversation-loading && peer.text != "";
+                        clicked => { root.create-stored-conversation(peer.text); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+
+            if root.show-conversation: VerticalLayout {
                 Rectangle {
                     height: root.header-height;
                     background: Theme.surface;
-
-                    Avatar {
-                        x: root.chat-gutter;
-                        y: (parent.height - self.height) / 2;
-                        initials: root.selected-initials;
-                    }
-
                     VerticalLayout {
-                        x: root.chat-gutter + 52px;
-                        width: parent.width - self.x - root.chat-gutter;
-                        alignment: center;
+                        padding-left: root.chat-gutter;
+                        padding-right: root.chat-gutter;
                         spacing: 4px;
-
+                        alignment: center;
                         Text {
-                            text: root.selected-name;
+                            text: root.conversation-title;
                             color: Theme.primary;
                             font-size: 16px;
                             font-weight: 700;
                             overflow: elide;
                         }
-                        Text {
-                            text: root.reviewing-requests ? "Example incoming request"
-                                : "Local preview · Messages stay on this device";
-                            color: Theme.secondary;
-                            font-size: 12px;
-                            overflow: elide;
-                        }
+                        Text { text: "Local history"; color: Theme.secondary; font-size: 12px; }
                     }
                 }
-
                 Rectangle { height: 1px; background: Theme.divider; }
-
+                if root.conversation-loading || root.conversation-error != "": Text {
+                    text: root.conversation-loading ? "Loading conversation…" : root.conversation-error;
+                    color: root.conversation-loading ? Theme.secondary : Theme.error;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                }
                 ScrollView {
                     vertical-stretch: 1;
                     horizontal-scrollbar-policy: always-off;
                     content-width: self.visible-width;
-
                     VerticalLayout {
                         padding: root.chat-gutter;
                         spacing: 8px;
-
-                        Rectangle { vertical-stretch: 1; }
-
-                        if root.message-count == 0: Text {
-                            text: "No messages yet";
+                        if root.stored-messages.length == 0: Text {
+                            text: "No saved messages";
                             color: Theme.secondary;
                             font-size: 14px;
                             horizontal-alignment: center;
                         }
-
-                        for message in root.messages: HorizontalLayout {
+                        for message in root.stored-messages: HorizontalLayout {
                             if message.outgoing: Rectangle { horizontal-stretch: 1; }
                             Rectangle {
-                                width: min(380px, (chat-pane.width - 2 * root.chat-gutter) * 0.78,
-                                    max(body.preferred-width, timestamp.preferred-width) + 2 * bubble-content.padding-left);
-                                min-height: bubble-content.min-height;
-                                border-radius: 12px;
+                                width: min(380px, (chat-pane.width - 2 * root.chat-gutter) * 0.82,
+                                    max(body.preferred-width, time.preferred-width) + 20px);
+                                min-height: bubble.min-height;
                                 background: message.outgoing ? Theme.outgoing : Theme.elevated;
-
-                                bubble-content := VerticalLayout {
-                                    padding: 8px;
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    spacing: 2px;
-
-                                    body := Text {
-                                        text: message.text;
-                                        color: Theme.primary;
-                                        font-size: 14px;
-                                        wrap: word-wrap;
-                                    }
-                                    timestamp := Text {
-                                        text: message.time;
-                                        color: Theme.message-time;
-                                        font-size: 11px;
-                                        horizontal-alignment: right;
-                                    }
+                                border-radius: 12px;
+                                bubble := VerticalLayout {
+                                    padding: 10px;
+                                    spacing: 3px;
+                                    body := Text { text: message.body; color: Theme.primary; font-size: 14px; wrap: word-wrap; }
+                                    time := Text { text: message.time; color: Theme.secondary; font-size: 11px; horizontal-alignment: right; }
                                 }
                             }
                             if !message.outgoing: Rectangle { horizontal-stretch: 1; }
                         }
                     }
                 }
-
-                if !root.reviewing-requests: Rectangle { height: 1px; background: Theme.divider; }
-
-                if !root.reviewing-requests: HorizontalLayout {
+                if !root.conversation-is-request: Rectangle { height: 1px; background: Theme.divider; }
+                if !root.conversation-is-request: VerticalLayout {
+                    padding: 12px;
                     padding-left: root.chat-gutter;
                     padding-right: root.chat-gutter;
-                    padding-top: 14px;
-                    padding-bottom: 14px;
-                    spacing: 12px;
-
-                    composer := LineEdit {
-                        height: 44px;
-                        text <=> root.draft;
-                        placeholder-text: "Write a demo message…";
-                        edited => { root.draft-changed(self.text); }
-                        accepted => { root.send-message(self.text); }
+                    spacing: 6px;
+                    Text { text: "Draft"; color: Theme.primary; font-size: 13px; font-weight: 600; }
+                    TextEdit {
+                        accessible-label: "Local message draft";
+                        height: 72px;
+                        enabled: !root.conversation-loading;
+                        text <=> root.stored-draft;
+                        edited(text) => { root.save-stored-draft(text); }
                     }
-                    Action {
-                        label: "Send";
-                        primary: true;
-                        enabled: composer.text != "";
-                        clicked => { root.send-message(composer.text); composer.focus(); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.draft-status != "" ? root.draft-status : "Drafts stay on this device";
+                            color: root.draft-save-failed ? Theme.error : Theme.secondary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if root.draft-save-failed: Action {
+                            label: "Retry saving";
+                            enabled: !root.conversation-loading;
+                            clicked => { root.save-stored-draft(root.stored-draft); }
+                        }
                     }
                 }
             }

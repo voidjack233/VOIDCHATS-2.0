@@ -1,14 +1,17 @@
-use super::protocol::{API_BASE, Registration, valid_registration};
+use super::protocol::{API_BASE, Registration, valid_registration, valid_token};
+use crate::local_data::{dpapi, move_file, user_data_dir};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"VOID-ACCOUNT\x01";
+const CONFIRMATION_MAGIC: &[u8] = b"VOID-REGISTRATION\x01";
+const CONFIRMATION_FILE: &str = "account-confirmation.dpapi";
 const MAX_RECORD: u64 = 16_384;
 
 pub(super) struct Identity {
@@ -23,11 +26,34 @@ struct Metadata {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Confirmation {
+    api_base: String,
+    public_key: [u8; 32],
+    challenge_id: String,
+    account: Registration,
+}
+
+#[derive(Deserialize, Serialize)]
 pub(super) enum State {
     Prepared,
     SubmissionPending,
+    SubmissionPendingFor { challenge_id: String },
     AlreadyRegistered,
     Registered(Registration),
+}
+
+impl State {
+    pub fn submission_pending(&self) -> bool {
+        matches!(self, Self::SubmissionPending | Self::SubmissionPendingFor { .. })
+    }
+
+    pub fn challenge_id(&self) -> Option<&str> {
+        match self {
+            Self::SubmissionPendingFor { challenge_id } => Some(challenge_id),
+            _ => None,
+        }
+    }
 }
 
 impl Identity {
@@ -41,12 +67,13 @@ impl Identity {
 pub(super) struct Store(PathBuf);
 
 impl Store {
+    #[cfg(all(test, windows))]
+    pub fn from_test_path(path: PathBuf) -> Self {
+        Self(path)
+    }
+
     pub fn for_user() -> io::Result<Self> {
-        let directory = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .ok_or_else(|| io::Error::other("Windows local app data directory is unavailable"))?;
-        Ok(Self(directory.join("VOIDCHATS").join("Native")))
+        user_data_dir().map(Self)
     }
 
     pub fn lock(&self) -> io::Result<File> {
@@ -58,23 +85,16 @@ impl Store {
     }
 
     pub fn load(&self) -> io::Result<Option<Identity>> {
-        let file = match File::open(self.0.join("account.dpapi")) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
+        let Some(plaintext) = read_protected(&self.0.join("account.dpapi"))? else {
+            return Ok(None);
         };
-        let mut bytes = Vec::new();
-        file.take(MAX_RECORD + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_RECORD {
-            return Err(invalid_record());
-        }
-        let plaintext = platform::dpapi(&bytes, false)?;
         let record = plaintext.strip_prefix(MAGIC).ok_or_else(invalid_record)?;
         let seed: &[u8; 32] = record.get(..32).and_then(|seed| seed.try_into().ok())
             .ok_or_else(invalid_record)?;
         let metadata: Metadata = serde_json::from_slice(&record[32..])
             .map_err(|_| invalid_record())?;
         if metadata.api_base != API_BASE
+            || metadata.state.challenge_id().is_some_and(|id| !valid_token(id))
             || matches!(&metadata.state, State::Registered(account) if !valid_registration(account))
         {
             return Err(invalid_record());
@@ -93,15 +113,61 @@ impl Store {
         plaintext.extend_from_slice(MAGIC);
         plaintext.extend_from_slice(seed);
         plaintext.extend_from_slice(&metadata);
-        let encrypted = platform::dpapi(&plaintext, true)?;
+        self.write_protected("account.dpapi", &plaintext)
+    }
 
+    pub fn has_confirmation(&self) -> io::Result<bool> {
+        self.0.join(CONFIRMATION_FILE).try_exists()
+    }
+
+    // Keep the server confirmation separate so it can survive a failed identity-file replacement.
+    // The caller holds the account lock through both writes.
+    pub fn save_confirmation(&self, identity: &Identity, account: &Registration) -> io::Result<()> {
+        let challenge_id = identity.state.challenge_id().ok_or_else(invalid_record)?;
+        if !valid_token(challenge_id) || !valid_registration(account) {
+            return Err(invalid_record());
+        }
+        let receipt = Confirmation {
+            api_base: API_BASE.into(),
+            public_key: identity.key.verifying_key().to_bytes(),
+            challenge_id: challenge_id.into(),
+            account: account.clone(),
+        };
+        let mut plaintext = CONFIRMATION_MAGIC.to_vec();
+        serde_json::to_writer(&mut plaintext, &receipt)?;
+        self.write_protected(CONFIRMATION_FILE, &plaintext)
+    }
+
+    pub fn load_confirmation(&self, identity: &Identity) -> io::Result<Option<Registration>> {
+        let Some(plaintext) = read_protected(&self.0.join(CONFIRMATION_FILE))? else {
+            return Ok(None);
+        };
+        let record = plaintext.strip_prefix(CONFIRMATION_MAGIC).ok_or_else(invalid_record)?;
+        let receipt: Confirmation = serde_json::from_slice(record).map_err(|_| invalid_record())?;
+        if receipt.api_base != API_BASE
+            || Some(receipt.challenge_id.as_str()) != identity.state.challenge_id()
+            || receipt.public_key != identity.key.verifying_key().to_bytes()
+            || !valid_registration(&receipt.account)
+        {
+            return Err(invalid_record());
+        }
+        Ok(Some(receipt.account))
+    }
+
+    pub fn clear_confirmation(&self) {
+        // A committed identity is authoritative even if cleanup cannot remove the receipt.
+        let _ = fs::remove_file(self.0.join(CONFIRMATION_FILE));
+    }
+
+    fn write_protected(&self, name: &str, plaintext: &[u8]) -> io::Result<()> {
+        let encrypted = dpapi(plaintext, true)?;
         let mut random = [0; 8];
         getrandom::fill(&mut random).map_err(io::Error::other)?;
         let temp = self.0.join(format!("account-{:016x}.tmp", u64::from_ne_bytes(random)));
         let mut file = OpenOptions::new().create_new(true).write(true).open(&temp)?;
         let write = file.write_all(&encrypted).and_then(|()| file.sync_all());
         drop(file);
-        let save = write.and_then(|()| platform::replace(&temp, &self.0.join("account.dpapi")));
+        let save = write.and_then(|()| move_file(&temp, &self.0.join(name), true));
         if save.is_err() {
             let _ = fs::remove_file(&temp);
         }
@@ -109,70 +175,22 @@ impl Store {
     }
 }
 
+fn read_protected(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RECORD {
+        return Err(invalid_record());
+    }
+    dpapi(&bytes, false).map(Some)
+}
+
 fn invalid_record() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Invalid account identity record")
-}
-
-#[cfg(windows)]
-mod platform {
-    use std::{io, os::windows::ffi::OsStrExt, path::Path, ptr, slice};
-    use windows_sys::Win32::{
-        Foundation::LocalFree,
-        Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData},
-        Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW},
-    };
-    use zeroize::{Zeroize, Zeroizing};
-
-    pub fn dpapi(bytes: &[u8], protect: bool) -> io::Result<Zeroizing<Vec<u8>>> {
-        let input = CRYPT_INTEGER_BLOB { cbData: bytes.len() as u32, pbData: bytes.as_ptr().cast_mut() };
-        let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: ptr::null_mut() };
-        // SAFETY: the input lives through the call. DPAPI returns a LocalAlloc buffer on success.
-        let ok = unsafe {
-            if protect {
-                CryptProtectData(&input, ptr::null(), ptr::null(), ptr::null(), ptr::null(),
-                    CRYPTPROTECT_UI_FORBIDDEN, &mut output)
-            } else {
-                CryptUnprotectData(&input, ptr::null_mut(), ptr::null(), ptr::null(), ptr::null(),
-                    CRYPTPROTECT_UI_FORBIDDEN, &mut output)
-            }
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if output.pbData.is_null() {
-            return Err(io::Error::other("DPAPI returned no data"));
-        }
-        // SAFETY: DPAPI owns this non-null buffer until LocalFree. Wipe its contents before freeing it.
-        unsafe {
-            let data = slice::from_raw_parts_mut(output.pbData, output.cbData as usize);
-            let copy = Zeroizing::new(data.to_vec());
-            data.zeroize();
-            LocalFree(output.pbData.cast());
-            Ok(copy)
-        }
-    }
-
-    pub fn replace(source: &Path, destination: &Path) -> io::Result<()> {
-        let from: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
-        let to: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
-        // SAFETY: both Windows path buffers are NUL-terminated and remain live during the call.
-        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-    }
-}
-
-#[cfg(not(windows))]
-mod platform {
-    use std::{io, path::Path};
-    use zeroize::Zeroizing;
-
-    pub fn dpapi(_: &[u8], _: bool) -> io::Result<Zeroizing<Vec<u8>>> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Windows DPAPI is required"))
-    }
-
-    pub fn replace(_: &Path, _: &Path) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Windows storage is required"))
-    }
 }
 
 #[cfg(all(test, windows))]
@@ -198,11 +216,15 @@ pub(super) mod tests {
         pub(in crate::account) fn record_path(&self) -> PathBuf {
             self.0.join("account.dpapi")
         }
+
+        pub(in crate::account) fn path(&self) -> &Path {
+            &self.0
+        }
     }
 
     impl Drop for TestDir {
         fn drop(&mut self) {
-            for file in ["account.dpapi", "account.lock"] {
+            for file in ["account.dpapi", "account.lock", CONFIRMATION_FILE] {
                 let _ = fs::remove_file(self.0.join(file));
             }
             let _ = fs::remove_dir(&self.0);

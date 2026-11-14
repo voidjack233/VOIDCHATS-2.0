@@ -4,7 +4,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{io::Read, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-pub(super) const API_BASE: &str = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz";
+pub(crate) const API_BASE: &str = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz";
 const MAX_RESPONSE: u64 = 16_384;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -139,7 +139,7 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
 }
 
-fn timestamp_ms(value: &str) -> Option<i64> {
+pub(crate) fn timestamp_ms(value: &str) -> Option<i64> {
     let b = value.as_bytes();
     let date = b.get(..19)?;
     for (i, &ch) in date.iter().enumerate() {
@@ -180,7 +180,7 @@ fn parse_retry_after(value: &str) -> Option<u64> {
     (seconds > 0).then_some(seconds)
 }
 
-fn valid_token(value: &str) -> bool {
+pub(crate) fn valid_token(value: &str) -> bool {
     value.len() == 43 && URL_SAFE_NO_PAD.decode(value).is_ok_and(|bytes| bytes.len() == 32)
 }
 
