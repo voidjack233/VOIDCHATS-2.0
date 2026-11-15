@@ -1,4 +1,6 @@
-use super::{ConnectionStatus, SessionIdentity, serve_once};
+use super::{
+    Activity, Connection, ConnectionStatus, Request, RequestError, SessionIdentity, serve_once,
+};
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -17,7 +19,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 const AUDIENCE: &str = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz";
 const VOID_ID: &str = "123";
 const WAIT: Duration = Duration::from_secs(5);
-type Socket = WebSocketStream<TcpStream>;
+pub(crate) type Socket = WebSocketStream<TcpStream>;
 
 fn identity() -> SessionIdentity {
     SessionIdentity {
@@ -26,13 +28,16 @@ fn identity() -> SessionIdentity {
     }
 }
 
-async fn receive_json(socket: &mut Socket) -> Value {
+pub(crate) async fn receive_json(socket: &mut Socket) -> Value {
     let frame = socket.next().await.unwrap().unwrap();
     serde_json::from_str(frame.to_text().unwrap()).unwrap()
 }
 
-async fn send_json(socket: &mut Socket, body: Value) {
-    socket.send(Message::Text(body.to_string().into())).await.unwrap();
+pub(crate) async fn send_json(socket: &mut Socket, body: Value) {
+    socket
+        .send(Message::Text(body.to_string().into()))
+        .await
+        .unwrap();
 }
 
 // Accept on loopback only and require the exact first client command.
@@ -84,8 +89,12 @@ impl Challenge {
     fn message(&self) -> String {
         format!(
             "VOID-NOTHINGNESS:authenticate:v2\n{}\n{}\n{}\n{}\n{}\n{}\n",
-            self.id, self.void_id, self.public_key, self.expires_at,
-            STANDARD.encode(self.audience), self.nonce
+            self.id,
+            self.void_id,
+            self.public_key,
+            self.expires_at,
+            STANDARD.encode(self.audience),
+            self.nonce
         )
     }
 
@@ -97,20 +106,34 @@ impl Challenge {
     }
 }
 
-fn expiry(seconds: i64) -> String {
+pub(crate) fn expiry(seconds: i64) -> String {
     let now: chrono::DateTime<Utc> = std::time::SystemTime::now().into();
     (now + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 async fn verify_proof(socket: &mut Socket, key: &VerifyingKey) {
-    let challenge = Challenge::new(*key);
+    verify_account_proof(socket, key, VOID_ID).await;
+}
+
+pub(crate) async fn verify_account_proof(
+    socket: &mut Socket,
+    key: &VerifyingKey,
+    void_id: &'static str,
+) {
+    let challenge = Challenge {
+        void_id,
+        ..Challenge::new(*key)
+    };
     let message = challenge.message();
     send_json(socket, challenge.frame(message.clone())).await;
     let proof = receive_json(socket).await;
     let signature = proof["signature"].as_str().unwrap();
-    assert_eq!(proof, json!({
-        "type": "auth_proof", "challenge_id": challenge.id, "signature": signature
-    }));
+    assert_eq!(
+        proof,
+        json!({
+            "type": "auth_proof", "challenge_id": challenge.id, "signature": signature
+        })
+    );
     let signature = Signature::from_slice(&STANDARD.decode(signature).unwrap()).unwrap();
     key.verify_strict(message.as_bytes(), &signature).unwrap();
 }
@@ -142,6 +165,52 @@ async fn connect(
 }
 
 #[tokio::test]
+async fn mismatched_prekey_error_interrupts_the_session() {
+    let (endpoint, server) = mock_relay(|mut socket| async move {
+        verify_proof(&mut socket, &identity().key.verifying_key()).await;
+        send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+        let request = receive_json(&mut socket).await;
+        assert_eq!(request["type"], "prekeys_claim");
+        send_json(
+            &mut socket,
+            json!({"type":"prekeys_error",
+            "request_id":"00000000-0000-4000-8000-000000000002", "code":"prekeys_unavailable"}),
+        )
+        .await;
+        expect_no_command(&mut socket).await;
+    })
+    .await;
+    let (events, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let relay = Connection::spawn_with_activity(
+        endpoint,
+        |_| Ok(identity()),
+        |_| {},
+        move |event| {
+            let _ = events.send(event);
+        },
+    )
+    .unwrap();
+    assert!(relay.connect_messaging(VOID_ID.into()));
+    let Some(Activity::Online(session)) = timeout(WAIT, rx.recv()).await.unwrap() else {
+        panic!("missing authenticated session");
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        session.request(Request::PrekeysClaim {
+            request_id: "00000000-0000-4000-8000-000000000001".into(),
+            void_id: "456".into(),
+        })
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(RequestError::Interrupted)));
+    assert!(matches!(
+        timeout(WAIT, rx.recv()).await.unwrap(),
+        Some(Activity::Offline(_))
+    ));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn authenticates_and_keeps_the_connection_without_handling_messages() {
     let identity = identity();
     let verifying_key = identity.key.verifying_key();
@@ -149,16 +218,27 @@ async fn authenticates_and_keeps_the_connection_without_handling_messages() {
         verify_proof(&mut socket, &verifying_key).await;
         send_json(&mut socket, json!({"type": "auth_ok", "void_id": VOID_ID})).await;
         // The relay may send queued data immediately. Only the Pong should come back.
-        send_json(&mut socket, json!({
-            "type": "event", "event_id": "12345678-1234-1234-1234-123456789abc",
-            "from_void_id": "456", "payload_base64": "AA==",
-            "created_at": "2026-11-14T00:00:00Z", "expires_at": "2026-11-14T00:10:00Z"
-        })).await;
+        send_json(
+            &mut socket,
+            json!({
+                "type": "event", "event_id": "12345678-1234-1234-1234-123456789abc",
+                "from_void_id": "456", "payload_base64": "AA==",
+                "created_at": "2026-11-14T00:00:00Z", "expires_at": "2026-11-14T00:10:00Z"
+            }),
+        )
+        .await;
         let payload = b"relay probe".to_vec();
-        socket.send(Message::Ping(payload.clone().into())).await.unwrap();
-        assert_eq!(socket.next().await.unwrap().unwrap(), Message::Pong(payload.into()));
+        socket
+            .send(Message::Ping(payload.clone().into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Pong(payload.into())
+        );
         socket.close(None).await.unwrap();
-    }).await;
+    })
+    .await;
     let (end, seen) = connect(&endpoint, &identity, Duration::from_secs(2)).await;
     server.await.unwrap();
     assert_eq!(end, ConnectionStatus::Disconnected);
@@ -205,7 +285,8 @@ async fn rejects_invalid_or_mismatched_challenges_without_a_proof() {
             }
             send_json(&mut socket, frame).await;
             expect_no_command(&mut socket).await;
-        }).await;
+        })
+        .await;
         let (end, seen) = connect(&endpoint, &identity, Duration::from_secs(2)).await;
         server.await.unwrap();
         assert_eq!(end, ConnectionStatus::AuthenticationFailed, "{variant}");
@@ -224,7 +305,8 @@ async fn rejects_early_auth_ok_and_delivery() {
         let (endpoint, server) = mock_relay(move |mut socket| async move {
             send_json(&mut socket, frame).await;
             expect_no_command(&mut socket).await;
-        }).await;
+        })
+        .await;
         let (end, seen) = connect(&endpoint, &identity, Duration::from_secs(2)).await;
         server.await.unwrap();
         assert_eq!(end, ConnectionStatus::AuthenticationFailed);
@@ -240,7 +322,8 @@ async fn refuses_auth_ok_for_another_registered_void_id() {
         verify_proof(&mut socket, &verifying_key).await;
         send_json(&mut socket, json!({"type": "auth_ok", "void_id": "456"})).await;
         expect_no_command(&mut socket).await;
-    }).await;
+    })
+    .await;
     let (end, seen) = connect(&endpoint, &identity, Duration::from_secs(2)).await;
     server.await.unwrap();
     assert_eq!(end, ConnectionStatus::AuthenticationFailed);
@@ -252,7 +335,8 @@ async fn times_out_when_the_relay_does_not_send_a_challenge() {
     let identity = identity();
     let (endpoint, server) = mock_relay(|mut socket| async move {
         expect_no_command(&mut socket).await;
-    }).await;
+    })
+    .await;
     let (end, seen) = connect(&endpoint, &identity, Duration::from_millis(500)).await;
     server.await.unwrap();
     assert_eq!(end, ConnectionStatus::Disconnected);
@@ -264,7 +348,8 @@ async fn reports_disconnection_if_the_relay_closes_before_proof() {
     let identity = identity();
     let (endpoint, server) = mock_relay(|mut socket| async move {
         socket.close(None).await.unwrap();
-    }).await;
+    })
+    .await;
     let (end, seen) = connect(&endpoint, &identity, Duration::from_secs(2)).await;
     server.await.unwrap();
     assert_eq!(end, ConnectionStatus::Disconnected);

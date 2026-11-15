@@ -1,5 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::account::{timestamp_ms, valid_token, valid_void_id};
 
@@ -11,8 +11,109 @@ const MAX_DELIVERY_PAYLOAD: usize = 1_048_576;
 pub(super) enum ServerFrame {
     Challenge(Challenge),
     AuthOk(String),
-    Error,
-    Delivery,
+    Error(String),
+    Delivery {
+        sender: String,
+        event_id: String,
+        expiry_ms: i64,
+    },
+    OnlineDelivery,
+    Reply(Reply),
+    PrekeyError {
+        request_id: String,
+        code: String,
+    },
+}
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Request {
+    Lookup {
+        void_id: String,
+    },
+    PrekeysPublish {
+        publication_id: String,
+        payload_base64: String,
+    },
+    PrekeysClaim {
+        request_id: String,
+        void_id: String,
+    },
+    Send {
+        event_id: String,
+        to_void_id: String,
+        payload_base64: String,
+    },
+    Ack {
+        event_id: String,
+        sender_void_id: String,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum Reply {
+    Person {
+        void_id: String,
+        public_key: [u8; 32],
+    },
+    Published {
+        publication_id: String,
+    },
+    Bundle {
+        request_id: String,
+        void_id: String,
+        payload_base64: String,
+    },
+    Accepted {
+        event_id: String,
+    },
+    Acked {
+        event_id: String,
+        sender_void_id: String,
+    },
+}
+
+impl Request {
+    pub(super) fn matches(&self, reply: &Reply) -> bool {
+        match (self, reply) {
+            (Self::Lookup { void_id }, Reply::Person { void_id: id, .. }) => void_id == id,
+            (
+                Self::PrekeysPublish { publication_id, .. },
+                Reply::Published { publication_id: id },
+            ) => publication_id == id,
+            (
+                Self::PrekeysClaim {
+                    request_id,
+                    void_id,
+                },
+                Reply::Bundle {
+                    request_id: id,
+                    void_id: peer,
+                    ..
+                },
+            ) => request_id == id && void_id == peer,
+            (Self::Send { event_id, .. }, Reply::Accepted { event_id: id }) => event_id == id,
+            (
+                Self::Ack {
+                    event_id,
+                    sender_void_id,
+                },
+                Reply::Acked {
+                    event_id: id,
+                    sender_void_id: sender,
+                },
+            ) => event_id == id && sender_void_id == sender,
+            _ => false,
+        }
+    }
+
+    pub(super) fn prekey_id(&self) -> Option<&str> {
+        match self {
+            Self::PrekeysPublish { publication_id, .. } => Some(publication_id),
+            Self::PrekeysClaim { request_id, .. } => Some(request_id),
+            _ => None,
+        }
+    }
 }
 
 pub(super) struct Challenge {
@@ -73,6 +174,33 @@ enum WireFrame {
     Error {
         code: String,
     },
+    Person {
+        void_id: String,
+        auth_public_key: String,
+    },
+    PrekeysPublished {
+        publication_id: String,
+        ec_remaining: String,
+        kyber_remaining: String,
+    },
+    PrekeyBundle {
+        request_id: String,
+        void_id: String,
+        payload_base64: String,
+    },
+    PrekeysError {
+        request_id: String,
+        code: String,
+    },
+    Accepted {
+        event_id: String,
+        created_at: String,
+        expires_at: String,
+    },
+    AckOk {
+        event_id: String,
+        sender_void_id: String,
+    },
     Event {
         event_id: String,
         from_void_id: String,
@@ -93,10 +221,13 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
     }
 
     match serde_json::from_str(text).ok()? {
-        WireFrame::AuthChallenge { challenge_id, message, expires_at }
-            if valid_token(&challenge_id)
-                && message.len() <= MAX_CHALLENGE_MESSAGE
-                && valid_base64(&message, MAX_CHALLENGE_MESSAGE) =>
+        WireFrame::AuthChallenge {
+            challenge_id,
+            message,
+            expires_at,
+        } if valid_token(&challenge_id)
+            && message.len() <= MAX_CHALLENGE_MESSAGE
+            && valid_base64(&message, MAX_CHALLENGE_MESSAGE) =>
         {
             let expiry_ms = timestamp_ms(&expires_at)?;
             Some(ServerFrame::Challenge(Challenge {
@@ -113,28 +244,111 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
             if (1..=64).contains(&code.len())
                 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
         {
-            Some(ServerFrame::Error)
+            Some(ServerFrame::Error(code))
         }
-        // Recognize unsolicited relay envelopes so the connection can discard them.
-        // This phase never decodes a delivery payload or acknowledges it to the relay.
-        WireFrame::Event { event_id, from_void_id, payload_base64, created_at, expires_at }
-            if valid_event_id(&event_id)
-                && valid_void_id(&from_void_id)
-                && valid_base64(&payload_base64, MAX_DELIVERY_PAYLOAD)
-                && timestamp_ms(&expires_at)? > timestamp_ms(&created_at)? =>
-        {
-            Some(ServerFrame::Delivery)
+        WireFrame::Person {
+            void_id,
+            auth_public_key,
+        } if valid_void_id(&void_id) && valid_base64(&auth_public_key, 32) => {
+            let public_key = STANDARD.decode(auth_public_key).ok()?.try_into().ok()?;
+            Some(ServerFrame::Reply(Reply::Person {
+                void_id,
+                public_key,
+            }))
         }
-        WireFrame::OnlineEvent { exchange_id, from_void_id, payload_base64 }
-            if (1..=64).contains(&exchange_id.len())
-                && exchange_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
-                && valid_void_id(&from_void_id)
-                && valid_base64(&payload_base64, MAX_DELIVERY_PAYLOAD) =>
+        WireFrame::PrekeysPublished {
+            publication_id,
+            ec_remaining,
+            kyber_remaining,
+        } if valid_event_id(&publication_id)
+            && valid_count(&ec_remaining)
+            && valid_count(&kyber_remaining) =>
         {
-            Some(ServerFrame::Delivery)
+            Some(ServerFrame::Reply(Reply::Published { publication_id }))
+        }
+        WireFrame::PrekeyBundle {
+            request_id,
+            void_id,
+            payload_base64,
+        } if valid_event_id(&request_id)
+            && valid_void_id(&void_id)
+            && valid_base64(&payload_base64, 32 * 1024) =>
+        {
+            Some(ServerFrame::Reply(Reply::Bundle {
+                request_id,
+                void_id,
+                payload_base64,
+            }))
+        }
+        WireFrame::PrekeysError { request_id, code }
+            if valid_event_id(&request_id)
+                && matches!(
+                    code.as_str(),
+                    "prekeys_invalid"
+                        | "prekeys_conflict"
+                        | "prekeys_capacity"
+                        | "prekey_claim_expired"
+                        | "prekeys_unavailable"
+                ) =>
+        {
+            Some(ServerFrame::PrekeyError { request_id, code })
+        }
+        WireFrame::Accepted {
+            event_id,
+            created_at,
+            expires_at,
+        } if valid_event_id(&event_id)
+            && timestamp_ms(&expires_at)? > timestamp_ms(&created_at)? =>
+        {
+            Some(ServerFrame::Reply(Reply::Accepted { event_id }))
+        }
+        WireFrame::AckOk {
+            event_id,
+            sender_void_id,
+        } if valid_event_id(&event_id) && valid_void_id(&sender_void_id) => {
+            Some(ServerFrame::Reply(Reply::Acked {
+                event_id,
+                sender_void_id,
+            }))
+        }
+        WireFrame::Event {
+            event_id,
+            from_void_id,
+            payload_base64,
+            created_at,
+            expires_at,
+        } if valid_event_id(&event_id)
+            && valid_void_id(&from_void_id)
+            && valid_base64(&payload_base64, MAX_DELIVERY_PAYLOAD)
+            && timestamp_ms(&expires_at)? > timestamp_ms(&created_at)? =>
+        {
+            Some(ServerFrame::Delivery {
+                sender: from_void_id,
+                event_id,
+                expiry_ms: timestamp_ms(&expires_at)?,
+            })
+        }
+        WireFrame::OnlineEvent {
+            exchange_id,
+            from_void_id,
+            payload_base64,
+        } if (1..=64).contains(&exchange_id.len())
+            && exchange_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+            && valid_void_id(&from_void_id)
+            && valid_base64(&payload_base64, MAX_DELIVERY_PAYLOAD) =>
+        {
+            Some(ServerFrame::OnlineDelivery)
         }
         _ => None,
     }
+}
+
+fn valid_count(value: &str) -> bool {
+    value
+        .parse::<u8>()
+        .is_ok_and(|count| count <= 64 && count.to_string() == value)
 }
 
 fn valid_event_id(id: &str) -> bool {
@@ -151,12 +365,19 @@ fn valid_base64(encoded: &str, max_decoded: usize) -> bool {
     if len == 0 || !len.is_multiple_of(4) || len > max_decoded.div_ceil(3) * 4 {
         return false;
     }
-    let padding = if encoded.ends_with("==") { 2 } else { usize::from(encoded.ends_with('=')) };
+    let padding = if encoded.ends_with("==") {
+        2
+    } else {
+        usize::from(encoded.ends_with('='))
+    };
     if len / 4 * 3 - padding > max_decoded {
         return false;
     }
     let symbols = &encoded.as_bytes()[..len - padding];
-    if !symbols.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/') {
+    if !symbols
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/')
+    {
         return false;
     }
     let last = symbols[symbols.len() - 1];
@@ -195,9 +416,13 @@ mod tests {
         let Some(ServerFrame::Challenge(challenge)) = decode(&frame.to_string()) else {
             panic!("expected a challenge");
         };
-        let validate = |audience, void_id, key, now| challenge.validate(audience, void_id, key, now);
+        let validate =
+            |audience, void_id, key, now| challenge.validate(audience, void_id, key, now);
         let now = expiry_ms - MAX_CHALLENGE_LIFETIME_MS;
-        assert_eq!(validate(audience, void_id, &public_key, now).unwrap(), message.as_bytes());
+        assert_eq!(
+            validate(audience, void_id, &public_key, now).unwrap(),
+            message.as_bytes()
+        );
         assert!(validate(audience, void_id, &public_key, now - 1).is_none());
         assert!(validate(audience, void_id, &public_key, expiry_ms).is_none());
         assert!(validate("wss://example.invalid/void/ws", void_id, &public_key, now).is_none());
@@ -206,13 +431,23 @@ mod tests {
 
     #[test]
     fn strict_decoder_distinguishes_deliveries_and_authentication_frames() {
-        assert!(matches!(decode(r#"{"type":"auth_ok","void_id":"1"}"#), Some(ServerFrame::AuthOk(id)) if id == "1"));
+        assert!(
+            matches!(decode(r#"{"type":"auth_ok","void_id":"1"}"#), Some(ServerFrame::AuthOk(id)) if id == "1")
+        );
         assert!(decode(r#"{"type":"auth_ok","void_id":"1","extra":"x"}"#).is_none());
         assert!(decode(r#"{"type":"auth_ok","void_id":1}"#).is_none());
         assert!(decode(r#"{"type":"auth_ok","void_id":"1","void_id":"2"}"#).is_none());
-        assert!(matches!(decode(r#"{"type":"error","code":"authentication_failed"}"#), Some(ServerFrame::Error)));
+        assert!(matches!(
+            decode(r#"{"type":"error","code":"authentication_failed"}"#),
+            Some(ServerFrame::Error(_))
+        ));
         assert!(decode(r#"{"type":"error","code":"invalid-session"}"#).is_none());
-        assert!(matches!(decode(r#"{"type":"online_event","exchange_id":"e","from_void_id":"2","payload_base64":"YQ=="}"#), Some(ServerFrame::Delivery)));
+        assert!(matches!(
+            decode(
+                r#"{"type":"online_event","exchange_id":"e","from_void_id":"2","payload_base64":"YQ=="}"#
+            ),
+            Some(ServerFrame::OnlineDelivery)
+        ));
         assert!(decode(r#"{"type":"online_event","exchange_id":"e","from_void_id":"2","payload_base64":"YR=="}"#).is_none());
         let delivery = json!({
             "type": "event",
@@ -222,6 +457,9 @@ mod tests {
             "created_at": "2026-11-14T04:05:00Z",
             "expires_at": "2026-11-14T04:05:01Z",
         });
-        assert!(matches!(decode(&delivery.to_string()), Some(ServerFrame::Delivery)));
+        assert!(matches!(
+            decode(&delivery.to_string()),
+            Some(ServerFrame::Delivery { .. })
+        ));
     }
 }

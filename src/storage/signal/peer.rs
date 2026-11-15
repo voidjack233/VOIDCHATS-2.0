@@ -21,7 +21,6 @@ pub(crate) struct TrustedPeer {
 
 impl TrustedPeer {
     /// Use only with an authenticated lookup result or an isolated test fixture.
-    #[allow(dead_code)] // Production lookup is outside the local Signal phase.
     pub(crate) fn from_trusted_lookup(
         void_id: &str,
         account_public_key: &[u8; 32],
@@ -156,9 +155,14 @@ pub(super) fn pin(tx: &Transaction<'_>, verified: &VerifiedPeer<'_>) -> Result<(
     Ok(())
 }
 
-pub(super) fn require_pinned(connection: &Connection, peer: &TrustedPeer) -> Result<()> {
-    load_pin(connection, peer)?.ok_or(Error::SignalPeer)?;
+pub(super) fn check_account_pin(connection: &Connection, peer: &TrustedPeer) -> Result<()> {
+    load_pin(connection, peer)?;
     Ok(())
+}
+
+pub(super) fn require_pinned(connection: &Connection, peer: &TrustedPeer) -> Result<IdentityKey> {
+    let binding = load_pin(connection, peer)?.ok_or(Error::SignalPeer)?;
+    Ok(verify_binding(peer, &binding)?.identity_key)
 }
 
 #[derive(Deserialize)]

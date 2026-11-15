@@ -2,7 +2,7 @@ import { CheckBox, LineEdit, ScrollView, Spinner, TextEdit } from "std-widgets.s
 
 export struct StoredConversation { id: string, title: string, activity: string }
 export struct StoredContact { title: string, void-id: string }
-export struct StoredMessage { body: string, time: string, outgoing: bool }
+export struct StoredMessage { body: string, time: string, outgoing: bool, status: string, retry-event: string }
 
 global Theme {
     out property <color> background: #0c1118;
@@ -460,6 +460,13 @@ export component AppWindow inherits Window {
     callback submit-setup();
     in property <string> connection-status: "Disconnected";
     callback reconnect();
+    in property <bool> relay-messaging-enabled;
+    in property <bool> send-busy;
+    in property <string> messaging-notice;
+    callback enable-relay-messaging();
+    callback send-message();
+    callback resend-message(string);
+    callback draft-queued(string, string, int);
 
     in-out property <string> section: "Chats";
 
@@ -757,6 +764,21 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                 }
+                if root.messaging-notice != "": VerticalLayout {
+                    padding-left: root.list-gutter;
+                    padding-right: root.list-gutter;
+                    padding-bottom: 8px;
+                    Text { text: root.messaging-notice; color: Theme.error; font-size: 12px; wrap: word-wrap; }
+                }
+                if root.storage-ready && !root.relay-messaging-enabled: HorizontalLayout {
+                    padding-left: root.list-gutter;
+                    padding-right: root.list-gutter;
+                    padding-bottom: 8px;
+                    Action {
+                        label: "Enable messaging";
+                        clicked => { root.enable-relay-messaging(); }
+                    }
+                }
                 Rectangle { height: 1px; background: Theme.divider; }
                 HorizontalLayout {
                     height: 56px;
@@ -776,8 +798,10 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         wrap: word-wrap;
                     }
-                    if root.connection-status == "Disconnected" || root.connection-status == "Authentication failed": Action {
+                    if root.connection-status == "Disconnected" || root.connection-status == "Authentication failed"
+                        || (root.relay-messaging-enabled && root.connection-status == "Connected" && root.messaging-notice != ""): Action {
                         label: "Reconnect";
+                        enabled: !root.send-busy;
                         clicked => { root.reconnect(); }
                     }
                 }
@@ -872,7 +896,7 @@ export component AppWindow inherits Window {
 
                 Text { text: "New local conversation"; color: Theme.primary; font-size: 20px; font-weight: 700; }
                 Text {
-                    text: "Save a conversation and draft on this device. Sending is unavailable in this build.";
+                    text: "Enter the recipient’s VOID-ID to open a conversation.";
                     color: Theme.secondary;
                     font-size: 13px;
                     wrap: word-wrap;
@@ -951,7 +975,8 @@ export component AppWindow inherits Window {
                             if message.outgoing: Rectangle { horizontal-stretch: 1; }
                             Rectangle {
                                 width: min(380px, (chat-pane.width - 2 * root.chat-gutter) * 0.82,
-                                    max(body.preferred-width, time.preferred-width) + 20px);
+                                    max(body.preferred-width, time.preferred-width, state.preferred-width,
+                                        message.retry-event != "" ? 84px : 0px) + 20px);
                                 min-height: bubble.min-height;
                                 background: message.outgoing ? Theme.outgoing : Theme.elevated;
                                 border-radius: 12px;
@@ -960,19 +985,35 @@ export component AppWindow inherits Window {
                                     spacing: 3px;
                                     body := Text { text: message.body; color: Theme.primary; font-size: 14px; wrap: word-wrap; }
                                     time := Text { text: message.time; color: Theme.secondary; font-size: 11px; horizontal-alignment: right; }
+                                    state := Text {
+                                        visible: message.status != "";
+                                        text: message.status;
+                                        color: Theme.secondary;
+                                        font-size: 11px;
+                                        horizontal-alignment: right;
+                                        wrap: word-wrap;
+                                    }
+                                    if root.relay-messaging-enabled && message.retry-event != "": HorizontalLayout {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Action {
+                                            label: "Resend";
+                                            enabled: !root.send-busy;
+                                            clicked => { root.resend-message(message.retry-event); }
+                                        }
+                                    }
                                 }
                             }
                             if !message.outgoing: Rectangle { horizontal-stretch: 1; }
                         }
                     }
                 }
-                if !root.conversation-is-request: Rectangle { height: 1px; background: Theme.divider; }
-                if !root.conversation-is-request: VerticalLayout {
+                if !root.conversation-is-request || root.relay-messaging-enabled: Rectangle { height: 1px; background: Theme.divider; }
+                if !root.conversation-is-request || root.relay-messaging-enabled: VerticalLayout {
                     padding: 12px;
                     padding-left: root.chat-gutter;
                     padding-right: root.chat-gutter;
                     spacing: 6px;
-                    Text { text: "Draft"; color: Theme.primary; font-size: 13px; font-weight: 600; }
+                    Text { text: root.relay-messaging-enabled ? "Message" : "Draft"; color: Theme.primary; font-size: 13px; font-weight: 600; }
                     TextEdit {
                         accessible-label: "Local message draft";
                         height: 72px;
@@ -993,6 +1034,12 @@ export component AppWindow inherits Window {
                             label: "Retry saving";
                             enabled: !root.conversation-loading;
                             clicked => { root.save-stored-draft(root.stored-draft); }
+                        }
+                        if root.relay-messaging-enabled: Action {
+                            label: root.send-busy ? "Sending…" : "Send";
+                            primary: true;
+                            enabled: !root.send-busy && !root.conversation-loading && root.stored-draft != "";
+                            clicked => { root.send-message(); }
                         }
                     }
                 }

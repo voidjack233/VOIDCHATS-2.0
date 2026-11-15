@@ -240,7 +240,7 @@ pub(super) fn encode_payload(
     Ok(STANDARD.encode(bytes).into_bytes())
 }
 
-fn valid_content(body: &str, created_at: i64) -> bool {
+pub(crate) fn valid_content(body: &str, created_at: i64) -> bool {
     (0..=MAX_SAFE_TIMESTAMP).contains(&created_at)
         && body.len() <= MAX_BODY_BYTES
         && !body.contains('\0')

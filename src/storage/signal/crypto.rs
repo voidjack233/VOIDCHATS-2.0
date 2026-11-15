@@ -22,9 +22,25 @@ use sha2::{Digest, Sha256};
 use std::{future::Future, time::SystemTime};
 use zeroize::Zeroizing;
 
-// The caller in this phase is the isolated harness. No relay or Slint code invokes these APIs.
-#[allow(dead_code)]
 impl Database {
+    pub(crate) fn has_signal_session(&mut self, peer: &TrustedPeer) -> Result<bool> {
+        self.write(|tx| {
+            let remote = address(peer.void_id());
+            let store = SignalStore::new(tx);
+            match run_signal(store.load_session(&remote))? {
+                Some(session) => {
+                    let expected = peer::require_pinned(tx, peer)?;
+                    verify_session_peer(&session, &expected)?;
+                    Ok(true)
+                }
+                None => {
+                    peer::check_account_pin(tx, peer)?;
+                    Ok(false)
+                }
+            }
+        })
+    }
+
     pub(crate) fn establish_signal_session(
         &mut self,
         peer: &TrustedPeer,
@@ -87,6 +103,15 @@ impl Database {
         }
         // Check trust even when the event is already committed and the callback is skipped.
         peer::require_pinned(&self.connection, peer)?;
+        if let Some(stored) = self.committed_outgoing(event_id)? {
+            if stored.conversation_id != conversation_id
+                || stored.body != body
+                || stored.created_at != created_at
+            {
+                return Err(Error::EventConflict);
+            }
+            return Ok(stored.payload);
+        }
         let routing = Routing {
             event_id,
             sender: &local_id,
@@ -126,14 +151,28 @@ impl Database {
     }
 
     /// A matching committed duplicate returns without invoking libsignal or consuming keys.
+    #[cfg(test)]
     pub(crate) fn decrypt_signal_event(
         &mut self,
         peer: &TrustedPeer,
         event_json: &[u8],
         now: SystemTime,
     ) -> Result<IncomingOutcome> {
+        self.decrypt_signal_delivery(peer, event_json, now, None)
+    }
+
+    pub(crate) fn decrypt_signal_delivery(
+        &mut self,
+        peer: &TrustedPeer,
+        event_json: &[u8],
+        now: SystemTime,
+        expected_event_id: Option<&str>,
+    ) -> Result<IncomingOutcome> {
         let (local_id, _) = local_account(&self.connection)?;
         let event = wire::decode_event(event_json, &local_id)?;
+        if expected_event_id.is_some_and(|id| id != event.event_id) {
+            return Err(Error::SignalEnvelope);
+        }
         let now_ms = now
             .duration_since(SystemTime::UNIX_EPOCH)
             .ok()
@@ -267,7 +306,10 @@ fn local_account(connection: &Connection) -> Result<(String, VerifyingKey)> {
     Ok((id, key))
 }
 
-fn local_signal_binding(connection: &Connection, expected_id: &str) -> Result<SignalBinding> {
+pub(super) fn local_signal_binding(
+    connection: &Connection,
+    expected_id: &str,
+) -> Result<SignalBinding> {
     let (id, verifying_key) = local_account(connection)?;
     if id != expected_id {
         return Err(Error::WrongAccount);

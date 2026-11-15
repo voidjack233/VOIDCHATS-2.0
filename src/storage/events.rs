@@ -1,4 +1,4 @@
-//! Durable event boundaries for the future messaging worker.
+//! Durable event boundaries for the messaging worker.
 //!
 //! Official libsignal uses local async store traits. A worker can run its local future
 //! to completion with separate adapters borrowing the same SQLCipher transaction.
@@ -16,12 +16,13 @@ use super::{Database, Direction, Error, Message, Result, records::insert_message
 use rusqlite::{OptionalExtension, Transaction, params};
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum IncomingOutcome { Stored, AlreadyStored }
+pub(crate) enum IncomingOutcome {
+    Stored,
+    AlreadyStored,
+}
 
-// These operations are for the future messaging worker. Callbacks may borrow the same
-// transaction for separate libsignal store adapters. Propagate every error and leave
-// transaction control to Database::write. Keep network operations outside the callback.
-#[allow(dead_code)]
+// Callbacks borrow one transaction for the libsignal store adapters.
+// Keep network operations outside the callback.
 impl Database {
     /// Returns the exact payload for this event, only after the transaction commits.
     /// Reserve the event ID before calling this and use it again on retry. An already
@@ -32,7 +33,9 @@ impl Database {
         event_id: &str,
         prepare: impl FnOnce(&Transaction<'_>) -> Result<(Message, Vec<u8>)>,
     ) -> Result<Vec<u8>> {
-        if event_id.is_empty() { return Err(Error::EventConflict); }
+        if event_id.is_empty() {
+            return Err(Error::EventConflict);
+        }
         self.write(|tx| {
             let stored = tx.query_row(
                 "SELECT m.conversation_id, o.payload FROM outbox o JOIN messages m ON m.id = o.message_id
@@ -63,7 +66,9 @@ impl Database {
         digest: &[u8; 32],
         process: impl FnOnce(&Transaction<'_>) -> Result<Message>,
     ) -> Result<IncomingOutcome> {
-        if sender.is_empty() || event_id.is_empty() { return Err(Error::EventConflict); }
+        if sender.is_empty() || event_id.is_empty() {
+            return Err(Error::EventConflict);
+        }
         self.write(|tx| {
             let stored: Option<Vec<u8>> = tx.query_row(
                 "SELECT payload_digest FROM inbox WHERE sender_void_id = ?1 AND event_id = ?2",

@@ -485,6 +485,12 @@ fn commit_failures_and_duplicate_events_do_not_advance_signal_state() {
     a.close().unwrap();
 
     let mut a = alice.open();
+    for (body, time) in [("Changed body", NOW_MS), ("Retry exactly", NOW_MS + 1)] {
+        assert!(matches!(
+            a.encrypt_signal_message(&peer_b, conv, &id, body, time),
+            Err(Error::EventConflict)
+        ));
+    }
     let retried = a
         .encrypt_signal_message(&peer_b, conv, &id, "Retry exactly", NOW_MS)
         .unwrap();

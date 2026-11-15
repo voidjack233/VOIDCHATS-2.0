@@ -1,17 +1,20 @@
-//! Authenticated relay sessions. Application delivery frames are dropped in this phase.
+//! Authenticated relay sessions and serialized command dispatch.
 mod protocol;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::account::{API_BASE, RegisteredIdentity as SessionIdentity, load_registered_identity};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::Signer;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{MAX_FRAME_SIZE, ServerFrame};
+pub(crate) use protocol::{Reply, Request};
 use serde_json::json;
 use std::{
-    io, thread,
+    io,
+    sync::mpsc as blocking,
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -30,6 +33,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -56,47 +60,146 @@ impl ConnectionStatus {
 /// handles stops the worker even while a socket is open.
 #[derive(Clone)]
 pub(crate) struct Connection {
-    requests: mpsc::Sender<String>,
+    requests: mpsc::Sender<ConnectRequest>,
+}
+
+struct ConnectRequest {
+    void_id: String,
+    messaging: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RequestError {
+    Interrupted,
+    Rejected(String),
+}
+
+struct PendingRequest {
+    generation: u64,
+    request: Request,
+    reply: blocking::Sender<Result<Reply, RequestError>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Session {
+    pub(crate) generation: u64,
+    commands: mpsc::Sender<PendingRequest>,
+}
+
+impl Session {
+    // Called on the SQLCipher worker. The socket continues to receive events during this wait.
+    pub(crate) fn request(&self, request: Request) -> Result<Reply, RequestError> {
+        let (reply, response) = blocking::channel();
+        self.commands
+            .try_send(PendingRequest {
+                generation: self.generation,
+                request,
+                reply,
+            })
+            .map_err(|_| RequestError::Interrupted)?;
+        response
+            .recv_timeout(WRITE_TIMEOUT + RESPONSE_TIMEOUT + Duration::from_secs(2))
+            .unwrap_or(Err(RequestError::Interrupted))
+    }
+}
+
+pub(crate) enum Activity {
+    Online(Session),
+    Offline(u64),
+    Delivery {
+        generation: u64,
+        sender: String,
+        event_id: String,
+        json: String,
+    },
 }
 
 impl Connection {
-    pub(crate) fn start(report: impl Fn(ConnectionStatus) + Send + 'static) -> io::Result<Self> {
-        Self::spawn(ENDPOINT.into(), load_registered_identity, report)
+    pub(crate) fn start(
+        report: impl Fn(ConnectionStatus) + Send + 'static,
+        activity: impl Fn(Activity) + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::spawn_with_activity(ENDPOINT.into(), load_registered_identity, report, activity)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn(
         endpoint: String,
         load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
         report: impl Fn(ConnectionStatus) + Send + 'static,
     ) -> io::Result<Self> {
+        Self::spawn_with_activity(endpoint, load_identity, report, |_| {})
+    }
+
+    pub(crate) fn spawn_with_activity(
+        endpoint: String,
+        load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
+        report: impl Fn(ConnectionStatus) + Send + 'static,
+        activity: impl Fn(Activity) + Send + 'static,
+    ) -> io::Result<Self> {
         let (requests, receiver) = mpsc::channel(1);
-        thread::Builder::new().name("void-relay".into()).spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-                Ok(runtime) => runtime,
-                Err(_) => {
-                    drop(receiver);
-                    report(ConnectionStatus::Disconnected);
-                    return;
-                }
-            };
-            runtime.block_on(run_worker(receiver, &endpoint, load_identity, &report));
-        })?;
+        thread::Builder::new()
+            .name("void-relay".into())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(_) => {
+                        drop(receiver);
+                        report(ConnectionStatus::Disconnected);
+                        return;
+                    }
+                };
+                runtime.block_on(run_worker(
+                    receiver,
+                    &endpoint,
+                    load_identity,
+                    &report,
+                    &activity,
+                ));
+            })?;
         Ok(Self { requests })
     }
 
     pub(crate) fn connect(&self, void_id: String) -> bool {
-        self.requests.try_send(void_id).is_ok()
+        self.requests
+            .try_send(ConnectRequest {
+                void_id,
+                messaging: false,
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn connect_messaging(&self, void_id: String) -> bool {
+        self.requests
+            .try_send(ConnectRequest {
+                void_id,
+                messaging: true,
+            })
+            .is_ok()
     }
 }
 
 async fn run_worker(
-    mut requests: mpsc::Receiver<String>,
+    mut requests: mpsc::Receiver<ConnectRequest>,
     endpoint: &str,
     load_identity: impl Fn(&str) -> io::Result<SessionIdentity>,
     report: &impl Fn(ConnectionStatus),
+    activity: &impl Fn(Activity),
 ) {
     let mut next_attempt = Instant::now();
-    while let Some(void_id) = requests.recv().await {
+    let mut generation = 0;
+    let mut next = requests.recv().await;
+    while let Some(ConnectRequest { void_id, messaging }) = next {
+        generation += 1;
+        // Each connection has a fresh command queue. An old handle cannot target a new socket.
+        let (commands, mut command_receiver) = mpsc::channel(2);
+        let session = Session {
+            generation,
+            commands,
+        };
         let attempt = async {
             tokio::time::sleep_until(next_attempt).await;
             report(ConnectionStatus::Connecting);
@@ -104,17 +207,35 @@ async fn run_worker(
                 Ok(identity) => identity,
                 Err(_) => return ConnectionStatus::AuthenticationFailed,
             };
-            let result = connect_and_authenticate(endpoint, API_BASE, &identity, HANDSHAKE_TIMEOUT).await;
+            let result =
+                connect_and_authenticate(endpoint, API_BASE, &identity, HANDSHAKE_TIMEOUT).await;
             // Keep the private key out of the idle session.
             drop(identity);
-            monitor_authenticated(result, report).await
+            let messaging = messaging.then_some(Messaging {
+                session,
+                commands: &mut command_receiver,
+                activity,
+            });
+            monitor_authenticated(result, report, messaging).await
         };
-        let terminal = tokio::select! {
-            status = attempt => status,
-            () = async { while requests.recv().await.is_some() {} } => return,
+        let (terminal, replacement) = tokio::select! {
+            status = attempt => (Some(status), None),
+            request = requests.recv() => {
+                let Some(request) = request else { return; };
+                (None, Some(request))
+            },
         };
+        drop(command_receiver);
+        if messaging {
+            activity(Activity::Offline(generation));
+        }
         next_attempt = Instant::now() + RECONNECT_DELAY;
-        report(terminal);
+        next = if let Some(status) = terminal {
+            report(status);
+            requests.recv().await
+        } else {
+            replacement
+        };
     }
 }
 
@@ -127,7 +248,7 @@ async fn serve_once(
     report: impl Fn(ConnectionStatus),
 ) -> ConnectionStatus {
     let result = connect_and_authenticate(endpoint, audience, identity, handshake_timeout).await;
-    monitor_authenticated(result, &report).await
+    monitor_authenticated::<fn(Activity)>(result, &report, None).await
 }
 
 async fn connect_and_authenticate(
@@ -155,7 +276,11 @@ async fn authenticate(
     audience: &str,
     identity: &SessionIdentity,
 ) -> Result<(), ConnectionStatus> {
-    send_json(socket, json!({"type": "auth_begin", "void_id": identity.void_id})).await?;
+    send_json(
+        socket,
+        json!({"type": "auth_begin", "void_id": identity.void_id}),
+    )
+    .await?;
     let ServerFrame::Challenge(challenge) = read_auth_frame(socket).await? else {
         return Err(ConnectionStatus::AuthenticationFailed);
     };
@@ -167,11 +292,15 @@ async fn authenticate(
     if challenge.is_expired(now_ms()) {
         return Err(ConnectionStatus::AuthenticationFailed);
     }
-    send_json(socket, json!({
-        "type": "auth_proof",
-        "challenge_id": challenge.id,
-        "signature": signature,
-    })).await?;
+    send_json(
+        socket,
+        json!({
+            "type": "auth_proof",
+            "challenge_id": challenge.id,
+            "signature": signature,
+        }),
+    )
+    .await?;
 
     match read_auth_frame(socket).await? {
         ServerFrame::AuthOk(id) if id == identity.void_id => Ok(()),
@@ -180,50 +309,101 @@ async fn authenticate(
 }
 
 async fn send_json(socket: &mut Socket, frame: serde_json::Value) -> Result<(), ConnectionStatus> {
-    socket.send(Message::Text(frame.to_string().into())).await
+    socket
+        .send(Message::Text(frame.to_string().into()))
+        .await
         .map_err(|_| ConnectionStatus::Disconnected)
 }
 
 async fn read_auth_frame(socket: &mut Socket) -> Result<ServerFrame, ConnectionStatus> {
     loop {
         match socket.next().await {
-            Some(Ok(Message::Text(text))) => {
+            Some(Ok(Message::Text(text))) if text.len() <= 8 * 1024 => {
                 return protocol::decode(&text).ok_or(ConnectionStatus::AuthenticationFailed);
             }
-            Some(Ok(Message::Ping(_))) => socket.flush().await
+            Some(Ok(Message::Ping(_))) => socket
+                .flush()
+                .await
                 .map_err(|_| ConnectionStatus::Disconnected)?,
             Some(Ok(Message::Pong(_))) => {}
             Some(Ok(Message::Close(_))) => {
                 let _ = socket.flush().await;
                 return Err(ConnectionStatus::Disconnected);
             }
-            None | Some(Err(WireError::ConnectionClosed | WireError::AlreadyClosed | WireError::Io(_))) =>
-                return Err(ConnectionStatus::Disconnected),
-            Some(Err(WireError::Protocol(tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake))) =>
-                return Err(ConnectionStatus::Disconnected),
+            None
+            | Some(Err(
+                WireError::ConnectionClosed | WireError::AlreadyClosed | WireError::Io(_),
+            )) => return Err(ConnectionStatus::Disconnected),
+            Some(Err(WireError::Protocol(
+                tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+            ))) => return Err(ConnectionStatus::Disconnected),
             _ => return Err(ConnectionStatus::AuthenticationFailed),
         }
     }
 }
 
-async fn monitor_authenticated(
+struct Messaging<'a, F> {
+    session: Session,
+    commands: &'a mut mpsc::Receiver<PendingRequest>,
+    activity: &'a F,
+}
+
+async fn monitor_authenticated<F: Fn(Activity)>(
     result: Result<Socket, ConnectionStatus>,
     report: &impl Fn(ConnectionStatus),
+    mut messaging: Option<Messaging<'_, F>>,
 ) -> ConnectionStatus {
     let mut socket = match result {
         Ok(socket) => socket,
         Err(status) => return status,
     };
     report(ConnectionStatus::Connected);
+    if let Some(mode) = &messaging {
+        (mode.activity)(Activity::Online(mode.session.clone()));
+    }
     let mut heartbeat = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let deadline = sleep(PONG_TIMEOUT);
     tokio::pin!(deadline);
     let mut probe = 0_u64;
     let mut awaiting_pong = false;
+    let mut pending: Option<PendingRequest> = None;
+    let command_deadline = sleep(RESPONSE_TIMEOUT);
+    tokio::pin!(command_deadline);
+    let mut delivered: Option<(String, String, i64)> = None;
 
     loop {
         tokio::select! {
+            _ = &mut command_deadline, if pending.is_some() => break,
+            command = async {
+                match &mut messaging {
+                    Some(mode) => mode.commands.recv().await,
+                    None => std::future::pending().await,
+                }
+            }, if pending.is_none() => {
+                let Some(command) = command else { break; };
+                let Some(mode) = &messaging else { break; };
+                if command.generation != mode.session.generation {
+                    let _ = command.reply.send(Err(RequestError::Interrupted));
+                    continue;
+                }
+                if let Request::Ack { event_id, sender_void_id } = &command.request {
+                    if !delivered.as_ref().is_some_and(|(sender, id, expiry)|
+                        sender == sender_void_id && id == event_id && *expiry > now_ms())
+                    {
+                        let _ = command.reply.send(Err(RequestError::Interrupted));
+                        continue;
+                    }
+                    // The relay can offer the next delivery as soon as it commits this ACK.
+                    delivered = None;
+                }
+                let Ok(frame) = serde_json::to_string(&command.request) else { break; };
+                if frame.len() > MAX_FRAME_SIZE || !matches!(timeout(WRITE_TIMEOUT, socket.send(Message::Text(frame.into()))).await, Ok(Ok(()))) {
+                    break;
+                }
+                command_deadline.as_mut().reset(Instant::now() + RESPONSE_TIMEOUT);
+                pending = Some(command);
+            }
             _ = &mut deadline, if awaiting_pong => break,
             _ = heartbeat.tick() => {
                 if awaiting_pong {
@@ -249,9 +429,29 @@ async fn monitor_authenticated(
                         awaiting_pong = false;
                     }
                 }
-                Some(Ok(Message::Text(text))) if matches!(protocol::decode(&text), Some(ServerFrame::Delivery)) => {
-                    // The Go relay may offer queued frames on connect. Never process or acknowledge them.
-                }
+                Some(Ok(Message::Text(text))) => match protocol::decode(&text) {
+                    Some(ServerFrame::Delivery { sender, event_id, expiry_ms }) => {
+                        if let Some(mode) = &messaging {
+                            if expiry_ms <= now_ms() { continue; }
+                            if delivered.as_ref().is_some_and(|(_, _, expiry)| *expiry > now_ms()) { break; }
+                            delivered = Some((sender.clone(), event_id.clone(), expiry_ms));
+                            (mode.activity)(Activity::Delivery { generation: mode.session.generation, sender, event_id, json: text.to_string() });
+                        }
+                    }
+                    // Online setup frames from earlier protocols are outside queued Signal messaging.
+                    Some(ServerFrame::OnlineDelivery) => {}
+                    Some(ServerFrame::Reply(reply)) if pending.as_ref().is_some_and(|request| request.request.matches(&reply)) => {
+                        let _ = pending.take().unwrap().reply.send(Ok(reply));
+                    }
+                    Some(ServerFrame::PrekeyError { request_id, code })
+                        if pending.as_ref().and_then(|request| request.request.prekey_id()) == Some(request_id.as_str()) => {
+                        let _ = pending.take().unwrap().reply.send(Err(RequestError::Rejected(code)));
+                    }
+                    Some(ServerFrame::Error(code)) if pending.is_some() => {
+                        let _ = pending.take().unwrap().reply.send(Err(RequestError::Rejected(code)));
+                    }
+                    _ => break,
+                },
                 Some(Ok(Message::Close(_))) => {
                     let _ = timeout(WRITE_TIMEOUT, socket.flush()).await;
                     break;
@@ -264,5 +464,8 @@ async fn monitor_authenticated(
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
