@@ -1,6 +1,6 @@
 mod records;
 mod events;
-mod signal;
+pub(crate) mod signal;
 #[cfg(all(test, windows))]
 pub(crate) mod tests;
 
@@ -24,6 +24,7 @@ const KEY_MAGIC: &[u8] = b"VOID-MESSAGE-DB-KEY\x01";
 const MAX_KEY_FILE_SIZE: u64 = 16_384;
 const MIGRATIONS: &[&str] = &[
     include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"),
+    include_str!("schema_v4.sql"),
 ];
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,10 @@ pub(crate) enum Error {
     Database,
     EventConflict,
     SignalState,
+    SignalPeer,
+    SignalClaim,
+    SignalEnvelope,
+    SignalProtocol,
 }
 
 impl Error {
@@ -59,6 +64,10 @@ impl Error {
             Self::Database => "Local storage could not be opened. Check the VOID data directory and try again.",
             Self::EventConflict => "The event conflicts with its stored message or payload.",
             Self::SignalState => "Local Signal keys could not be initialized or verified. Keep your VOID files and restore a matching backup if available.",
+            Self::SignalPeer => "The peer's Signal identity or account binding could not be verified.",
+            Self::SignalClaim => "The Signal prekey claim is invalid or expired.",
+            Self::SignalEnvelope => "The Signal message envelope or content is invalid or expired.",
+            Self::SignalProtocol => "Signal could not process the message or session.",
         }
     }
 }

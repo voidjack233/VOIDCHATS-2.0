@@ -1,5 +1,10 @@
 mod adapters;
 mod binding;
+mod crypto;
+pub(crate) mod peer;
+mod wire;
+#[cfg(all(test, windows))]
+mod crypto_tests;
 #[cfg(all(test, windows))]
 mod tests;
 
