@@ -1,5 +1,5 @@
 use super::{Database, Result};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 pub(crate) struct Conversation {
     pub id: i64,
@@ -117,17 +117,7 @@ impl Database {
     }
 
     pub(crate) fn save_message(&mut self, message: &Message) -> Result<()> {
-        let tx = self.connection.transaction()?;
-        tx.execute(
-            "INSERT INTO messages (id, conversation_id, direction, body, created_at, delivery_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![message.id, message.conversation_id, message.direction.code(),
-                message.body, message.created_at, message.delivery_state.code()])?;
-        tx.execute(
-            "UPDATE conversations SET last_activity_at = max(last_activity_at, ?2) WHERE id = ?1",
-            params![message.conversation_id, message.created_at])?;
-        tx.commit()?;
-        Ok(())
+        self.write(|tx| insert_message(tx, message))
     }
 
     pub(crate) fn messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
@@ -178,6 +168,18 @@ impl Database {
         Ok(self.connection.query_row("SELECT body FROM drafts WHERE conversation_id = ?1",
             [conversation_id], |row| row.get(0)).optional()?)
     }
+}
+
+pub(super) fn insert_message(tx: &Transaction<'_>, message: &Message) -> Result<()> {
+    tx.execute(
+        "INSERT INTO messages (id, conversation_id, direction, body, created_at, delivery_state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![message.id, message.conversation_id, message.direction.code(),
+            message.body, message.created_at, message.delivery_state.code()])?;
+    tx.execute(
+        "UPDATE conversations SET last_activity_at = max(last_activity_at, ?2) WHERE id = ?1",
+        params![message.conversation_id, message.created_at])?;
+    Ok(())
 }
 
 fn conversation_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {

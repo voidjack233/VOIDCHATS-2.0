@@ -42,6 +42,32 @@ fn report_relay_status(ui: &AppWindow) -> impl Fn(ConnectionStatus) + Send + 'st
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|argument| argument == "--check-storage") {
+        let Some(void_id) = args.next().and_then(|id| id.into_string().ok())
+            .filter(|id| account::valid_void_id(id) && args.next().is_none()) else {
+            eprintln!("Usage: voidchats-native --check-storage <VOID-ID>");
+            std::process::exit(2);
+        };
+        let report = account::load_registered_identity(&void_id)
+            .map_err(|_| storage::Error::WrongAccount)
+            .and_then(|identity| storage::check_existing(&local_data::user_data_dir()?, storage::Owner {
+                void_id: &identity.void_id, public_key: &identity.key.verifying_key().to_bytes(),
+            }));
+        match report {
+            Ok(report) => {
+                for (name, passed) in [("SQLCipher", report.cipher), ("SQLite", report.sqlite), ("Foreign keys", report.foreign_keys)] {
+                    println!("{name}: {}", if passed { "passed" } else { "did not pass" });
+                }
+                if !(report.cipher && report.sqlite && report.foreign_keys) { std::process::exit(1); }
+            }
+            Err(error) => {
+                eprintln!("{}", error.open_message());
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     let ui = AppWindow::new()?;
     let local_storage = storage_ui::bind(&ui).ok();
     let open_storage = local_storage.as_ref().map(|worker| worker.opener());

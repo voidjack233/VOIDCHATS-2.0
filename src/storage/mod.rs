@@ -1,4 +1,5 @@
 mod records;
+mod events;
 #[cfg(all(test, windows))]
 pub(crate) mod tests;
 
@@ -20,7 +21,7 @@ const DATABASE: &str = "messages.db";
 const KEY_FILE: &str = "messages-key.dpapi";
 const KEY_MAGIC: &[u8] = b"VOID-MESSAGE-DB-KEY\x01";
 const MAX_KEY_FILE_SIZE: u64 = 16_384;
-const MIGRATIONS: &[&str] = &[include_str!("schema_v1.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema_v1.sql"), include_str!("schema_v2.sql")];
 
 #[derive(Clone, Copy)]
 pub(crate) struct Owner<'a> {
@@ -38,6 +39,7 @@ pub(crate) enum Error {
     WrongAccount,
     UnsupportedSchema,
     Database,
+    EventConflict,
 }
 
 impl Error {
@@ -51,6 +53,7 @@ impl Error {
             Self::WrongAccount => "The encrypted database belongs to a different VOID account. Use the storage for the account registered on this device.",
             Self::UnsupportedSchema => "This build cannot open the local database version. Use a compatible VOID build.",
             Self::Database => "Local storage could not be opened. Check the VOID data directory and try again.",
+            Self::EventConflict => "The event conflicts with its stored message or payload.",
         }
     }
 }
@@ -112,14 +115,14 @@ impl Database {
             } else {
                 create_key(&key_path)?
             };
-            let mut connection = open_keyed(&db_path, &key, !has_database)?;
+            let mut connection = open_keyed(&db_path, &key, writable_flags(!has_database))?;
             migrate(&mut connection, owner, true)?;
             connection.close().map_err(|(_, error)| Error::from(error))?;
             move_file(&staging, &directory, false)?;
         }
 
         let key = read_key(&directory.join(KEY_FILE))?;
-        let mut connection = open_keyed(&directory.join(DATABASE), &key, false)?;
+        let mut connection = open_keyed(&directory.join(DATABASE), &key, writable_flags(false))?;
         migrate(&mut connection, owner, false)?;
         Ok(Self { connection, _lock: lock })
     }
@@ -127,6 +130,49 @@ impl Database {
     pub(crate) fn close(self) -> Result<()> {
         self.connection.close().map_err(|(_, error)| error.into())
     }
+
+    fn write<T>(&mut self, operation: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>) -> Result<T> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result = operation(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct IntegrityReport {
+    pub cipher: bool,
+    pub sqlite: bool,
+    pub foreign_keys: bool,
+}
+
+// Explicit, read-only diagnostic. Opening with READ_ONLY also prevents journal recovery writes.
+pub(crate) fn check_existing(root: &Path, owner: Owner<'_>) -> Result<IntegrityReport> {
+    let directory = root.join("messages");
+    if !entry_exists(&directory)? { return Err(Error::Unreadable); }
+    let key = read_key(&directory.join(KEY_FILE))?;
+    let mut connection = open_keyed(&directory.join(DATABASE), &key, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tx = connection.transaction()?;
+    if schema_version(&tx, MIGRATIONS.len())? == 0 { return Err(Error::Unreadable); }
+    verify_owner(&tx, owner)?;
+    // End the read snapshot on drop. SQLCipher can leave a corrupt handle in an
+    // error state, so a COMMIT after the checks can mask their reported findings.
+    check_integrity(&tx)
+}
+
+fn check_integrity(connection: &Connection) -> Result<IntegrityReport> {
+    fn checked(check: impl FnOnce() -> rusqlite::Result<bool>) -> Result<bool> {
+        match check().map_err(Error::from) {
+            Ok(passed) => Ok(passed),
+            Err(Error::Unreadable) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    Ok(IntegrityReport {
+        cipher: checked(|| Ok(!connection.prepare("PRAGMA cipher_integrity_check")?.exists([])?))?,
+        sqlite: checked(|| Ok(connection.pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))? == "ok"))?,
+        foreign_keys: checked(|| Ok(!connection.prepare("PRAGMA foreign_key_check")?.exists([])?))?,
+    })
 }
 
 fn entry_exists(path: &Path) -> io::Result<bool> {
@@ -177,15 +223,19 @@ fn create_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-fn open_keyed(path: &Path, key: &[u8; 32], create: bool) -> Result<Connection> {
-    if !create && !entry_exists(path)? {
-        return Err(Error::Unreadable);
-    }
-    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+fn writable_flags(create: bool) -> OpenFlags {
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
     if create {
         flags |= OpenFlags::SQLITE_OPEN_CREATE;
     }
-    let connection = Connection::open_with_flags(path, flags)?;
+    flags
+}
+
+fn open_keyed(path: &Path, key: &[u8; 32], flags: OpenFlags) -> Result<Connection> {
+    if !flags.contains(OpenFlags::SQLITE_OPEN_CREATE) && !entry_exists(path)? {
+        return Err(Error::Unreadable);
+    }
+    let connection = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE)?;
     let cipher: String = connection.pragma_query_value(None, "cipher_version", |row| row.get(0))
         .map_err(|_| Error::SqlCipherUnavailable)?;
     if cipher.is_empty() {
@@ -226,28 +276,14 @@ fn migrate(connection: &mut Connection, owner: Owner<'_>, initializing: bool) ->
 
 fn migrate_with_scripts(connection: &mut Connection, owner: Owner<'_>, initializing: bool, migrations: &[&str]) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let version = usize::try_from(version).ok().filter(|&version| version <= migrations.len())
-        .ok_or(Error::UnsupportedSchema)?;
+    let version = schema_version(&tx, migrations.len())?;
     if version == 0 {
         let empty = tx.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))? == 0;
         if !initializing || !empty {
             return Err(Error::Unreadable);
         }
     } else {
-        let stored = tx.query_row("SELECT void_id, public_key FROM local_account WHERE singleton = 1", [], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        }).optional().map_err(|_| Error::Unreadable)?;
-        let Some((void_id, public_key)) = stored else { return Err(Error::Unreadable); };
-        if void_id != owner.void_id || public_key != owner.public_key {
-            return Err(Error::WrongAccount);
-        }
-        if tx.prepare("PRAGMA cipher_integrity_check")?.exists([])?
-            || tx.pragma_query_value(None, "quick_check", |row| row.get::<_, String>(0))? != "ok"
-            || tx.prepare("PRAGMA foreign_key_check")?.exists([])?
-        {
-            return Err(Error::Unreadable);
-        }
+        verify_owner(&tx, owner)?;
     }
     for (index, sql) in migrations.iter().enumerate().skip(version) {
         tx.execute_batch(sql)?;
@@ -258,5 +294,21 @@ fn migrate_with_scripts(connection: &mut Connection, owner: Owner<'_>, initializ
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+fn schema_version(connection: &Connection, latest: usize) -> Result<usize> {
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    usize::try_from(version).ok().filter(|&version| version <= latest).ok_or(Error::UnsupportedSchema)
+}
+
+fn verify_owner(connection: &Connection, owner: Owner<'_>) -> Result<()> {
+    let stored = connection.query_row("SELECT void_id, public_key FROM local_account WHERE singleton = 1", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    }).optional().map_err(|_| Error::Unreadable)?;
+    let Some((void_id, public_key)) = stored else { return Err(Error::Unreadable); };
+    if void_id != owner.void_id || public_key != owner.public_key {
+        return Err(Error::WrongAccount);
+    }
     Ok(())
 }
