@@ -415,6 +415,35 @@ mod tests {
 
     const CHALLENGE_ID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
+    #[test]
+    fn signal_setup_preserves_the_protected_account_record() {
+        let dir = TestDir::new();
+        let store = dir.store();
+        let lock = store.lock().unwrap();
+        let mut identity = Identity::generate().unwrap();
+        identity.state = State::Registered(Registration {
+            void_id: "123".into(),
+            created_at: "2026-01-02T03:04:05Z".into(),
+        });
+        store.save(&identity).unwrap();
+        drop(lock);
+
+        let record = dir.record_path();
+        let protected = fs::read(&record).unwrap();
+        let public_key = identity.key.verifying_key();
+        let mut db = crate::storage::Database::open(record.parent().unwrap(), crate::storage::Owner {
+            void_id: "123", public_key: public_key.as_bytes(),
+        }).unwrap();
+        db.initialize_signal("123", &store.load().unwrap().unwrap().key).unwrap();
+        db.close().unwrap();
+
+        assert!(fs::read(&record).unwrap() == protected);
+        let loaded = store.load().unwrap().unwrap();
+        assert!(matches!(loaded.state, State::Registered(account) if account.void_id == "123"));
+        let challenge = b"local account proof test";
+        assert!(public_key.verify_strict(challenge, &loaded.key.sign(challenge)).is_ok());
+    }
+
     struct LocalApi<'a> {
         store: &'a Store,
         expected_key: [u8; 32],

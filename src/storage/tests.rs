@@ -112,7 +112,7 @@ fn migrations_and_message_transactions_roll_back_and_enforce_foreign_keys() {
     let root = TestDir::new();
     let mut db = Database::open(&root.0, OWNER).unwrap();
     let version = |connection: &Connection| connection.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap();
-    assert_eq!(version(&db.connection), 2);
+    assert_eq!(version(&db.connection), 3);
     assert!(db.save_draft(999, "missing conversation").is_err());
     assert!(db.set_request(999, true).is_err());
     assert!(db.save_message(&sample_message(999)).is_err());
@@ -179,7 +179,7 @@ fn routine_open_skips_damage_on_unread_pages_and_explicit_check_reports_it() {
 }
 
 #[test]
-fn existing_v1_history_survives_v2_migration_and_fk_diagnostics_detect_orphans() {
+fn existing_v1_history_survives_current_migrations_and_fk_diagnostics_detect_orphans() {
     let root = TestDir::new();
     assert!(check_existing(&root.0, OWNER).is_err());
     assert!(!root.0.join("messages").exists());
@@ -201,7 +201,7 @@ fn existing_v1_history_survives_v2_migration_and_fk_diagnostics_detect_orphans()
     connection.close().unwrap();
 
     let db = Database::open(&root.0, OWNER).unwrap();
-    assert_eq!(schema_version(&db.connection, 2).unwrap(), 2);
+    assert_eq!(schema_version(&db.connection, 3).unwrap(), 3);
     assert_eq!(db.messages(1).unwrap()[0].body, "Existing body");
     assert_eq!(db.draft(1).unwrap().as_deref(), Some("Existing draft"));
     db.connection.pragma_update(None, "foreign_keys", false).unwrap();

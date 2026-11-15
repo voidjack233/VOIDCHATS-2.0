@@ -5,11 +5,15 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+async-trait = "0.1"
 slint = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 ed25519-dalek = "2.2"
 getrandom = { version = "0.3", features = ["std"] }
+# Official Signal v0.106.1 (AGPL-3.0-only). A clean build needs protoc on PATH or PROTOC (verified with 34.1).
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal.git", rev = "904c8dc8216073b078a5f2f5090e3da8382e6a92" }
+rand = "0.9.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -50,13 +50,13 @@ fn worker_stopped(ui: &AppWindow) {
 pub(crate) fn bind(ui: &AppWindow) -> io::Result<Worker> {
     bind_with(ui, |id| {
         let account = account::load_registered_identity(id).map_err(|_| storage::Error::WrongAccount)?;
-        Ok((local_data::user_data_dir()?, account.key.verifying_key().to_bytes()))
+        Ok((local_data::user_data_dir()?, account.key))
     })
 }
 
 fn bind_with(
     ui: &AppWindow,
-    owner: impl Fn(&str) -> storage::Result<(PathBuf, [u8; 32])> + Send + 'static,
+    owner: impl Fn(&str) -> storage::Result<(PathBuf, ed25519_dalek::SigningKey)> + Send + 'static,
 ) -> io::Result<Worker> {
     let (sender, receiver) = mpsc::channel();
     let weak = ui.as_weak();
@@ -76,8 +76,11 @@ fn bind_with(
             match command {
                 Command::Open(id) => {
                     if database.is_some() { continue; }
-                    let opened = owner(&id).and_then(|(root, public_key)| {
-                        storage::Database::open(&root, storage::Owner { void_id: &id, public_key: &public_key })
+                    let opened = owner(&id).and_then(|(root, key)| {
+                        let public_key = key.verifying_key();
+                        let mut db = storage::Database::open(&root, storage::Owner { void_id: &id, public_key: public_key.as_bytes() })?;
+                        db.initialize_signal(&id, &key)?;
+                        Ok(db)
                     }).and_then(|db| load_lists(&db).map(|lists| (db, lists)));
                     match opened {
                         Ok((db, lists)) => {
@@ -349,9 +352,11 @@ mod tests {
             return;
         }
 
-        const OWNER: Owner<'_> = Owner { void_id: "41", public_key: &[5; 32] };
+        let account_key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let public_key = account_key.verifying_key();
+        let owner = Owner { void_id: "41", public_key: public_key.as_bytes() };
         let temp = TestDir::new();
-        let mut db = Database::open(&temp.0, OWNER).unwrap();
+        let mut db = Database::open(&temp.0, owner).unwrap();
         let id = db.create_conversation("123", 100).unwrap();
         db.save_message(&Message { id: "test-1".into(), conversation_id: id,
             direction: Direction::Incoming, body: "Stored test message".into(), created_at: 200,
@@ -361,14 +366,14 @@ mod tests {
 
         i_slint_backend_testing::init_integration_test_with_system_time();
         let ui = AppWindow::new().unwrap();
-        ui.set_account_void_id(OWNER.void_id.into());
+        ui.set_account_void_id(owner.void_id.into());
         ui.set_setup_page(0);
         let this_thread = thread::current().id();
         let root = temp.0.clone();
         let worker = bind_with(&ui, move |id| {
             assert_ne!(this_thread, thread::current().id());
-            assert_eq!(id, OWNER.void_id);
-            Ok((root.clone(), *OWNER.public_key))
+            assert_eq!(id, "41");
+            Ok((root.clone(), account_key.clone()))
         }).unwrap();
 
         worker.opener()(&ui);
@@ -400,7 +405,7 @@ mod tests {
         drop(ui);
         worker.finish();
 
-        let db = Database::open(&temp.0, OWNER).unwrap();
+        let db = Database::open(&temp.0, owner).unwrap();
         assert_eq!(db.draft(id).unwrap().as_deref(), Some("Latest edit"));
         assert_eq!(db.conversations(false).unwrap().len(), 2);
     }

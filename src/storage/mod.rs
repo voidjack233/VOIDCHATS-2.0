@@ -1,5 +1,6 @@
 mod records;
 mod events;
+mod signal;
 #[cfg(all(test, windows))]
 pub(crate) mod tests;
 
@@ -21,7 +22,9 @@ const DATABASE: &str = "messages.db";
 const KEY_FILE: &str = "messages-key.dpapi";
 const KEY_MAGIC: &[u8] = b"VOID-MESSAGE-DB-KEY\x01";
 const MAX_KEY_FILE_SIZE: u64 = 16_384;
-const MIGRATIONS: &[&str] = &[include_str!("schema_v1.sql"), include_str!("schema_v2.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("schema_v1.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql"),
+];
 
 #[derive(Clone, Copy)]
 pub(crate) struct Owner<'a> {
@@ -40,6 +43,7 @@ pub(crate) enum Error {
     UnsupportedSchema,
     Database,
     EventConflict,
+    SignalState,
 }
 
 impl Error {
@@ -54,6 +58,7 @@ impl Error {
             Self::UnsupportedSchema => "This build cannot open the local database version. Use a compatible VOID build.",
             Self::Database => "Local storage could not be opened. Check the VOID data directory and try again.",
             Self::EventConflict => "The event conflicts with its stored message or payload.",
+            Self::SignalState => "Local Signal keys could not be initialized or verified. Keep your VOID files and restore a matching backup if available.",
         }
     }
 }
