@@ -237,6 +237,181 @@ fn assert_received(db: &Database, peer: &str, id: &str, body: &str, created_at: 
 }
 
 #[test]
+fn interrupted_receipt_preparation_rolls_back_ratchet_and_resumes_with_the_same_id() {
+    let alice = TestAccount::new(ALICE, 71);
+    let bob = TestAccount::new(BOB, 72);
+    let mut a = alice.open();
+    let mut b = bob.open();
+    let peer_a = alice.trusted();
+    let peer_b = bob.trusted();
+    let chat = a.create_conversation(BOB, NOW_MS).unwrap();
+    a.establish_signal_session(&peer_b, BOB, &encode(&claim(&mut b, false)), at())
+        .unwrap();
+    let (original, _) = a.queue_outgoing(chat, "Prepare a receipt", NOW_MS).unwrap();
+    let payload = a
+        .encrypt_signal_message(&peer_b, chat, &original, "Prepare a receipt", NOW_MS)
+        .unwrap();
+    b.decrypt_signal_event(&peer_a, &relay_event(ALICE, &original, &payload), at())
+        .unwrap();
+
+    let now = b.next_receipt_attempt(0).unwrap().unwrap();
+    let first = b.claim_receipt(now).unwrap().unwrap();
+    let receipt_id = first.event_id.clone();
+    let before = session(&b, ALICE);
+    b.connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER interrupt_receipt BEFORE UPDATE OF payload ON receipt_outbox
+         BEGIN SELECT RAISE(ABORT, 'interrupt receipt'); END;",
+        )
+        .unwrap();
+    assert!(b.encrypt_signal_receipt(first).is_err());
+    assert!(session(&b, ALICE) == before);
+    b.close().unwrap();
+
+    let mut b = bob.open();
+    assert!(b.claim_receipt(now + 1).unwrap().is_none());
+    let next = b.next_receipt_attempt(now).unwrap().unwrap();
+    let attempt = b.claim_receipt(next).unwrap().unwrap();
+    assert_eq!(attempt.event_id, receipt_id);
+    assert!(attempt.payload.is_none());
+    let payload = b.encrypt_signal_receipt(attempt).unwrap();
+    a.decrypt_signal_event(&peer_b, &relay_event(BOB, &receipt_id, &payload), at())
+        .unwrap();
+    assert!(a.has_verified_delivery(&original).unwrap());
+
+    for _ in 2..8 {
+        let next = b.next_receipt_attempt(now).unwrap().unwrap();
+        let retry = b.claim_receipt(next).unwrap().unwrap();
+        assert_eq!(retry.event_id, receipt_id);
+        assert_eq!(retry.payload.as_deref(), Some(payload.as_slice()));
+    }
+    assert!(b.next_receipt_attempt(now).unwrap().is_none());
+}
+
+#[test]
+fn authenticated_receipts_cannot_claim_legacy_unrelated_or_unknown_messages() {
+    use super::{
+        crypto::encrypt_content,
+        wire::{Routing, encode_receipt},
+    };
+    use crate::storage::{DeliveryState, Direction, Message};
+
+    let alice = TestAccount::new(ALICE, 71);
+    let bob = TestAccount::new(BOB, 72);
+    let mut a = alice.open();
+    let mut b = bob.open();
+    let peer_a = alice.trusted();
+    let peer_b = bob.trusted();
+    a.establish_signal_session(&peer_b, BOB, &encode(&claim(&mut b, false)), at())
+        .unwrap();
+    let chat = a.create_conversation(BOB, NOW_MS).unwrap();
+    let unrelated = a.create_conversation("303", NOW_MS).unwrap();
+    let legacy = event_id(1);
+    let payload = a
+        .commit_outgoing(chat, &legacy, false, |tx| {
+            let routing = Routing {
+                event_id: &legacy,
+                sender: ALICE,
+                recipient: BOB,
+            };
+            let plaintext = json!({"v":2, "client_message_id":legacy, "from_void_id":ALICE,
+            "to_void_id":BOB, "body":"Legacy message", "created_at":NOW_MS});
+            let payload = encrypt_content(
+                tx,
+                &peer_b,
+                routing,
+                &serde_json::to_vec(&plaintext).unwrap(),
+            )?;
+            Ok((
+                Message {
+                    id: format!("{ALICE}:{legacy}"),
+                    conversation_id: chat,
+                    direction: Direction::Outgoing,
+                    body: "Legacy message".into(),
+                    created_at: NOW_MS,
+                    delivery_state: DeliveryState::Pending,
+                },
+                payload,
+            ))
+        })
+        .unwrap();
+    b.decrypt_signal_event(&peer_a, &relay_event(ALICE, &legacy, &payload), at())
+        .unwrap();
+    assert!(b.next_receipt_attempt(NOW_MS).unwrap().is_none());
+
+    let unrelated_id = event_id(2);
+    a.commit_outgoing(unrelated, &unrelated_id, true, |_| {
+        Ok((
+            Message {
+                id: format!("{ALICE}:{unrelated_id}"),
+                conversation_id: unrelated,
+                direction: Direction::Outgoing,
+                body: "For another peer".into(),
+                created_at: NOW_MS,
+                delivery_state: DeliveryState::Pending,
+            },
+            b"fixture".to_vec(),
+        ))
+    })
+    .unwrap();
+    let (opted_in, _) = a
+        .queue_outgoing(chat, "Receipt requested", NOW_MS + 1)
+        .unwrap();
+    a.encrypt_signal_message(&peer_b, chat, &opted_in, "Receipt requested", NOW_MS + 1)
+        .unwrap();
+
+    let before = session(&a, BOB);
+    for (index, target) in [legacy.as_str(), unrelated_id.as_str(), event_id(3).as_str()]
+        .into_iter()
+        .enumerate()
+    {
+        let control_id = event_id(10 + index as u32);
+        let routing = Routing {
+            event_id: &control_id,
+            sender: BOB,
+            recipient: ALICE,
+        };
+        let plaintext = encode_receipt(routing, target).unwrap();
+        let cipher = b
+            .write(|tx| encrypt_content(tx, &peer_a, routing, &plaintext))
+            .unwrap();
+        let event = relay_event(BOB, &control_id, &cipher);
+        assert!(matches!(
+            a.decrypt_signal_event(&peer_b, &event, at()),
+            Err(Error::SignalEnvelope)
+        ));
+        assert!(!a.has_verified_delivery(target).unwrap());
+        assert!(session(&a, BOB) == before);
+    }
+    let control_id = event_id(20);
+    let routing = Routing {
+        event_id: &control_id,
+        sender: BOB,
+        recipient: ALICE,
+    };
+    let plaintext = encode_receipt(routing, &opted_in).unwrap();
+    let cipher = b
+        .write(|tx| encrypt_content(tx, &peer_a, routing, &plaintext))
+        .unwrap();
+    a.decrypt_signal_event(&peer_b, &relay_event(BOB, &control_id, &cipher), at())
+        .unwrap();
+    assert!(a.has_verified_delivery(&opted_in).unwrap());
+    let verified = session(&a, BOB);
+    let mut changed = decode(&cipher);
+    changed["ciphertext_base64"] = json!("AQ==");
+    let conflicting = relay_event(BOB, &control_id, encode(&changed).as_bytes());
+    assert!(matches!(
+        a.decrypt_signal_event(&peer_b, &conflicting, at()),
+        Err(Error::EventConflict)
+    ));
+    assert!(session(&a, BOB) == verified);
+    assert_eq!(
+        a.messages(chat).unwrap()[1].delivery_state,
+        DeliveryState::Delivered
+    );
+}
+
+#[test]
 fn real_signal_messages_and_sessions_survive_restarts() {
     let alice = TestAccount::new(ALICE, 71);
     let bob = TestAccount::new(BOB, 72);

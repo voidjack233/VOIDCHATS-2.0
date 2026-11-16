@@ -15,6 +15,16 @@
 use super::{Database, Direction, Error, Message, Result, records::insert_message};
 use rusqlite::{OptionalExtension, Transaction, params};
 
+pub(super) enum Incoming {
+    Message {
+        message: Message,
+        receipt_at: Option<i64>,
+    },
+    Receipt {
+        original_event_id: String,
+    },
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IncomingOutcome {
     Stored,
@@ -31,6 +41,7 @@ impl Database {
         &mut self,
         conversation_id: i64,
         event_id: &str,
+        receipt_requested: bool,
         prepare: impl FnOnce(&Transaction<'_>) -> Result<(Message, Vec<u8>)>,
     ) -> Result<Vec<u8>> {
         if event_id.is_empty() {
@@ -50,8 +61,8 @@ impl Database {
                 return Err(Error::EventConflict);
             }
             insert_message(tx, &message)?;
-            tx.execute("INSERT INTO outbox (event_id, message_id, payload) VALUES (?1, ?2, ?3)",
-                params![event_id, message.id, payload])?;
+            tx.execute("INSERT INTO outbox (event_id, message_id, payload, receipt_requested) VALUES (?1, ?2, ?3, ?4)",
+                params![event_id, message.id, payload, receipt_requested])?;
             Ok(payload)
         })
     }
@@ -59,6 +70,7 @@ impl Database {
     /// Call with the canonical sender and a digest of the exact received payload bytes.
     /// Only an Ok result may authorize a later ACK for this event. A committed duplicate
     /// can be acknowledged again without running the callback or writing another message.
+    #[cfg(test)]
     pub(crate) fn commit_incoming(
         &mut self,
         sender: &str,
@@ -66,27 +78,53 @@ impl Database {
         digest: &[u8; 32],
         process: impl FnOnce(&Transaction<'_>) -> Result<Message>,
     ) -> Result<IncomingOutcome> {
+        self.commit_signal_incoming(sender, event_id, digest, |tx| {
+            Ok(Incoming::Message {
+                message: process(tx)?,
+                receipt_at: None,
+            })
+        })
+    }
+
+    pub(super) fn commit_signal_incoming(
+        &mut self,
+        sender: &str,
+        event_id: &str,
+        digest: &[u8; 32],
+        process: impl FnOnce(&Transaction<'_>) -> Result<Incoming>,
+    ) -> Result<IncomingOutcome> {
         if sender.is_empty() || event_id.is_empty() {
             return Err(Error::EventConflict);
         }
         self.write(|tx| {
             let stored: Option<Vec<u8>> = tx.query_row(
-                "SELECT payload_digest FROM inbox WHERE sender_void_id = ?1 AND event_id = ?2",
+                "SELECT payload_digest FROM inbox WHERE sender_void_id = ?1 AND event_id = ?2
+                 UNION ALL
+                 SELECT payload_digest FROM receipt_inbox WHERE sender_void_id = ?1 AND event_id = ?2",
                 params![sender, event_id], |row| row.get(0),
             ).optional()?;
             if let Some(stored) = stored {
                 return if stored == digest { Ok(IncomingOutcome::AlreadyStored) } else { Err(Error::EventConflict) };
             }
 
-            let message = process(tx)?;
-            let peer: String = tx.query_row("SELECT peer_void_id FROM conversations WHERE id = ?1",
-                [message.conversation_id], |row| row.get(0))?;
-            if peer != sender || message.direction != Direction::Incoming {
-                return Err(Error::EventConflict);
+            match process(tx)? {
+                Incoming::Message { message, receipt_at } => {
+                    let peer: String = tx.query_row("SELECT peer_void_id FROM conversations WHERE id = ?1",
+                        [message.conversation_id], |row| row.get(0))?;
+                    if peer != sender || message.direction != Direction::Incoming {
+                        return Err(Error::EventConflict);
+                    }
+                    insert_message(tx, &message)?;
+                    tx.execute("INSERT INTO inbox (sender_void_id, event_id, payload_digest, message_id) VALUES (?1, ?2, ?3, ?4)",
+                        params![sender, event_id, digest.as_slice(), message.id])?;
+                    if let Some(now) = receipt_at {
+                        super::receipts::queue(tx, sender, event_id, now)?;
+                    }
+                }
+                Incoming::Receipt { original_event_id } => {
+                    super::receipts::verify(tx, sender, event_id, digest, &original_event_id)?;
+                }
             }
-            insert_message(tx, &message)?;
-            tx.execute("INSERT INTO inbox (sender_void_id, event_id, payload_digest, message_id) VALUES (?1, ?2, ?3, ?4)",
-                params![sender, event_id, digest.as_slice(), message.id])?;
             Ok(IncomingOutcome::Stored)
         })
     }

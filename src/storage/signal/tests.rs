@@ -354,7 +354,7 @@ fn event_transactions_include_official_prekey_store_writes() {
             .map_err(|_| Error::SignalState)?;
         Ok(message("in-message", MessageDirection::Incoming, DeliveryState::Received))
     };
-    assert!(db.commit_outgoing(conversation_id, "out-event", |tx| {
+    assert!(db.commit_outgoing(conversation_id, "out-event", false, |tx| {
         rt.block_on(adapters::SignalStore::new(tx).remove_pre_key(3.into()))
             .map_err(|_| Error::SignalState)?;
         Ok((message("out-message", MessageDirection::Outgoing, DeliveryState::Pending), Vec::new()))

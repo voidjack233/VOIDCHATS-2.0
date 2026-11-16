@@ -182,11 +182,11 @@ fn lookup(db: &Database, session: &Session, void_id: &str) -> Result<TrustedPeer
 
 pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str) -> Result<()> {
     let operation = db.outgoing_operation(event_id)?;
+    if operation.state == "sent" || db.has_verified_delivery(event_id)? {
+        return Ok(());
+    }
     if db.peer_account_status(&operation.peer)? == AccountStatus::Deleted {
         return Err(StorageError::PeerDeleted.into());
-    }
-    if operation.state == "sent" {
-        return Ok(());
     }
     let mut outcome = if operation.state == "unconfirmed" {
         SendState::Unconfirmed
@@ -276,7 +276,15 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
                 db.set_send_state(event_id, SendState::Sent)?;
                 Ok(())
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if operation.state != "unconfirmed"
+                    && matches!(&error, Error::Relay(RequestError::Rejected { code, .. })
+                        if matches!(code.as_str(), "invalid_frame" | "not_found" | "queue_full" | "rate_limited"))
+                {
+                    outcome = SendState::Failed;
+                }
+                Err(error)
+            }
             _ => Err(RequestError::Interrupted.into()),
         }
     })();
@@ -285,6 +293,45 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         db.set_send_state(event_id, outcome)?;
     }
     attempt
+}
+
+pub(crate) fn upload_due_receipt(db: &mut Database, session: &Session, now: i64) -> Result<()> {
+    if !session.is_active() {
+        return Ok(());
+    }
+    let Some(upload) = db.claim_receipt(now)? else {
+        return Ok(());
+    };
+    let event_id = upload.event_id.clone();
+    let peer = upload.peer.clone();
+    if db.peer_account_status(&peer)? == AccountStatus::Deleted {
+        return Ok(db.finish_receipt(&event_id)?);
+    }
+    let payload_base64 = String::from_utf8(db.encrypt_signal_receipt(upload)?)
+        .map_err(|_| StorageError::Unreadable)?;
+    let reply = peer_request(
+        db,
+        session,
+        &peer,
+        Request::Send {
+            event_id: event_id.clone(),
+            to_void_id: peer.clone(),
+            payload_base64,
+        },
+    );
+    match reply {
+        Ok(Reply::Accepted { event_id: accepted }) if accepted == event_id => {
+            Ok(db.finish_receipt(&event_id)?)
+        }
+        Err(Error::Relay(RequestError::Rejected { code, .. }))
+            if matches!(code.as_str(), "invalid_frame" | "not_found") =>
+        {
+            Ok(db.finish_receipt(&event_id)?)
+        }
+        Err(Error::Storage(StorageError::PeerDeleted)) => Ok(db.finish_receipt(&event_id)?),
+        Err(error) => Err(error),
+        _ => Err(RequestError::Interrupted.into()),
+    }
 }
 
 pub(crate) fn publication_failure(error: &Error) -> (&'static str, bool) {

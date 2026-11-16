@@ -180,6 +180,15 @@ impl Database {
     pub(crate) fn set_send_state(&mut self, event_id: &str, state: SendState) -> Result<()> {
         self.write(|tx| {
             let code = state.code();
+            if code != "sent"
+                && tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM receipt_inbox WHERE original_event_id = ?1)",
+                    [event_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return Ok(());
+            }
             let changed = tx.execute(
                 "UPDATE outgoing_operations SET state = ?2 WHERE event_id = ?1 AND state <> 'sent'",
                 params![event_id, code],
@@ -195,9 +204,15 @@ impl Database {
                 SendState::Unconfirmed => DeliveryState::Pending,
             };
             let messages = tx.execute(
-                "UPDATE messages SET delivery_state = ?2 WHERE id =
+                "UPDATE messages SET delivery_state = CASE
+                    WHEN delivery_state IN (?3, ?4) THEN delivery_state ELSE ?2 END WHERE id =
                 (SELECT message_id FROM outbox WHERE event_id = ?1) AND direction = 1",
-                params![event_id, delivery.code()],
+                params![
+                    event_id,
+                    delivery.code(),
+                    DeliveryState::Delivered.code(),
+                    DeliveryState::Read.code()
+                ],
             )?;
             if code == "sent" && messages != 1 {
                 return Err(Error::EventConflict);
@@ -215,8 +230,11 @@ impl Database {
                SELECT m.body, m.created_at, m.direction AS outgoing, NULL AS state, NULL AS event_id, m.id AS sort_id
                FROM messages m WHERE m.conversation_id = ?1 AND {STANDALONE_MESSAGE}
                UNION ALL
-               SELECT body, created_at, 1, state, event_id, event_id
-               FROM outgoing_operations WHERE conversation_id = ?1
+               SELECT body, created_at, 1,
+                      CASE WHEN EXISTS (
+                          SELECT 1 FROM receipt_inbox r WHERE r.original_event_id = o.event_id
+                      ) THEN 'delivered' ELSE state END, event_id, event_id
+               FROM outgoing_operations o WHERE conversation_id = ?1
              ) ORDER BY created_at, sort_id"
         ))?;
         let rows = query.query_map([conversation_id], |row| {
@@ -224,6 +242,7 @@ impl Database {
             let status = match state.as_deref() {
                 Some("pending") => "Pending",
                 Some("sent") => "Sent to relay",
+                Some("delivered") => "Delivered",
                 Some("unconfirmed") => "Acceptance unconfirmed",
                 Some("failed") => "Send failed",
                 _ => "",

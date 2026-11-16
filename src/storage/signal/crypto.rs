@@ -8,7 +8,9 @@ use super::{
     wire::{self, Routing, SignalBinding},
 };
 use crate::storage::{
-    Database, DeliveryState, Direction, Error, Message, Result, events::IncomingOutcome,
+    Database, DeliveryState, Direction, Error, Message, Result,
+    events::{Incoming, IncomingOutcome},
+    receipts::Upload,
 };
 use ed25519_dalek::VerifyingKey;
 use futures_util::FutureExt;
@@ -117,25 +119,9 @@ impl Database {
             sender: &local_id,
             recipient: peer.void_id(),
         };
-        self.commit_outgoing(conversation_id, event_id, |tx| {
+        self.commit_outgoing(conversation_id, event_id, true, |tx| {
             let plaintext = wire::encode_content(routing, body, created_at)?;
-            let local_binding = local_signal_binding(tx, &local_id)?;
-            let local = address(&local_id);
-            let remote = address(peer.void_id());
-            let mut sessions = SignalStore::new(tx);
-            let mut identities = SignalStore::new(tx);
-            let mut rng = signal_rng()?;
-            let now = SystemTime::now();
-            let ciphertext = run_signal(message_encrypt(
-                &plaintext,
-                &remote,
-                &local,
-                &mut sessions,
-                &mut identities,
-                now,
-                &mut rng,
-            ))?;
-            let payload = wire::encode_payload(routing, &local_binding, &ciphertext)?;
+            let payload = encrypt_content(tx, peer, routing, &plaintext)?;
             Ok((
                 Message {
                     id: message_id(&local_id, event_id),
@@ -147,6 +133,37 @@ impl Database {
                 },
                 payload,
             ))
+        })
+    }
+
+    pub(crate) fn encrypt_signal_receipt(&mut self, upload: Upload) -> Result<Vec<u8>> {
+        if let Some(payload) = upload.payload {
+            return Ok(payload);
+        }
+        self.write(|tx| {
+            let (local_id, _) = local_account(tx)?;
+            let account_key: Vec<u8> = tx.query_row(
+                "SELECT account_public_key FROM signal_peer_bindings WHERE peer_void_id = ?1 AND device_id = ?2",
+                params![upload.peer, DEVICE_ID],
+                |row| row.get(0),
+            )?;
+            let peer = TrustedPeer::from_trusted_lookup(
+                &upload.peer, &account_key.try_into().map_err(|_| Error::SignalPeer)?,
+            )?;
+            let routing = Routing {
+                event_id: &upload.event_id,
+                sender: &local_id,
+                recipient: &upload.peer,
+            };
+            let plaintext = wire::encode_receipt(routing, &upload.original_event_id)?;
+            let payload = encrypt_content(tx, &peer, routing, &plaintext)?;
+            if tx.execute(
+                "UPDATE receipt_outbox SET payload = ?2 WHERE event_id = ?1 AND payload IS NULL",
+                params![upload.event_id, payload],
+            )? != 1 {
+                return Err(Error::EventConflict);
+            }
+            Ok(payload)
         })
     }
 
@@ -188,73 +205,111 @@ impl Database {
         // Reject a changed binding even when commit_incoming takes its duplicate path.
         let pinned = peer::check_pin(&self.connection, &verified)?;
         let digest = Sha256::digest(event.payload_base64.as_bytes()).into();
-        let outcome = self.commit_incoming(&event.sender, &event.event_id, &digest, |tx| {
-            let local_binding = local_signal_binding(tx, &local_id)?;
-            if local_binding.identity_key == event.binding.identity_key {
-                return Err(Error::SignalPeer);
-            }
-            let ciphertext = match event.message_type {
-                CiphertextMessageType::PreKey => {
-                    let message = PreKeySignalMessage::try_from(event.ciphertext.as_slice())
-                        .map_err(|_| Error::SignalProtocol)?;
-                    if message.identity_key() != verified.identity_key()
-                        || message.registration_id() != event.binding.registration_id
-                    {
-                        return Err(Error::SignalPeer);
-                    }
-                    CiphertextMessage::PreKeySignalMessage(message)
+        let outcome =
+            self.commit_signal_incoming(&event.sender, &event.event_id, &digest, |tx| {
+                let local_binding = local_signal_binding(tx, &local_id)?;
+                if local_binding.identity_key == event.binding.identity_key {
+                    return Err(Error::SignalPeer);
                 }
-                CiphertextMessageType::Whisper if pinned => CiphertextMessage::SignalMessage(
-                    SignalMessage::try_from(event.ciphertext.as_slice())
-                        .map_err(|_| Error::SignalProtocol)?,
-                ),
-                _ => return Err(Error::SignalPeer),
-            };
-            peer::pin(tx, &verified)?;
-            let local = address(&local_id);
-            let remote = address(&event.sender);
-            let mut sessions = SignalStore::new(tx);
-            let mut identities = SignalStore::new(tx);
-            let mut prekeys = SignalStore::new(tx);
-            let signed_prekeys = SignalStore::new(tx);
-            let mut kyber_prekeys = SignalStore::new(tx);
-            let mut rng = signal_rng()?;
-            let plaintext = Zeroizing::new(run_signal(message_decrypt(
-                &ciphertext,
-                &remote,
-                &local,
-                &mut sessions,
-                &mut identities,
-                &mut prekeys,
-                &signed_prekeys,
-                &mut kyber_prekeys,
-                &mut rng,
-            ))?);
-            let session =
-                run_signal(sessions.load_session(&remote))?.ok_or(Error::SignalProtocol)?;
-            verify_session_peer(&session, verified.identity_key())?;
+                let ciphertext = match event.message_type {
+                    CiphertextMessageType::PreKey => {
+                        let message = PreKeySignalMessage::try_from(event.ciphertext.as_slice())
+                            .map_err(|_| Error::SignalProtocol)?;
+                        if message.identity_key() != verified.identity_key()
+                            || message.registration_id() != event.binding.registration_id
+                        {
+                            return Err(Error::SignalPeer);
+                        }
+                        CiphertextMessage::PreKeySignalMessage(message)
+                    }
+                    CiphertextMessageType::Whisper if pinned => CiphertextMessage::SignalMessage(
+                        SignalMessage::try_from(event.ciphertext.as_slice())
+                            .map_err(|_| Error::SignalProtocol)?,
+                    ),
+                    _ => return Err(Error::SignalPeer),
+                };
+                peer::pin(tx, &verified)?;
+                let local = address(&local_id);
+                let remote = address(&event.sender);
+                let mut sessions = SignalStore::new(tx);
+                let mut identities = SignalStore::new(tx);
+                let mut prekeys = SignalStore::new(tx);
+                let signed_prekeys = SignalStore::new(tx);
+                let mut kyber_prekeys = SignalStore::new(tx);
+                let mut rng = signal_rng()?;
+                let plaintext = Zeroizing::new(run_signal(message_decrypt(
+                    &ciphertext,
+                    &remote,
+                    &local,
+                    &mut sessions,
+                    &mut identities,
+                    &mut prekeys,
+                    &signed_prekeys,
+                    &mut kyber_prekeys,
+                    &mut rng,
+                ))?);
+                let session =
+                    run_signal(sessions.load_session(&remote))?.ok_or(Error::SignalProtocol)?;
+                verify_session_peer(&session, verified.identity_key())?;
 
-            let routing = Routing {
-                event_id: &event.event_id,
-                sender: &event.sender,
-                recipient: &local_id,
-            };
-            let content = wire::decode_content(routing, &plaintext)?;
-            let conversation_id = incoming_conversation(tx, &event.sender, content.created_at)?;
-            Ok(Message {
-                id: message_id(&event.sender, &event.event_id),
-                conversation_id,
-                direction: Direction::Incoming,
-                body: content.body,
-                created_at: content.created_at,
-                delivery_state: DeliveryState::Received,
-            })
-        })?;
+                let routing = Routing {
+                    event_id: &event.event_id,
+                    sender: &event.sender,
+                    recipient: &local_id,
+                };
+                match wire::decode_content(routing, &plaintext)? {
+                    wire::Content::Message(content) => {
+                        let conversation_id =
+                            incoming_conversation(tx, &event.sender, content.created_at)?;
+                        Ok(Incoming::Message {
+                            message: Message {
+                                id: message_id(&event.sender, &event.event_id),
+                                conversation_id,
+                                direction: Direction::Incoming,
+                                body: content.body,
+                                created_at: content.created_at,
+                                delivery_state: DeliveryState::Received,
+                            },
+                            receipt_at: content.requests_receipt.then_some(now_ms),
+                        })
+                    }
+                    wire::Content::Receipt(original_event_id) if pinned => {
+                        Ok(Incoming::Receipt { original_event_id })
+                    }
+                    wire::Content::Receipt(_) => Err(Error::SignalPeer),
+                }
+            })?;
         if outcome == IncomingOutcome::AlreadyStored && !pinned {
             return Err(Error::SignalPeer);
         }
         Ok(outcome)
     }
+}
+
+pub(super) fn encrypt_content(
+    tx: &Transaction<'_>,
+    peer: &TrustedPeer,
+    routing: Routing<'_>,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let expected = peer::require_pinned(tx, peer)?;
+    let local_binding = local_signal_binding(tx, routing.sender)?;
+    let local = address(routing.sender);
+    let remote = address(routing.recipient);
+    let mut sessions = SignalStore::new(tx);
+    let mut identities = SignalStore::new(tx);
+    let session = run_signal(sessions.load_session(&remote))?.ok_or(Error::SignalProtocol)?;
+    verify_session_peer(&session, &expected)?;
+    let ciphertext = run_signal(message_encrypt(
+        plaintext,
+        &remote,
+        &local,
+        &mut sessions,
+        &mut identities,
+        SystemTime::now(),
+        &mut signal_rng()?,
+    ))?;
+    wire::encode_payload(routing, &local_binding, &ciphertext)
 }
 
 fn address(void_id: &str) -> ProtocolAddress {

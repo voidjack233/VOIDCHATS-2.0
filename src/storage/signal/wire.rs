@@ -67,6 +67,12 @@ pub(super) struct ParsedEvent {
 pub(super) struct ParsedContent {
     pub(super) body: String,
     pub(super) created_at: i64,
+    pub(super) requests_receipt: bool,
+}
+
+pub(super) enum Content {
+    Message(ParsedContent),
+    Receipt(String),
 }
 
 #[derive(Deserialize)]
@@ -117,6 +123,26 @@ struct MessageContent<'a> {
     created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_delivery_receipt: Option<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptContent<'a> {
+    v: u8,
+    #[serde(rename = "type")]
+    kind: Cow<'a, str>,
+    client_message_id: Cow<'a, str>,
+    original_message_id: Cow<'a, str>,
+    from_void_id: Cow<'a, str>,
+    to_void_id: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Plaintext<'a> {
+    #[serde(borrow)]
+    Message(MessageContent<'a>),
+    Receipt(ReceiptContent<'a>),
 }
 
 pub(super) fn valid_event_id(id: &str) -> bool {
@@ -262,19 +288,52 @@ pub(super) fn encode_content(
         to_void_id: routing.recipient.into(),
         body: body.into(),
         created_at,
-        request_delivery_receipt: None,
+        request_delivery_receipt: Some(1),
     };
     let mut bytes = Zeroizing::new(Vec::new());
     serde_json::to_writer(&mut *bytes, &content).map_err(|_| Error::SignalEnvelope)?;
     Ok(bytes)
 }
 
-pub(super) fn decode_content(routing: Routing<'_>, bytes: &[u8]) -> Result<ParsedContent> {
+pub(super) fn encode_receipt(routing: Routing<'_>, original: &str) -> Result<Zeroizing<Vec<u8>>> {
+    if !routing.valid() || !valid_event_id(original) || routing.event_id == original {
+        return Err(Error::SignalEnvelope);
+    }
+    let content = ReceiptContent {
+        v: 1,
+        kind: "delivery_receipt".into(),
+        client_message_id: routing.event_id.into(),
+        original_message_id: original.into(),
+        from_void_id: routing.sender.into(),
+        to_void_id: routing.recipient.into(),
+    };
+    let mut bytes = Zeroizing::new(Vec::new());
+    serde_json::to_writer(&mut *bytes, &content).map_err(|_| Error::SignalEnvelope)?;
+    Ok(bytes)
+}
+
+pub(super) fn decode_content(routing: Routing<'_>, bytes: &[u8]) -> Result<Content> {
     if bytes.len() > MAX_CONTENT_BYTES || !routing.valid() {
         return Err(Error::SignalEnvelope);
     }
-    let content: MessageContent =
-        serde_json::from_slice(bytes).map_err(|_| Error::SignalEnvelope)?;
+    let content = match serde_json::from_slice(bytes).map_err(|_| Error::SignalEnvelope)? {
+        Plaintext::Message(message) => message,
+        Plaintext::Receipt(receipt) => {
+            if receipt.v != 1
+                || receipt.kind != "delivery_receipt"
+                || !routing.matches(
+                    &receipt.client_message_id,
+                    &receipt.from_void_id,
+                    &receipt.to_void_id,
+                )
+                || !valid_event_id(&receipt.original_message_id)
+                || receipt.original_message_id == routing.event_id
+            {
+                return Err(Error::SignalEnvelope);
+            }
+            return Ok(Content::Receipt(receipt.original_message_id.into_owned()));
+        }
+    };
     if content.v != PROTOCOL_VERSION
         || !routing.matches(
             &content.client_message_id,
@@ -288,10 +347,11 @@ pub(super) fn decode_content(routing: Routing<'_>, bytes: &[u8]) -> Result<Parse
     {
         return Err(Error::SignalEnvelope);
     }
-    Ok(ParsedContent {
+    Ok(Content::Message(ParsedContent {
         body: content.body.into_owned(),
         created_at: content.created_at,
-    })
+        requests_receipt: content.request_delivery_receipt == Some(1),
+    }))
 }
 
 #[cfg(test)]
@@ -306,17 +366,41 @@ mod tests {
     };
 
     #[test]
+    fn react_native_v1_receipt_shape_and_routing() {
+        let original = "4ee61607-e589-43f1-87cc-2076cf8a392a";
+        let fixture = br#"{"v":1,"type":"delivery_receipt","client_message_id":"7abeaf02-e740-430f-8eb7-b8ceefde11ad","original_message_id":"4ee61607-e589-43f1-87cc-2076cf8a392a","from_void_id":"110559210000000001","to_void_id":"110559210000000002"}"#;
+        let bytes = encode_receipt(ROUTING, original).unwrap();
+        assert_eq!(&bytes[..], fixture);
+        assert!(
+            matches!(decode_content(ROUTING, fixture), Ok(Content::Receipt(id)) if id == original)
+        );
+
+        let expected: serde_json::Value = serde_json::from_slice(fixture).unwrap();
+        for (field, value) in [
+            ("v", json!(2)),
+            ("from_void_id", json!("42")),
+            ("to_void_id", json!("42")),
+            ("original_message_id", json!(ROUTING.event_id)),
+            ("original_message_id", json!("not-a-uuid")),
+            ("request_delivery_receipt", json!(1)),
+        ] {
+            let mut bad = expected.clone();
+            bad[field] = value;
+            assert!(decode_content(ROUTING, &serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+    }
+
+    #[test]
     fn void_message_content_validates_shape_routing_and_limits() {
         let fixture = r#"{"v":2,"client_message_id":"7abeaf02-e740-430f-8eb7-b8ceefde11ad","from_void_id":"110559210000000001","to_void_id":"110559210000000002","body":"Café / moon\nhello","created_at":1783332000000,"request_delivery_receipt":1}"#;
-        let content = decode_content(ROUTING, fixture.as_bytes()).unwrap();
+        let Content::Message(content) = decode_content(ROUTING, fixture.as_bytes()).unwrap() else {
+            panic!("not an application message");
+        };
+        assert!(content.requests_receipt);
         assert_eq!(content.body, "Café / moon\nhello");
         assert_eq!(content.created_at, 1_783_332_000_000);
         let encoded = encode_content(ROUTING, &content.body, content.created_at).unwrap();
-        let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
-        expected
-            .as_object_mut()
-            .unwrap()
-            .remove("request_delivery_receipt");
+        let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&encoded).unwrap(),
             expected

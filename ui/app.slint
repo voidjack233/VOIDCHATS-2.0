@@ -343,9 +343,30 @@ component MessageBubble inherits Rectangle {
     callback timestamp-hovered(string, length, length);
     callback timestamp-left();
     private property <length> inset: 9px;
+    private property <bool> reveal-retry;
+    private property <bool> pending-visible;
+    private property <string> status: root.message.outgoing ? root.message.status : "";
+    private property <bool> show-status-icon: root.status != "Pending" || root.pending-visible;
+    private property <string> status-label: root.status == "Pending" ? "Waiting to send"
+        : root.status == "Sent to relay" ? "Sent · accepted by relay" : root.status;
+    private property <image> status-icon: root.status == "Pending" ? @image-url("icons/delivery-pending.svg")
+        : root.status == "Sent to relay" ? @image-url("icons/delivery-sent.svg")
+        : root.status == "Delivered" ? @image-url("icons/delivery-confirmed.svg")
+        : root.status == "Acceptance unconfirmed" ? @image-url("icons/delivery-unconfirmed.svg")
+        : @image-url("icons/delivery-failed.svg");
+
+    Timer {
+        interval: 500ms;
+        running: root.status == "Pending" && !root.pending-visible;
+        triggered => { root.pending-visible = true; }
+    }
+    changed status => {
+        root.pending-visible = false;
+        root.reveal-retry = false;
+    }
 
     width: min(root.width-limit,
-        max(body.preferred-width, footer.preferred-width, root.show-retry ? 84px : 0px) + 2 * root.inset);
+        max(body.preferred-width, footer.preferred-width, root.show-retry && root.reveal-retry ? 84px : 0px) + 2 * root.inset);
     min-height: content.min-height;
     preferred-height: content.min-height;
     vertical-stretch: 0;
@@ -371,9 +392,10 @@ component MessageBubble inherits Rectangle {
 
             if root.message.time != "": Rectangle {
                 width: clock.preferred-width;
-                height: clock.preferred-height;
+                height: root.status != "" ? 18px : clock.preferred-height;
 
                 clock := Text {
+                    vertical-alignment: center;
                     text: root.message.time;
                     accessible-label: root.message.exact-time;
                     color: Theme.secondary;
@@ -392,23 +414,57 @@ component MessageBubble inherits Rectangle {
                     }
                 }
             }
-            if root.message.status != "": WrappingText {
-                text: root.message.status == "Sent to relay" ? "Relayed"
-                : root.message.status == "Acceptance unconfirmed" ? "Unconfirmed"
-                : root.message.status == "Send failed" ? "Failed" : root.message.status;
-                accessible-label: root.message.status;
-                color: Theme.secondary;
-                font-size: 11px;
-                vertical-alignment: center;
-                horizontal-alignment: right;
+            if root.status != "" && !root.show-retry: Rectangle {
+                width: 14px;
+                height: 18px;
+                accessible-role: text;
+                accessible-label: root.show-status-icon ? root.status-label : "";
+                Image {
+                    width: 14px;
+                    height: 14px;
+                    y: (parent.height - self.height) / 2;
+                    visible: root.show-status-icon;
+                    source: root.status-icon;
+                    colorize: root.status == "Send failed" ? Theme.error : Theme.secondary;
+                    accessible-role: none;
+                }
+                TouchArea {
+                    enabled: root.show-status-icon;
+                    changed has-hover => {
+                        if self.has-hover {
+                            root.timestamp-hovered(root.status-label, self.absolute-position.x, self.absolute-position.y);
+                        } else { root.timestamp-left(); }
+                    }
+                }
+            }
+            if root.show-retry: Clickable {
+                width: 22px;
+                height: 18px;
+                border-radius: 5px;
+                label: root.status-label + " · Resend options";
+                clicked => { root.reveal-retry = !root.reveal-retry; }
+                changed hovered => {
+                    if self.hovered {
+                        root.timestamp-hovered(root.status-label, self.absolute-position.x, self.absolute-position.y);
+                    } else { root.timestamp-left(); }
+                }
+                Image {
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: root.status-icon;
+                    colorize: root.status == "Send failed" ? Theme.error : Theme.secondary;
+                    accessible-role: none;
+                }
             }
         }
-        if root.show-retry: HorizontalLayout {
+        if root.show-retry && root.reveal-retry: HorizontalLayout {
             alignment: end;
             Action {
                 label: "Resend";
                 enabled: root.retry-enabled;
-                clicked => { root.retry(); }
+                clicked => { root.reveal-retry = false; root.retry(); }
             }
         }
     }

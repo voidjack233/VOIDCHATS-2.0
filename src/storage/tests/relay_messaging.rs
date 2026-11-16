@@ -376,6 +376,37 @@ async fn relay_script(listener: TcpListener) {
     send_json(&mut bob, next_event.clone()).await;
     person(&mut bob, ALICE, false).await;
     ack(&mut bob, &next_event, ALICE, true).await;
+
+    let receipt = receive_json(&mut bob).await;
+    assert_eq!(receipt["type"], "send");
+    assert_eq!(receipt["to_void_id"], ALICE);
+    assert_ne!(receipt["event_id"], queued["event_id"]);
+    let receipt_event = delivery(&receipt, BOB);
+    drop(bob); // Queue write committed, receipt upload acceptance lost.
+    send_json(&mut alice, receipt_event.clone()).await;
+    person(&mut alice, BOB, false).await;
+    ack(&mut alice, &receipt_event, BOB, true).await;
+
+    let mut bob = authenticate(&listener, BOB).await;
+    let next_receipt = receive_json(&mut bob).await;
+    assert_eq!(next_receipt["type"], "send");
+    assert_eq!(next_receipt["to_void_id"], ALICE);
+    assert_ne!(next_receipt["event_id"], receipt["event_id"]);
+    let next_receipt_event = delivery(&next_receipt, BOB);
+    send_json(
+        &mut bob,
+        json!({"type":"accepted", "event_id":next_receipt["event_id"],
+            "created_at":next_receipt_event["created_at"], "expires_at":next_receipt_event["expires_at"]}),
+    ).await;
+    send_json(&mut alice, next_receipt_event.clone()).await;
+    person(&mut alice, BOB, false).await;
+    ack(&mut alice, &next_receipt_event, BOB, true).await;
+
+    assert_eq!(receive_json(&mut bob).await, receipt); // UUID and ciphertext both survive.
+    send_json(&mut bob, json!({"type":"error", "code":"duplicate_event"})).await;
+    send_json(&mut alice, receipt_event.clone()).await;
+    person(&mut alice, BOB, false).await;
+    ack(&mut alice, &receipt_event, BOB, true).await;
 }
 
 pub(crate) fn mock_relay<F: Future<Output = ()> + 'static>(
@@ -582,6 +613,10 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     messaging::publish(&mut alice, &session).unwrap();
     assert!(messaging::send(&mut alice, Some(&session), &event_id).is_err());
     assert!(alice.committed_outgoing(&event_id).unwrap().is_none());
+    assert_eq!(
+        alice.conversation_timeline(conversation).unwrap()[0].status,
+        "Send failed"
+    );
     assert_eq!(alice.outgoing_operation(&event_id).unwrap().body, BODY);
     alice.close().unwrap();
     let mut alice = open(&alice_dir, ALICE);
@@ -645,6 +680,7 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     ));
     assert_eq!(count(&bob, "SELECT count(*) FROM inbox"), 0);
     assert_eq!(count(&bob, "SELECT count(*) FROM messages"), 0);
+    assert_eq!(count(&bob, "SELECT count(*) FROM receipt_outbox"), 0);
     assert_eq!(count(&bob, "SELECT count(*) FROM signal_prekeys"), 42);
     bob.connection
         .execute_batch("DROP TRIGGER test_inbox_commit; DROP TABLE test_ack_commit;")
@@ -666,6 +702,7 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     let bob_relay = client.next_session();
     client.receive(&mut bob, &bob_relay).unwrap();
     assert_eq!(bob.messages(request.id).unwrap().len(), 1);
+    assert_eq!(count(&bob, "SELECT count(*) FROM receipt_outbox"), 1);
     assert_eq!(session_record(&bob, ALICE), bob_session);
 
     assert!(bob.conversation(request.id).unwrap().is_request);
@@ -712,5 +749,67 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     let messages = bob.messages(request.id).unwrap();
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[2].body, FOLLOW_UP);
+    assert_eq!(
+        alice.conversation_timeline(conversation).unwrap()[2].status,
+        "Sent to relay"
+    );
+    assert_eq!(
+        count(
+            &bob,
+            "SELECT count(*) FROM receipt_outbox WHERE payload IS NULL"
+        ),
+        2
+    );
+    bob.close().unwrap();
+    let mut bob = open(&bob_dir, BOB);
+    let now = chrono::Utc::now().timestamp_millis();
+    assert!(messaging::upload_due_receipt(&mut bob, &bob_relay, now).is_err());
+    assert_eq!(
+        count(
+            &bob,
+            "SELECT count(*) FROM receipt_outbox WHERE payload IS NOT NULL"
+        ),
+        1
+    );
+    alice_client.receive(&mut alice, &session).unwrap();
+    assert!(alice.has_verified_delivery(&event_id).unwrap());
+    assert_eq!(
+        alice.outgoing_operation(&event_id).unwrap().state,
+        "unconfirmed"
+    );
+    assert_eq!(
+        alice.conversation_timeline(conversation).unwrap()[0].status,
+        "Delivered"
+    );
+    assert_eq!(
+        alice.conversation_timeline(conversation).unwrap()[0].retry_event,
+        ""
+    );
+
+    bob.close().unwrap();
+    let mut bob = open(&bob_dir, BOB);
+    let bob_relay = client.next_session();
+    messaging::upload_due_receipt(&mut bob, &bob_relay, now).unwrap();
+    alice_client.receive(&mut alice, &session).unwrap();
+    assert_eq!(
+        alice.conversation_timeline(conversation).unwrap()[2].status,
+        "Delivered"
+    );
+    assert!(messaging::upload_due_receipt(&mut bob, &bob_relay, now + 31_000).is_err());
+    alice_client.receive(&mut alice, &session).unwrap();
+    assert_eq!(count(&alice, "SELECT count(*) FROM receipt_inbox"), 2);
+    assert_eq!(alice.conversation_timeline(conversation).unwrap().len(), 3);
+    assert_eq!(count(&alice, "SELECT count(*) FROM receipt_outbox"), 1); // Only the application reply.
+
+    use crate::storage::messaging::SendState;
+    alice.set_send_state(&event_id, SendState::Failed).unwrap();
+    alice.set_send_state(&event_id, SendState::Sent).unwrap();
+    alice.close().unwrap();
+    let mut alice = open(&alice_dir, ALICE);
+    assert_eq!(
+        alice.conversation_timeline(conversation).unwrap()[0].status,
+        "Delivered"
+    );
+    messaging::send(&mut alice, None, &event_id).unwrap();
     mock.join().unwrap();
 }

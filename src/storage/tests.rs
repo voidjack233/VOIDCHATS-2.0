@@ -234,7 +234,7 @@ fn migrations_and_message_transactions_roll_back_and_enforce_foreign_keys() {
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap()
     };
-    assert_eq!(version(&db.connection), 8);
+    assert_eq!(version(&db.connection), 9);
     assert!(db.save_draft(999, "missing conversation").is_err());
     assert!(db.set_request(999, true).is_err());
     assert!(db.save_message(&sample_message(999)).is_err());
@@ -378,7 +378,7 @@ fn existing_v1_history_survives_current_migrations_and_fk_diagnostics_detect_orp
     connection.close().unwrap();
 
     let db = Database::open(&root.0, OWNER).unwrap();
-    assert_eq!(schema_version(&db.connection, 8).unwrap(), 8);
+    assert_eq!(schema_version(&db.connection, 9).unwrap(), 9);
     assert_eq!(db.messages(1).unwrap()[0].body, "Existing body");
     assert_eq!(db.conversation(1).unwrap().unread_through, None);
     assert_eq!(db.draft(1).unwrap().as_deref(), Some("Existing draft"));
@@ -434,19 +434,21 @@ fn v4_ciphertext_history_and_account_binding_survive_v5_migration() {
     let conversation = legacy.create_conversation("123", 100).unwrap();
     let event = messaging::new_event_id().unwrap();
     legacy
-        .commit_outgoing(conversation, &event, |_| {
-            Ok((
-                Message {
-                    id: "legacy-out".into(),
-                    conversation_id: conversation,
-                    direction: Direction::Outgoing,
-                    body: BODY.into(),
-                    created_at: 120,
-                    delivery_state: DeliveryState::Pending,
-                },
-                b"legacy encoded ciphertext".to_vec(),
-            ))
+        .save_message(&Message {
+            id: "legacy-out".into(),
+            conversation_id: conversation,
+            direction: Direction::Outgoing,
+            body: BODY.into(),
+            created_at: 120,
+            delivery_state: DeliveryState::Pending,
         })
+        .unwrap();
+    legacy
+        .connection
+        .execute(
+            "INSERT INTO outbox (event_id, message_id, payload) VALUES (?1, 'legacy-out', ?2)",
+            params![event, b"legacy encoded ciphertext".as_slice()],
+        )
         .unwrap();
     legacy.close().unwrap();
 
@@ -467,6 +469,16 @@ fn v4_ciphertext_history_and_account_binding_survive_v5_migration() {
         db.committed_outgoing(&event).unwrap().unwrap().payload,
         b"legacy encoded ciphertext"
     );
+    assert!(!db.has_verified_delivery(&event).unwrap());
+    let requested: bool = db
+        .connection
+        .query_row(
+            "SELECT receipt_requested FROM outbox WHERE event_id = ?1",
+            [&event],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!requested);
     let timeline = db.conversation_timeline(conversation).unwrap();
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].retry_event, event);
@@ -484,7 +496,7 @@ fn confirmed_peer_deletion_is_terminal_and_preserves_history_and_outbox() {
     db.save_message(&sample_message(chat)).unwrap();
     db.save_draft(request, "Reply draft").unwrap();
     let (event, _) = db.queue_outgoing(chat, "Pending text", 150).unwrap();
-    db.commit_outgoing(chat, &event, |_| {
+    db.commit_outgoing(chat, &event, false, |_| {
         Ok((
             Message {
                 id: "encrypted-pending".into(),
@@ -749,7 +761,7 @@ fn event_writes_commit_together_and_retries_skip_state_changes() {
     };
 
     assert!(
-        db.commit_outgoing(id, "out-event", |tx| {
+        db.commit_outgoing(id, "out-event", false, |tx| {
             fake_state(tx, 1)?;
             Ok((outbound(), vec![])) // outbox rejects the empty payload after the message insert
         })
@@ -786,7 +798,7 @@ fn event_writes_commit_together_and_retries_skip_state_changes() {
 
     let payload = vec![14, 0, 23];
     assert_eq!(
-        db.commit_outgoing(id, "out-event", |tx| {
+        db.commit_outgoing(id, "out-event", false, |tx| {
             fake_state(tx, 1)?;
             Ok((outbound(), payload.clone()))
         })
@@ -805,8 +817,10 @@ fn event_writes_commit_together_and_retries_skip_state_changes() {
 
     let mut db = Database::open(&root.0, OWNER).unwrap();
     assert_eq!(
-        db.commit_outgoing(id, "out-event", |_| panic!("retry must reuse payload"))
-            .unwrap(),
+        db.commit_outgoing(id, "out-event", false, |_| panic!(
+            "retry must reuse payload"
+        ))
+        .unwrap(),
         payload
     );
     assert_eq!(

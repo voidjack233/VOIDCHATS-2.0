@@ -29,6 +29,7 @@ enum Command {
     RetryMessaging,
     Relay(Activity),
     RefreshPeer(String),
+    UploadReceipt,
     Close,
 }
 
@@ -69,6 +70,13 @@ impl Worker {
     }
 }
 
+fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 fn worker_stopped(ui: &AppWindow) {
     ui.set_storage_loading(false);
     ui.set_storage_ready(false);
@@ -98,16 +106,20 @@ fn bind_with(
             let mut selected = None;
             let mut peer_refresh = VecDeque::new();
             let mut next_peer_refresh = Instant::now();
+            let mut next_receipt = None;
+            let mut receipt_not_before = Instant::now();
             while let Some(mut command) = queued.take().or_else(|| {
-                if peer_refresh.is_empty() {
+                let peer_due = (!peer_refresh.is_empty()).then_some(next_peer_refresh);
+                let Some(due) = peer_due.into_iter().chain(next_receipt).min() else {
                     return receiver.recv().ok();
-                }
+                };
                 // Give queued sends, deliveries, and draft edits priority and
                 // leave room for them in the relay's per-account command budget.
-                match receiver
-                    .recv_timeout(next_peer_refresh.saturating_duration_since(Instant::now()))
-                {
+                match receiver.recv_timeout(due.saturating_duration_since(Instant::now())) {
                     Ok(command) => Some(command),
+                    Err(mpsc::RecvTimeoutError::Timeout) if next_receipt == Some(due) => {
+                        Some(Command::UploadReceipt)
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         next_peer_refresh = Instant::now() + PEER_STATUS_INTERVAL;
                         peer_refresh.pop_front().map(Command::RefreshPeer)
@@ -127,6 +139,10 @@ fn bind_with(
                         }
                     }
                 }
+                let refresh_receipts = matches!(
+                    &command,
+                    Command::Relay(_) | Command::RetryMessaging | Command::UploadReceipt
+                );
                 match command {
                     Command::Open(id) => {
                         if database.is_some() {
@@ -259,6 +275,15 @@ fn bind_with(
                             show_selected_peer_status(&weak, db, selected);
                         }
                     }
+                    Command::UploadReceipt => {
+                        if let (Some(db), Some(session)) = (&mut database, &relay)
+                            && messaging_ready
+                            && session.is_active()
+                        {
+                            let _ = messaging::upload_due_receipt(db, session, unix_millis());
+                        }
+                        receipt_not_before = Instant::now() + Duration::from_secs(1);
+                    }
                     Command::RetryMessaging => {
                         if let (Some(db), Some(session)) = (&mut database, &relay)
                             && !messaging_ready
@@ -333,6 +358,26 @@ fn bind_with(
                         finish_send(&weak, result);
                     }
                     Command::Close => break,
+                }
+                if refresh_receipts {
+                    next_receipt = database
+                        .as_ref()
+                        .filter(|_| {
+                            messaging_ready && relay.as_ref().is_some_and(Session::is_active)
+                        })
+                        .and_then(|db| {
+                            let now = unix_millis();
+                            match db.next_receipt_attempt(now) {
+                                Ok(due) => due.map(|due| {
+                                    (Instant::now()
+                                        + Duration::from_millis(
+                                            due.saturating_sub(now).max(0) as u64
+                                        ))
+                                    .max(receipt_not_before)
+                                }),
+                                Err(_) => Some(Instant::now() + Duration::from_secs(5)),
+                            }
+                        });
                 }
             }
             if let Some(db) = database {
