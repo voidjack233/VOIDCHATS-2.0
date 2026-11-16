@@ -3,6 +3,7 @@ use super::{
     account_status::{self, AccountStatus},
 };
 use rusqlite::{OptionalExtension, params};
+use std::collections::HashMap;
 
 pub(crate) fn new_event_id() -> Result<String> {
     let mut bytes = [0u8; 16];
@@ -59,6 +60,16 @@ pub(crate) struct TimelineMessage {
     pub(crate) status: &'static str,
     pub(crate) retry_event: String,
 }
+
+pub(crate) struct MessagePreview {
+    pub(crate) body: String,
+    pub(crate) created_at: i64,
+}
+
+// A committed outgoing message and its queue entry represent the same item.
+const STANDALONE_MESSAGE: &str =
+    "NOT EXISTS (SELECT 1 FROM outbox b JOIN outgoing_operations o ON o.event_id = b.event_id
+                 WHERE b.message_id = m.id)";
 
 impl Database {
     pub(crate) fn recover_interrupted_sends(&self) -> Result<()> {
@@ -185,16 +196,15 @@ impl Database {
         &self,
         conversation_id: i64,
     ) -> Result<Vec<TimelineMessage>> {
-        let mut query = self.connection.prepare(
+        let mut query = self.connection.prepare(&format!(
             "SELECT body, created_at, outgoing, state, event_id FROM (
                SELECT m.body, m.created_at, m.direction AS outgoing, NULL AS state, NULL AS event_id, m.id AS sort_id
-               FROM messages m WHERE m.conversation_id = ?1 AND NOT EXISTS (
-                 SELECT 1 FROM outbox b JOIN outgoing_operations o ON o.event_id = b.event_id WHERE b.message_id = m.id)
+               FROM messages m WHERE m.conversation_id = ?1 AND {STANDALONE_MESSAGE}
                UNION ALL
                SELECT body, created_at, 1, state, event_id, event_id
                FROM outgoing_operations WHERE conversation_id = ?1
-             ) ORDER BY created_at, sort_id",
-        )?;
+             ) ORDER BY created_at, sort_id"
+        ))?;
         let rows = query.query_map([conversation_id], |row| {
             let state: Option<String> = row.get(3)?;
             let status = match state.as_deref() {
@@ -218,5 +228,39 @@ impl Database {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub(crate) fn last_message_previews(
+        &self,
+        conversation_ids: impl IntoIterator<Item = i64>,
+    ) -> Result<HashMap<i64, MessagePreview>> {
+        let mut query = self.connection.prepare(&format!(
+            "WITH last_saved AS (
+               SELECT m.body, m.created_at, m.id AS sort_id
+               FROM messages m WHERE m.conversation_id = ?1 AND {STANDALONE_MESSAGE}
+               ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+             ), last_outgoing AS (
+               SELECT body, created_at, event_id AS sort_id
+               FROM outgoing_operations WHERE conversation_id = ?1
+               ORDER BY created_at DESC, event_id DESC LIMIT 1
+             )
+             SELECT * FROM last_saved UNION ALL SELECT * FROM last_outgoing
+             ORDER BY created_at DESC, sort_id DESC LIMIT 1"
+        ))?;
+        let mut previews = HashMap::new();
+        for id in conversation_ids {
+            let preview = query
+                .query_row([id], |row| {
+                    Ok(MessagePreview {
+                        body: row.get(0)?,
+                        created_at: row.get(1)?,
+                    })
+                })
+                .optional()?;
+            if let Some(preview) = preview {
+                previews.insert(id, preview);
+            }
+        }
+        Ok(previews)
     }
 }

@@ -8,7 +8,7 @@ build = "build.rs"
 async-trait = "0.1"
 slint = "1"
 base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ed25519-dalek = "2.2"
 getrandom = { version = "0.3", features = ["std"] }
 # Official Signal v0.106.1 (AGPL-3.0-only). A clean build needs protoc on PATH or PROTOC (verified with 34.1).

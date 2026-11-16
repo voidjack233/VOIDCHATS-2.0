@@ -1,9 +1,12 @@
+mod message_time;
+
 use crate::{AppWindow, StoredContact, StoredConversation, StoredMessage, account, storage};
 use crate::{
     messaging,
     relay::{Activity, Session},
     storage::account_status::AccountStatus,
 };
+use message_time::MessageTime;
 use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 use std::{
     collections::{HashMap, VecDeque},
@@ -688,25 +691,31 @@ fn begin_selection(ui: &AppWindow) -> i32 {
 }
 
 struct Lists {
-    chats: Vec<storage::Conversation>,
-    requests: Vec<storage::Conversation>,
+    chats: Vec<ConversationRow>,
+    requests: Vec<ConversationRow>,
     contacts: Vec<storage::Contact>,
+}
+
+struct ConversationRow {
+    id: i64,
+    display_name: Option<String>,
+    preview: String,
+    activity_at: i64,
+    unread: bool,
 }
 
 impl Lists {
     fn show(self, ui: &AppWindow) {
-        ui.set_chats_unread(self.chats.iter().any(|row| row.unread_through.is_some()));
-        ui.set_requests_unread(self.requests.iter().any(|row| row.unread_through.is_some()));
-        ui.set_stored_chats(conversation_model(self.chats));
-        ui.set_stored_requests(conversation_model(self.requests));
+        ui.set_chats_unread(self.chats.iter().any(|row| row.unread));
+        ui.set_requests_unread(self.requests.iter().any(|row| row.unread));
+        let today = chrono::Local::now().date_naive();
+        ui.set_stored_chats(conversation_model(self.chats, today));
+        ui.set_stored_requests(conversation_model(self.requests, today));
         let contacts: Vec<_> = self
             .contacts
             .into_iter()
             .map(|contact| StoredContact {
-                title: contact
-                    .display_name
-                    .unwrap_or_else(|| "Contact".into())
-                    .into(),
+                title: contact_title(contact.display_name),
                 void_id: contact.void_id.into(),
             })
             .collect();
@@ -715,44 +724,71 @@ impl Lists {
 }
 
 fn load_lists(db: &storage::Database) -> storage::Result<Lists> {
+    let chats = db.conversations(false)?;
+    let requests = db.conversations(true)?;
+    let mut previews = db.last_message_previews(chats.iter().chain(&requests).map(|row| row.id))?;
     Ok(Lists {
-        chats: db.conversations(false)?,
-        requests: db.conversations(true)?,
+        chats: presentation_rows(chats, &mut previews),
+        requests: presentation_rows(requests, &mut previews),
         contacts: db.contacts()?,
     })
 }
 
-fn conversation_model(list: Vec<storage::Conversation>) -> ModelRc<StoredConversation> {
-    let rows: Vec<_> = list
+fn presentation_rows(
+    conversations: Vec<storage::Conversation>,
+    previews: &mut HashMap<i64, storage::messaging::MessagePreview>,
+) -> Vec<ConversationRow> {
+    conversations
         .into_iter()
         .map(|row| {
-            let time = display_time(row.last_activity_at);
-            let activity = if row.last_activity_at == row.created_at {
-                format!("Created {time}")
-            } else {
-                time
+            let (preview, activity_at) = match previews.remove(&row.id) {
+                Some(message) => {
+                    let mut preview = message
+                        .body
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if let Some((end, _)) = preview.char_indices().nth(140) {
+                        preview.truncate(end);
+                        preview.push('…');
+                    }
+                    (preview, row.last_activity_at.max(message.created_at))
+                }
+                None => (String::from("No messages yet"), row.created_at),
             };
-            let activity = if row.display_name.is_none() {
-                let short_id = row.peer_void_id.char_indices().rev().nth(5).map_or(
-                    row.peer_void_id.clone(),
-                    |(start, _)| {
-                        if start == 0 {
-                            row.peer_void_id.clone()
-                        } else {
-                            format!("…{}", &row.peer_void_id[start..])
-                        }
-                    },
-                );
-                format!("{short_id} · {activity}")
-            } else {
-                activity
-            };
-            StoredConversation {
-                id: row.id.to_string().into(),
-                title: row.display_name.unwrap_or_else(|| "Contact".into()).into(),
-                activity: activity.into(),
+            ConversationRow {
+                id: row.id,
+                display_name: row.display_name,
+                preview,
+                activity_at,
                 unread: row.unread_through.is_some(),
             }
+        })
+        .collect()
+}
+
+fn contact_title(saved: Option<String>) -> slint::SharedString {
+    saved
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Contact".into())
+        .into()
+}
+
+fn conversation_model(
+    list: Vec<ConversationRow>,
+    today: chrono::NaiveDate,
+) -> ModelRc<StoredConversation> {
+    let rows: Vec<_> = list
+        .into_iter()
+        .map(|row| StoredConversation {
+            id: row.id.to_string().into(),
+            title: contact_title(row.display_name),
+            preview: row.preview.into(),
+            activity: MessageTime::local(row.activity_at)
+                .map(|time| time.activity_label(today))
+                .unwrap_or_default()
+                .into(),
+            unread: row.unread,
         })
         .collect();
     ModelRc::new(VecModel::from(rows))
@@ -775,13 +811,7 @@ impl Detail {
         } = self;
         ui.set_conversation_read_through("".into());
         ui.set_selected_conversation(conversation.id.to_string().into());
-        ui.set_conversation_title(
-            conversation
-                .display_name
-                .unwrap_or_else(|| "Contact".into())
-                .into(),
-        );
-        ui.set_conversation_peer_id(conversation.peer_void_id.into());
+        ui.set_conversation_title(contact_title(conversation.display_name));
         ui.set_conversation_is_request(conversation.is_request);
         ui.set_conversation_peer_deleted(account_status == AccountStatus::Deleted);
         show_messages(ui, messages);
@@ -804,18 +834,25 @@ fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessa
     let messages: Vec<_> = messages
         .into_iter()
         .map(|message| {
-            let date = chrono::DateTime::from_timestamp_millis(message.created_at);
-            let day = date.map(|date| date.date_naive());
-            let heading = day
-                .filter(|day| Some(*day) != previous_day)
-                .map(|day| day.format("%b %-d, %Y · UTC").to_string())
-                .unwrap_or_default();
-            previous_day = day;
+            let time = MessageTime::local(message.created_at);
+            let mut heading = String::new();
+            if let Some(time) = &time
+                && previous_day != Some(time.day())
+            {
+                previous_day = Some(time.day());
+                heading = time.calendar_label();
+            }
             StoredMessage {
                 body: message.body.into(),
                 day: heading.into(),
-                time: date
-                    .map(|date| date.format("%H:%M").to_string())
+                time: time
+                    .as_ref()
+                    .map(MessageTime::clock_label)
+                    .unwrap_or_default()
+                    .into(),
+                exact_time: time
+                    .as_ref()
+                    .map(MessageTime::exact_label)
                     .unwrap_or_default()
                     .into(),
                 outgoing: message.outgoing,
@@ -854,12 +891,6 @@ fn show_conversation(weak: &Weak<AppWindow>, selection: i32, detail: storage::Re
     });
 }
 
-fn display_time(timestamp: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(timestamp)
-        .map(|date| date.format("%b %-d, %Y · %H:%M UTC").to_string())
-        .unwrap_or_default()
-}
-
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
     use super::*;
@@ -886,6 +917,46 @@ pub(crate) mod tests {
             db.recover_interrupted_sends()?;
             Ok((db, confirmed))
         })
+    }
+
+    #[test]
+    fn conversation_previews_follow_the_visible_timeline_and_preserve_saved_names() {
+        let temp = TestDir::new();
+        let key = [8; 32];
+        let owner = Owner {
+            void_id: "41",
+            public_key: &key,
+        };
+        let mut db = Database::open(&temp.0, owner).unwrap();
+        let id = db.create_conversation("123", 100).unwrap();
+        db.update_conversation(id, Some("Saved contact"), 100)
+            .unwrap();
+        db.save_message(&Message {
+            id: "preview".into(),
+            conversation_id: id,
+            direction: Direction::Incoming,
+            body: "Earlier message".into(),
+            created_at: 200,
+            delivery_state: DeliveryState::Received,
+        })
+        .unwrap();
+        db.queue_outgoing(id, "Queued reply\nwith two lines", 300)
+            .unwrap();
+        let request = db.create_conversation("456", 400).unwrap();
+        db.set_request(request, true).unwrap();
+
+        let lists = load_lists(&db).unwrap();
+        assert_eq!(
+            lists.chats[0].display_name.as_deref(),
+            Some("Saved contact")
+        );
+        assert_eq!(lists.chats[0].preview, "Queued reply with two lines");
+        assert_eq!(lists.chats[0].activity_at, 300);
+        assert_eq!(lists.requests[0].preview, "No messages yet");
+        assert_eq!(
+            contact_title(lists.requests.into_iter().next().unwrap().display_name),
+            "Contact"
+        );
     }
 
     pub(crate) fn in_test_process(test: &str) -> bool {
@@ -965,7 +1036,10 @@ pub(crate) mod tests {
                 assert_eq!(ui.get_connection_status(), "Disconnected");
                 assert_eq!(ui.get_stored_chats().row_count(), 1);
                 assert!(ui.get_chats_unread());
-                assert!(ui.get_stored_chats().row_data(0).unwrap().unread);
+                let row = ui.get_stored_chats().row_data(0).unwrap();
+                assert!(row.unread);
+                assert_eq!(row.title, "Contact");
+                assert_eq!(row.preview, "Stored test message");
                 ui.invoke_select_stored_conversation(id.to_string().into());
             } else if ui.get_selected_conversation() == id.to_string()
                 && !ui.get_conversation_loading()
@@ -986,7 +1060,9 @@ pub(crate) mod tests {
                 ui.invoke_save_stored_draft("Intermediate edit".into());
                 ui.invoke_save_stored_draft("Latest edit".into());
                 ui.invoke_create_stored_conversation("456".into());
-            } else if ui.get_conversation_peer_id() == "456" {
+            } else if !ui.get_selected_conversation().is_empty()
+                && ui.get_selected_conversation() != id.to_string()
+            {
                 assert!(ui.get_stored_draft().is_empty());
                 assert_eq!(ui.get_stored_chats().row_count(), 2);
                 slint::quit_event_loop().unwrap();
@@ -999,7 +1075,6 @@ pub(crate) mod tests {
         slint::run_event_loop_until_quit().unwrap();
         poll.stop();
         assert_eq!(ui.get_conversation_title(), "Contact");
-        assert_eq!(ui.get_conversation_peer_id(), "456");
         assert!(ui.get_storage_error().is_empty());
         drop(ui);
         worker.finish();

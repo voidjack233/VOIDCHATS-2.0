@@ -1,8 +1,8 @@
 import { CheckBox, LineEdit, ScrollView, Spinner, TextEdit } from "std-widgets.slint";
 
-export struct StoredConversation { id: string, title: string, activity: string, unread: bool }
+export struct StoredConversation { id: string, title: string, preview: string, activity: string, unread: bool }
 export struct StoredContact { title: string, void-id: string }
-export struct StoredMessage { body: string, day: string, time: string, outgoing: bool, status: string, retry-event: string }
+export struct StoredMessage { body: string, day: string, time: string, exact-time: string, outgoing: bool, status: string, retry-event: string }
 
 global Theme {
     out property <color> background: #0c1118;
@@ -266,8 +266,10 @@ component UserAvatar inherits Rectangle {
 
 component StorageRow inherits Clickable {
     in property <string> detail;
+    in property <string> activity;
     in property <bool> unread;
-    accessible-label: root.label + ", " + root.detail + (root.unread ? ", unread messages" : "");
+    accessible-label: root.label + ", " + root.detail + (root.activity != "" ? ", " + root.activity : "")
+        + (root.unread ? ", unread messages" : "");
     min-height: 58px;
     vertical-stretch: 0;
 
@@ -282,12 +284,22 @@ component StorageRow inherits Clickable {
             spacing: 4px;
             alignment: center;
             horizontal-stretch: 1;
-            Text {
-                text: root.label;
-                color: Theme.primary;
-                font-size: 14px;
-                font-weight: root.unread ? 700 : 600;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.label;
+                    color: Theme.primary;
+                    font-size: 14px;
+                    font-weight: root.unread ? 700 : 600;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                if root.activity != "": Text {
+                    text: root.activity;
+                    color: Theme.secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
             }
             Text {
                 text: root.detail;
@@ -315,10 +327,12 @@ component MessageBubble inherits Rectangle {
     in property <bool> show-retry;
     in property <bool> retry-enabled;
     callback retry();
+    callback timestamp-hovered(string, length, length);
+    callback timestamp-left();
     private property <length> inset: 9px;
 
     width: min(root.width-limit,
-        max(body.preferred-width, metadata.preferred-width, root.show-retry ? 84px : 0px) + 2 * root.inset);
+        max(body.preferred-width, footer.preferred-width, root.show-retry ? 84px : 0px) + 2 * root.inset);
     min-height: content.min-height;
     preferred-height: content.min-height;
     vertical-stretch: 0;
@@ -338,15 +352,43 @@ component MessageBubble inherits Rectangle {
             color: Theme.primary;
             font-size: 14px;
         }
-        metadata := WrappingText {
-            private property <string> short-status: root.message.status == "Sent to relay" ? "Relayed"
+        footer := HorizontalLayout {
+            alignment: end;
+            spacing: 4px;
+
+            if root.message.time != "": Rectangle {
+                width: clock.preferred-width;
+                height: clock.preferred-height;
+
+                clock := Text {
+                    text: root.message.time;
+                    accessible-label: root.message.exact-time;
+                    color: Theme.secondary;
+                    font-size: 11px;
+                }
+
+                TouchArea {
+                    enabled: root.message.exact-time != "";
+                    changed has-hover => {
+                        if self.has-hover {
+                            root.timestamp-hovered(root.message.exact-time,
+                                self.absolute-position.x + self.width / 2, self.absolute-position.y);
+                        } else {
+                            root.timestamp-left();
+                        }
+                    }
+                }
+            }
+            if root.message.status != "": WrappingText {
+                text: root.message.status == "Sent to relay" ? "Relayed"
                 : root.message.status == "Acceptance unconfirmed" ? "Unconfirmed"
                 : root.message.status == "Send failed" ? "Failed" : root.message.status;
-            text: root.message.time + (self.short-status != "" ? " · " + self.short-status : "");
-            accessible-label: root.message.time + " UTC" + (root.message.status != "" ? ", " + root.message.status : "");
-            color: Theme.secondary;
-            font-size: 11px;
-            horizontal-alignment: right;
+                accessible-label: root.message.status;
+                color: Theme.secondary;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
         }
         if root.show-retry: HorizontalLayout {
             alignment: end;
@@ -725,7 +767,6 @@ export component AppWindow inherits Window {
     in property <[StoredMessage]> stored-messages;
     in property <string> selected-conversation;
     in property <string> conversation-title;
-    in property <string> conversation-peer-id;
     in property <string> conversation-read-through;
     in property <bool> conversation-is-request;
     in property <bool> conversation-peer-deleted;
@@ -799,6 +840,14 @@ export component AppWindow inherits Window {
             || (root.section == "Chats" && !root.conversation-is-request));
     out property <bool> conversation-can-compose: root.show-conversation && !root.conversation-peer-deleted;
     private property <bool> timeline-at-end: true;
+    private property <string> timestamp-tip;
+    private property <int> timestamp-tip-row: -1;
+    private property <length> timestamp-tip-x;
+    private property <length> timestamp-tip-y;
+
+    changed stored-messages => { root.timestamp-tip = ""; }
+    changed width => { root.timestamp-tip = ""; }
+    changed height => { root.timestamp-tip = ""; }
     private property <string> visible-read-through:
         root.window-foreground && root.show-conversation && !root.conversation-loading
             && root.setup-page == 0 && !root.showing-account-removal && root.timeline-at-end
@@ -811,7 +860,11 @@ export component AppWindow inherits Window {
     out property <string> conversation-account-notice: root.show-conversation && root.conversation-peer-deleted
         ? "This user account has been deleted." : "";
 
-    changed section => { root.cancel-permanent-deletion(); root.cancel-local-removal(); }
+    changed section => {
+        root.cancel-permanent-deletion();
+        root.cancel-local-removal();
+        root.timestamp-tip = "";
+    }
     changed settings-section => { root.cancel-permanent-deletion(); root.cancel-local-removal(); }
     changed in-settings => {
         if !root.in-settings { root.cancel-permanent-deletion(); }
@@ -1134,7 +1187,8 @@ export component AppWindow inherits Window {
                                 spacing: 4px;
                                 for chat in root.visible-conversations: StorageRow {
                                     label: chat.title;
-                                    detail: chat.activity;
+                                    detail: chat.preview;
+                                    activity: chat.activity;
                                     unread: chat.unread;
                                     selected: root.show-conversation && root.selected-conversation == chat.id;
                                     enabled: !root.conversation-loading;
@@ -1382,24 +1436,14 @@ export component AppWindow inherits Window {
                             width: 34px;
                             UserAvatar { y: (parent.height - self.height) / 2; }
                         }
-                        VerticalLayout {
-                            spacing: 4px;
-                            alignment: center;
+                        Text {
+                            text: root.conversation-title;
+                            color: Theme.primary;
+                            font-size: 16px;
+                            font-weight: 700;
+                            overflow: elide;
+                            vertical-alignment: center;
                             horizontal-stretch: 1;
-                            Text {
-                                text: root.conversation-title;
-                                color: Theme.primary;
-                                font-size: 16px;
-                                font-weight: 700;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: root.conversation-peer-id;
-                                accessible-label: "Peer VOID-ID " + root.conversation-peer-id;
-                                color: Theme.secondary;
-                                font-size: 12px;
-                                overflow: elide;
-                            }
                         }
                     }
                 }
@@ -1432,6 +1476,7 @@ export component AppWindow inherits Window {
                         self.follow-latest = true;
                         self.content-y = self.end-offset;
                     }
+                    changed content-y => { root.timestamp-tip = ""; }
                     changed end-offset => {
                         if self.end-offset == 0px { self.follow-latest = true; }
                         self.content-y = self.follow-latest ? self.end-offset
@@ -1456,14 +1501,13 @@ export component AppWindow inherits Window {
                             font-size: 14px;
                             horizontal-alignment: center;
                         }
-                        for message in root.stored-messages: VerticalLayout {
+                        for message[index] in root.stored-messages: VerticalLayout {
                             alignment: start;
-                            spacing: 6px;
+                            spacing: 4px;
                             if message.day != "": Text {
                                 text: message.day;
                                 color: Theme.secondary;
                                 font-size: 11px;
-                                horizontal-alignment: center;
                             }
                             HorizontalLayout {
                                 alignment: message.outgoing ? end : start;
@@ -1473,6 +1517,17 @@ export component AppWindow inherits Window {
                                     show-retry: !root.conversation-peer-deleted && message.retry-event != "";
                                     retry-enabled: root.messaging-ready && !root.send-busy;
                                     retry => { root.resend-message(message.retry-event); }
+                                    timestamp-hovered(label, x, y) => {
+                                        root.timestamp-tip-row = index;
+                                        root.timestamp-tip-x = x;
+                                        root.timestamp-tip-y = y;
+                                        root.timestamp-tip = label;
+                                    }
+                                    timestamp-left => {
+                                        if root.timestamp-tip-row == index {
+                                            root.timestamp-tip = "";
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1545,6 +1600,27 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if root.timestamp-tip != "" && root.show-conversation && root.setup-page == 0
+        && !root.showing-account-removal: Rectangle {
+        z: 5;
+        width: tooltip-text.preferred-width + 20px;
+        height: tooltip-text.preferred-height + 12px;
+        x: clamp(root.timestamp-tip-x - self.width / 2, 8px, root.width - self.width - 8px);
+        y: root.timestamp-tip-y >= self.height + 8px
+            ? root.timestamp-tip-y - self.height - 5px : root.timestamp-tip-y + 18px;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Theme.divider;
+        background: Theme.surface;
+        tooltip-text := Text {
+            text: root.timestamp-tip;
+            color: Theme.primary;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
     }
 }

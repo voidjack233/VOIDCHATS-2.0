@@ -663,7 +663,6 @@ fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startu
             ui.set_stored_messages(Default::default());
             ui.set_selected_conversation("".into());
             ui.set_conversation_title("".into());
-            ui.set_conversation_peer_id("".into());
             ui.set_conversation_read_through("".into());
             ui.set_conversation_is_request(false);
             ui.set_conversation_peer_deleted(false);
