@@ -631,6 +631,40 @@ fn request_promotion_and_first_reply_commit_together() {
 }
 
 #[test]
+fn outgoing_drafts_reject_whitespace_and_trim_only_edge_blank_lines() {
+    let root = TestDir::new();
+    let mut db = Database::open(&root.0, OWNER).unwrap();
+    let id = db.create_conversation("123", 100).unwrap();
+    db.set_request(id, true).unwrap();
+    for draft in ["", "\n\n", "   ", "\t\t", " \t\r\n\u{a0}\u{2003}\n"] {
+        db.save_draft(id, draft).unwrap();
+        assert!(matches!(
+            db.queue_outgoing(id, draft, 200),
+            Err(Error::SignalEnvelope)
+        ));
+        assert_eq!(
+            db.draft(id).unwrap().as_deref(),
+            Some(draft).filter(|s| !s.is_empty())
+        );
+        assert!(db.conversation_timeline(id).unwrap().is_empty());
+        assert!(db.conversation(id).unwrap().is_request);
+    }
+
+    for (draft, expected) in [
+        ("SOMETHING LIKE THIS\n\n\n", "SOMETHING LIKE THIS"),
+        (
+            " \r\n\t\r\n  Hello\r\n\r\nHow are you?  \r\n \t",
+            "  Hello\r\n\r\nHow are you?  ",
+        ),
+    ] {
+        db.save_draft(id, draft).unwrap();
+        let (event, _) = db.queue_outgoing(id, draft, 200).unwrap();
+        assert_eq!(db.outgoing_operation(&event).unwrap().body, expected);
+        assert!(db.draft(id).unwrap().is_none());
+    }
+}
+
+#[test]
 fn v5_migration_promotes_only_requests_with_outgoing_history_or_operations() {
     let root = TestDir::new();
     fs::create_dir(root.0.join("messages")).unwrap();

@@ -513,6 +513,7 @@ fn bind_drafts(ui: &AppWindow, sender: Sender<Command>) {
 }
 
 fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
+    ui.on_has_message_content(|body| !body.trim().is_empty());
     let weak = ui.as_weak();
     let send = sender.clone();
     ui.on_send_message(move || {
@@ -1130,7 +1131,7 @@ pub(crate) mod tests {
             delivery_state: DeliveryState::Received,
         })
         .unwrap();
-        db.save_draft(id, "First reply").unwrap();
+        db.save_draft(id, "First reply\n\n\n").unwrap();
         db.close().unwrap();
 
         i_slint_backend_testing::init_integration_test_with_system_time();
@@ -1157,7 +1158,7 @@ pub(crate) mod tests {
                     assert_eq!(ui.get_section(), "Requests");
                     assert!(ui.get_conversation_is_request());
                     assert_eq!(ui.get_stored_requests().row_count(), 1);
-                    assert_eq!(ui.get_stored_draft(), "First reply");
+                    assert_eq!(ui.get_stored_draft(), "First reply\n\n\n");
                     ui.invoke_send_message();
                     stage.set(2);
                 }
@@ -1171,6 +1172,7 @@ pub(crate) mod tests {
                     let reply = ui.get_stored_messages().row_data(1).unwrap();
                     assert_eq!(reply.body, "First reply");
                     assert_eq!(reply.status, "Send failed");
+                    assert_eq!(ui.get_stored_draft(), "");
                     slint::quit_event_loop().unwrap();
                 }
                 _ => (),
