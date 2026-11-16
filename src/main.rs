@@ -24,13 +24,10 @@ fn connect_relay(ui: &AppWindow, relay: &Connection) {
     {
         return;
     }
-    let started = if messaging {
-        relay.connect_messaging(void_id.to_string())
+    if messaging {
+        relay.connect_messaging(void_id.to_string());
     } else {
-        relay.connect(void_id.to_string())
-    };
-    if started {
-        ui.set_connection_status(ConnectionStatus::Connecting.label().into());
+        relay.connect(void_id.to_string());
     }
 }
 
@@ -52,7 +49,6 @@ fn bind_reconnect(ui: &AppWindow, relay: Connection) {
             && relay.connect_messaging(ui.get_account_void_id().to_string())
         {
             ui.set_relay_messaging_enabled(true);
-            ui.set_connection_status(ConnectionStatus::Connecting.label().into());
         }
     });
 }
@@ -114,12 +110,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let local_storage = storage_ui::bind(&ui).ok();
     let open_storage = local_storage.as_ref().map(|worker| worker.opener());
     let activity = local_storage.as_ref().map(|worker| worker.relay_activity());
-    let relay = Connection::start(report_relay_status(&ui), move |event| {
+    let (relay, relay_worker) = match Connection::start(report_relay_status(&ui), move |event| {
         if let Some(report) = &activity {
             report(event);
         }
-    })
-    .ok();
+    }) {
+        Ok((relay, worker)) => (Some(relay), Some(worker)),
+        Err(_) => (None, None),
+    };
     if let Some(relay) = relay.clone() {
         bind_reconnect(&ui, relay);
     }
@@ -144,6 +142,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let result = ui.run();
     drop(ui);
+    if let Some(worker) = relay_worker {
+        worker.finish();
+    }
     if let Some(worker) = local_storage {
         worker.finish();
     }

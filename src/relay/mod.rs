@@ -14,13 +14,13 @@ use serde_json::json;
 use std::{
     io,
     sync::mpsc as blocking,
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::TcpStream,
-    sync::mpsc,
-    time::{Instant, interval_at, sleep, timeout},
+    sync::{mpsc, oneshot},
+    time::{Instant, interval_at, sleep, sleep_until, timeout},
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
@@ -29,7 +29,8 @@ use tokio_tungstenite::{
 
 const ENDPOINT: &str = "wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(9_500);
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const MIN_RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,6 +43,7 @@ pub(crate) enum ConnectionStatus {
     Connecting,
     Connected,
     Disconnected,
+    Reconnecting,
     AuthenticationFailed,
 }
 
@@ -51,6 +53,7 @@ impl ConnectionStatus {
             Self::Connecting => "Connecting",
             Self::Connected => "Connected",
             Self::Disconnected => "Disconnected",
+            Self::Reconnecting => "Reconnecting",
             Self::AuthenticationFailed => "Authentication failed",
         }
     }
@@ -61,6 +64,18 @@ impl ConnectionStatus {
 #[derive(Clone)]
 pub(crate) struct Connection {
     requests: mpsc::Sender<ConnectRequest>,
+}
+
+pub(crate) struct Worker {
+    stop: oneshot::Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl Worker {
+    pub(crate) fn finish(self) {
+        let _ = self.stop.send(());
+        let _ = self.thread.join();
+    }
 }
 
 struct ConnectRequest {
@@ -87,6 +102,10 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    pub(crate) fn is_active(&self) -> bool {
+        !self.commands.is_closed()
+    }
+
     // Called on the SQLCipher worker. The socket continues to receive events during this wait.
     pub(crate) fn request(&self, request: Request) -> Result<Reply, RequestError> {
         let (reply, response) = blocking::channel();
@@ -118,7 +137,7 @@ impl Connection {
     pub(crate) fn start(
         report: impl Fn(ConnectionStatus) + Send + 'static,
         activity: impl Fn(Activity) + Send + 'static,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Worker)> {
         Self::spawn_with_activity(ENDPOINT.into(), load_registered_identity, report, activity)
     }
 
@@ -127,7 +146,7 @@ impl Connection {
         endpoint: String,
         load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
         report: impl Fn(ConnectionStatus) + Send + 'static,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Worker)> {
         Self::spawn_with_activity(endpoint, load_identity, report, |_| {})
     }
 
@@ -136,9 +155,10 @@ impl Connection {
         load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
         report: impl Fn(ConnectionStatus) + Send + 'static,
         activity: impl Fn(Activity) + Send + 'static,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Worker)> {
         let (requests, receiver) = mpsc::channel(1);
-        thread::Builder::new()
+        let (stop, stopped) = oneshot::channel();
+        let thread = thread::Builder::new()
             .name("void-relay".into())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -152,15 +172,18 @@ impl Connection {
                         return;
                     }
                 };
-                runtime.block_on(run_worker(
-                    receiver,
-                    &endpoint,
-                    load_identity,
-                    &report,
-                    &activity,
-                ));
+                runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = stopped => {}
+                        _ = run_worker(receiver, &endpoint, load_identity, &report, &activity) => {}
+                    }
+                });
+                // DNS can use Tokio's blocking pool. Cancelling the connection
+                // future must not make application shutdown wait on system DNS.
+                runtime.shutdown_background();
             })?;
-        Ok(Self { requests })
+        Ok((Self { requests }, Worker { stop, thread }))
     }
 
     pub(crate) fn connect(&self, void_id: String) -> bool {
@@ -190,9 +213,23 @@ async fn run_worker(
     activity: &impl Fn(Activity),
 ) {
     let mut next_attempt = Instant::now();
+    let mut manual_attempt = next_attempt;
+    let mut retry_step = 0_u32;
     let mut generation = 0;
     let mut next = requests.recv().await;
-    while let Some(ConnectRequest { void_id, messaging }) = next {
+    while let Some(ConnectRequest { void_id, messaging }) = &next {
+        tokio::select! {
+            biased;
+            request = requests.recv() => {
+                // A manual reconnect can shorten the wait, with the same minimum
+                // cooldown across clicks and failed attempts.
+                next = request;
+                next_attempt = manual_attempt;
+                continue;
+            }
+            _ = sleep_until(next_attempt) => {}
+        }
+        let messaging = *messaging;
         generation += 1;
         // Each connection has a fresh command queue. An old handle cannot target a new socket.
         let (commands, mut command_receiver) = mpsc::channel(2);
@@ -200,10 +237,10 @@ async fn run_worker(
             generation,
             commands,
         };
+        let mut connected_at = None;
         let attempt = async {
-            tokio::time::sleep_until(next_attempt).await;
             report(ConnectionStatus::Connecting);
-            let identity = match load_identity(&void_id) {
+            let identity = match load_identity(void_id) {
                 Ok(identity) => identity,
                 Err(_) => return ConnectionStatus::AuthenticationFailed,
             };
@@ -211,6 +248,9 @@ async fn run_worker(
                 connect_and_authenticate(endpoint, API_BASE, &identity, HANDSHAKE_TIMEOUT).await;
             // Keep the private key out of the idle session.
             drop(identity);
+            if result.is_ok() {
+                connected_at = Some(Instant::now());
+            }
             let messaging = messaging.then_some(Messaging {
                 session,
                 commands: &mut command_receiver,
@@ -219,24 +259,48 @@ async fn run_worker(
             monitor_authenticated(result, report, messaging).await
         };
         let (terminal, replacement) = tokio::select! {
-            status = attempt => (Some(status), None),
+            biased;
             request = requests.recv() => {
                 let Some(request) = request else { return; };
                 (None, Some(request))
             },
+            status = attempt => (Some(status), None),
         };
         drop(command_receiver);
         if messaging {
             activity(Activity::Offline(generation));
         }
-        next_attempt = Instant::now() + RECONNECT_DELAY;
-        next = if let Some(status) = terminal {
-            report(status);
-            requests.recv().await
-        } else {
-            replacement
-        };
+        let ended = Instant::now();
+        manual_attempt = ended + MIN_RECONNECT_DELAY;
+        next_attempt = manual_attempt;
+        // A brief successful handshake is part of the same failure streak.
+        if connected_at.is_some_and(|since| ended - since >= STABLE_CONNECTION) {
+            retry_step = 0;
+        }
+        match terminal {
+            Some(ConnectionStatus::Disconnected) if messaging => {
+                report(ConnectionStatus::Reconnecting);
+                let delay = reconnect_delay(retry_step, rand::random_range(0..=25));
+                retry_step = retry_step.saturating_add(1);
+                next_attempt = ended + delay;
+            }
+            Some(status) => {
+                report(status);
+                retry_step = 0;
+                next = requests.recv().await;
+            }
+            None => {
+                report(ConnectionStatus::Reconnecting);
+                next = replacement;
+            }
+        }
     }
+}
+
+fn reconnect_delay(step: u32, jitter_percent: u32) -> Duration {
+    // Cap the base below one minute so capped retries still spread out.
+    let base = (MIN_RECONNECT_DELAY * (1 << step.min(5))).min(Duration::from_secs(48));
+    base + base * jitter_percent / 100
 }
 
 #[cfg(test)]
@@ -263,7 +327,12 @@ async fn connect_and_authenticate(
             .max_frame_size(Some(MAX_FRAME_SIZE));
         let (mut socket, _) = connect_async_with_config(endpoint, Some(config), true)
             .await
-            .map_err(|_| ConnectionStatus::Disconnected)?;
+            .map_err(|error| match error {
+                WireError::Http(response) if matches!(response.status().as_u16(), 401 | 403) => {
+                    ConnectionStatus::AuthenticationFailed
+                }
+                _ => ConnectionStatus::Disconnected,
+            })?;
         authenticate(&mut socket, audience, identity).await?;
         Ok(socket)
     })
@@ -319,7 +388,13 @@ async fn read_auth_frame(socket: &mut Socket) -> Result<ServerFrame, ConnectionS
     loop {
         match socket.next().await {
             Some(Ok(Message::Text(text))) if text.len() <= 8 * 1024 => {
-                return protocol::decode(&text).ok_or(ConnectionStatus::AuthenticationFailed);
+                return match protocol::decode(&text) {
+                    Some(ServerFrame::Error(code)) if code == "unavailable" => {
+                        Err(ConnectionStatus::Disconnected)
+                    }
+                    Some(frame) => Ok(frame),
+                    None => Err(ConnectionStatus::AuthenticationFailed),
+                };
             }
             Some(Ok(Message::Ping(_))) => socket
                 .flush()
@@ -446,6 +521,9 @@ async fn monitor_authenticated<F: Fn(Activity)>(
                     Some(ServerFrame::PrekeyError { request_id, code })
                         if pending.as_ref().and_then(|request| request.request.prekey_id()) == Some(request_id.as_str()) => {
                         let _ = pending.take().unwrap().reply.send(Err(RequestError::Rejected(code)));
+                    }
+                    Some(ServerFrame::Error(code)) if matches!(code.as_str(), "authentication_failed" | "unauthorized") => {
+                        return ConnectionStatus::AuthenticationFailed;
                     }
                     Some(ServerFrame::Error(code)) if pending.is_some() => {
                         let _ = pending.take().unwrap().reply.send(Err(RequestError::Rejected(code)));

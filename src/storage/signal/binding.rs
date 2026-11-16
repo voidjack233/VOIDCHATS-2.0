@@ -44,18 +44,22 @@ pub(super) fn verify_binding(
     signal_public_key: &[u8],
     signature: &[u8],
 ) -> bool {
-    let Some(message) = binding_message(owner, device_id, registration_id, signal_public_key) else {
+    let Some(message) = binding_message(owner, device_id, registration_id, signal_public_key)
+    else {
         return false;
     };
-    Signature::from_slice(signature)
-        .is_ok_and(|signature| account_key.verify_strict(message.as_bytes(), &signature).is_ok())
+    Signature::from_slice(signature).is_ok_and(|signature| {
+        account_key
+            .verify_strict(message.as_bytes(), &signature)
+            .is_ok()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ANDROID_BINDING: &str = concat!(
+    const VOID_BINDING: &str = concat!(
         "VOID:signal-identity:v1\n",
         "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz\n",
         "123\n",
@@ -71,19 +75,29 @@ mod tests {
     }
 
     #[test]
-    fn signature_uses_exact_android_binding_bytes() {
+    fn signature_uses_exact_void_binding_bytes() {
         let account = SigningKey::from_bytes(&[7; 32]);
         let signal_key = signal_key();
         let signature = sign_binding(&account, "123", 1, 16_380, &signal_key).unwrap();
-        assert_eq!(signature, account.sign(ANDROID_BINDING.as_bytes()).to_bytes());
+        assert_eq!(signature, account.sign(VOID_BINDING.as_bytes()).to_bytes());
         assert!(verify_binding(
-            &account.verifying_key(), "123", 1, 16_380, &signal_key, &signature,
+            &account.verifying_key(),
+            "123",
+            1,
+            16_380,
+            &signal_key,
+            &signature,
         ));
 
-        let foreign_audience = ANDROID_BINDING.replace(API_BASE, "https://other.invalid");
+        let foreign_audience = VOID_BINDING.replace(API_BASE, "https://other.invalid");
         let signature = account.sign(foreign_audience.as_bytes()).to_bytes();
         assert!(!verify_binding(
-            &account.verifying_key(), "123", 1, 16_380, &signal_key, &signature,
+            &account.verifying_key(),
+            "123",
+            1,
+            16_380,
+            &signal_key,
+            &signature,
         ));
     }
 
@@ -97,11 +111,46 @@ mod tests {
         let wrong_account = SigningKey::from_bytes(&[8; 32]).verifying_key();
         let account = account.verifying_key();
 
-        assert!(!verify_binding(&wrong_account, "123", 1, 24, &signal_key, &signature));
-        assert!(!verify_binding(&account, "124", 1, 24, &signal_key, &signature));
-        assert!(!verify_binding(&account, "123", 1, 25, &signal_key, &signature));
-        assert!(!verify_binding(&account, "123", 1, 24, &different_signal_key, &signature));
-        assert!(!verify_binding(&account, "123", 1, 24, &signal_key, &signature[..63]));
+        assert!(!verify_binding(
+            &wrong_account,
+            "123",
+            1,
+            24,
+            &signal_key,
+            &signature
+        ));
+        assert!(!verify_binding(
+            &account,
+            "124",
+            1,
+            24,
+            &signal_key,
+            &signature
+        ));
+        assert!(!verify_binding(
+            &account,
+            "123",
+            1,
+            25,
+            &signal_key,
+            &signature
+        ));
+        assert!(!verify_binding(
+            &account,
+            "123",
+            1,
+            24,
+            &different_signal_key,
+            &signature
+        ));
+        assert!(!verify_binding(
+            &account,
+            "123",
+            1,
+            24,
+            &signal_key,
+            &signature[..63]
+        ));
 
         let signer = SigningKey::from_bytes(&[7; 32]);
         for (owner, device, registration, key) in [

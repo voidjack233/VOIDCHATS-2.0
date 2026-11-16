@@ -122,7 +122,9 @@ fn bind_with(
                             .and_then(|db| load_lists(&db).map(|lists| (db, lists)));
                         match opened {
                             Ok((mut db, lists)) => {
-                                if let Some(session) = &relay {
+                                if let Some(session) =
+                                    relay.as_ref().filter(|session| session.is_active())
+                                {
                                     show_messaging_result(
                                         &weak,
                                         messaging::publish(&mut db, session),
@@ -199,12 +201,13 @@ fn bind_with(
                             });
                         }
                     }
-                    Command::Relay(Activity::Online(session)) => {
+                    Command::Relay(Activity::Online(session)) if session.is_active() => {
                         if let Some(db) = &mut database {
                             show_messaging_result(&weak, messaging::publish(db, &session));
                         }
                         relay = Some(session);
                     }
+                    Command::Relay(Activity::Online(_)) => {}
                     Command::Relay(Activity::Offline(generation)) => {
                         if relay
                             .as_ref()
@@ -221,6 +224,7 @@ fn bind_with(
                     }) => {
                         if let (Some(db), Some(session)) = (&mut database, &relay)
                             && session.generation == generation
+                            && session.is_active()
                         {
                             let result = messaging::receive(db, session, &sender, &event_id, &json);
                             refresh_messages(&weak, db, selected);

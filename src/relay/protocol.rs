@@ -395,7 +395,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn challenge_validates_exact_android_signing_bytes_and_lifetime() {
+    fn challenge_validates_exact_relay_signing_bytes_and_lifetime() {
         let audience = "https://example.invalid/void";
         let void_id = "101";
         let expiry = "2026-11-14T12:05:00.123456789+08:00";

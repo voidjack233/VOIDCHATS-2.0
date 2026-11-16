@@ -249,7 +249,7 @@ component SetupPage inherits Rectangle {
                     if root.show-steps: Text {
                         text: root.page == 1 ? "Create your VOID account to get a VOID-ID."
                             : root.page == 2 ? "Your VOID-ID is the public identifier issued by VOID. Your private account key proves ownership."
-                            : root.page == 3 ? "Windows protects your private key under your Windows user profile. Keep your local VOID data. Account recovery and enrollment from Android are unavailable in this release."
+                            : root.page == 3 ? "Windows protects your private key under your Windows user profile. Keep your local VOID data. Account recovery is unavailable in this release."
                             : root.page == 4 ? "The final Terms of Service are unavailable in this preview. The next step lets you choose whether to register a real VOID account."
                             : "VOID receives your public key and proof of ownership. Your private key stays on this device.";
                         color: Theme.secondary;
@@ -798,7 +798,8 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         wrap: word-wrap;
                     }
-                    if root.connection-status == "Disconnected" || root.connection-status == "Authentication failed"
+                    if root.connection-status == "Disconnected" || root.connection-status == "Reconnecting"
+                        || root.connection-status == "Authentication failed"
                         || (root.relay-messaging-enabled && root.connection-status == "Connected" && root.messaging-notice != ""): Action {
                         label: "Reconnect";
                         enabled: !root.send-busy;

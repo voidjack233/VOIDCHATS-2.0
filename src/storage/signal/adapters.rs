@@ -79,7 +79,10 @@ fn canonical(bytes: &[u8], encoded: Zeroizing<Vec<u8>>) -> Result<()> {
 }
 
 fn check_ec_pair(pair: &KeyPair) -> Result<()> {
-    let derived = pair.private_key.public_key().map_err(|_| corrupt_record())?;
+    let derived = pair
+        .private_key
+        .public_key()
+        .map_err(|_| corrupt_record())?;
     if derived != pair.public_key {
         return Err(corrupt_record());
     }
@@ -138,7 +141,9 @@ fn address_parts(address: &ProtocolAddress) -> Result<(&str, u32)> {
     let device_id = u32::from(address.device_id());
     let peer = address.name();
     if device_id != 1 || !valid_void_id(peer) {
-        return Err(SignalProtocolError::InvalidArgument("invalid Signal address".into()));
+        return Err(SignalProtocolError::InvalidArgument(
+            "invalid Signal address".into(),
+        ));
     }
     Ok((peer, device_id))
 }
@@ -151,8 +156,11 @@ impl<'tx, 'conn> SignalStore<'tx, 'conn> {
     fn prekey(&self, kind: PreKeyKind, id: u32) -> Result<Zeroizing<Vec<u8>>> {
         kind.check_id(id)?;
         self.tx
-            .query_row("SELECT record FROM signal_prekeys WHERE kind = ?1 AND id = ?2",
-                params![kind.as_str(), id], |row| row.get(0))
+            .query_row(
+                "SELECT record FROM signal_prekeys WHERE kind = ?1 AND id = ?2",
+                params![kind.as_str(), id],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(storage_error)?
             .map(Zeroizing::new)
@@ -160,13 +168,22 @@ impl<'tx, 'conn> SignalStore<'tx, 'conn> {
     }
 
     fn save_prekey(&self, kind: PreKeyKind, id: u32, bytes: &[u8]) -> Result<()> {
-        let old: Option<Vec<u8>> = self.tx
-            .query_row("SELECT record FROM signal_prekeys WHERE kind = ?1 AND id = ?2",
-                params![kind.as_str(), id], |row| row.get(0))
-            .optional().map_err(storage_error)?;
+        let old: Option<Vec<u8>> = self
+            .tx
+            .query_row(
+                "SELECT record FROM signal_prekeys WHERE kind = ?1 AND id = ?2",
+                params![kind.as_str(), id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
         if let Some(old) = old.map(Zeroizing::new) {
             // Only identical retries are allowed, regardless of current publication state.
-            return if bytes == old.as_slice() { Ok(()) } else { Err(kind.invalid_id()) };
+            return if bytes == old.as_slice() {
+                Ok(())
+            } else {
+                Err(kind.invalid_id())
+            };
         }
         let next_id = self.tx
             .query_row(
@@ -177,27 +194,38 @@ impl<'tx, 'conn> SignalStore<'tx, 'conn> {
         if next_id == 0 || id < next_id {
             return Err(kind.invalid_id());
         }
-        self.tx.execute(
-            "INSERT INTO signal_prekeys (kind, id, record) VALUES (?1, ?2, ?3)",
-            params![kind.as_str(), id, bytes],
-        ).map_err(storage_error)?;
-        self.tx.execute(
-            "UPDATE signal_local_identity SET next_prekey_id = ?1 WHERE slot = 1",
-            [id + 1],
-        ).map_err(storage_error)?;
+        self.tx
+            .execute(
+                "INSERT INTO signal_prekeys (kind, id, record) VALUES (?1, ?2, ?3)",
+                params![kind.as_str(), id, bytes],
+            )
+            .map_err(storage_error)?;
+        self.tx
+            .execute(
+                "UPDATE signal_local_identity SET next_prekey_id = ?1 WHERE slot = 1",
+                [id + 1],
+            )
+            .map_err(storage_error)?;
         Ok(())
     }
 
     fn remove_prekey(&self, kind: PreKeyKind, id: u32) -> Result<()> {
         kind.check_id(id)?;
-        self.tx.execute("DELETE FROM signal_prekeys WHERE kind = ?1 AND id = ?2",
-            params![kind.as_str(), id]).map_err(storage_error)?;
+        self.tx
+            .execute(
+                "DELETE FROM signal_prekeys WHERE kind = ?1 AND id = ?2",
+                params![kind.as_str(), id],
+            )
+            .map_err(storage_error)?;
         Ok(())
     }
 
     fn verify_prekey_signature(&self, public_key: &[u8], signature: &[u8]) -> Result<()> {
         let identity = self.local_identity()?;
-        if !identity.public_key().verify_signature(public_key, signature) {
+        if !identity
+            .public_key()
+            .verify_signature(public_key, signature)
+        {
             return Err(SignalProtocolError::SignatureValidationFailed);
         }
         Ok(())
@@ -248,7 +276,7 @@ impl IdentityKeyStore for SignalStore<'_, '_> {
         address: &ProtocolAddress,
         identity: &IdentityKey,
     ) -> Result<IdentityChange> {
-        // As on Android, only a future coordinator with a verified account binding may pin.
+        // Only the messaging code that verifies the account binding may pin.
         if self.trusted_identity(address)?.as_ref() != Some(identity) {
             return Err(SignalProtocolError::UntrustedIdentity(address.clone()));
         }
@@ -273,28 +301,40 @@ impl IdentityKeyStore for SignalStore<'_, '_> {
 impl SessionStore for SignalStore<'_, '_> {
     async fn load_session(&self, address: &ProtocolAddress) -> Result<Option<SessionRecord>> {
         let (peer, device_id) = address_parts(address)?;
-        self.tx.query_row(
-            "SELECT record FROM signal_sessions WHERE peer_void_id = ?1 AND device_id = ?2",
-            params![peer, device_id], |row| row.get::<_, Vec<u8>>(0),
-        ).optional().map_err(storage_error)?.map(|bytes| {
-            let bytes = Zeroizing::new(bytes);
-            let record = SessionRecord::deserialize(&bytes).map_err(|_| corrupt_record())?;
-            canonical(&bytes, Zeroizing::new(record.serialize()?))?;
-            Ok(record)
-        }).transpose()
+        self.tx
+            .query_row(
+                "SELECT record FROM signal_sessions WHERE peer_void_id = ?1 AND device_id = ?2",
+                params![peer, device_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .map(|bytes| {
+                let bytes = Zeroizing::new(bytes);
+                let record = SessionRecord::deserialize(&bytes).map_err(|_| corrupt_record())?;
+                canonical(&bytes, Zeroizing::new(record.serialize()?))?;
+                Ok(record)
+            })
+            .transpose()
     }
 
-    async fn store_session(&mut self, address: &ProtocolAddress, record: &SessionRecord) -> Result<()> {
+    async fn store_session(
+        &mut self,
+        address: &ProtocolAddress,
+        record: &SessionRecord,
+    ) -> Result<()> {
         let (peer, device_id) = address_parts(address)?;
         let bytes = Zeroizing::new(record.serialize()?);
         if bytes.is_empty() {
             return Err(corrupt_record());
         }
-        self.tx.execute(
-            "INSERT INTO signal_sessions (peer_void_id, device_id, record) VALUES (?1, ?2, ?3)
+        self.tx
+            .execute(
+                "INSERT INTO signal_sessions (peer_void_id, device_id, record) VALUES (?1, ?2, ?3)
              ON CONFLICT (peer_void_id, device_id) DO UPDATE SET record = excluded.record",
-            params![peer, device_id, bytes.as_slice()],
-        ).map_err(storage_error)?;
+                params![peer, device_id, bytes.as_slice()],
+            )
+            .map_err(storage_error)?;
         Ok(())
     }
 }
@@ -324,7 +364,10 @@ impl PreKeyStore for SignalStore<'_, '_> {
 
 #[async_trait(?Send)]
 impl SignedPreKeyStore for SignalStore<'_, '_> {
-    async fn get_signed_pre_key(&self, signed_prekey_id: SignedPreKeyId) -> Result<SignedPreKeyRecord> {
+    async fn get_signed_pre_key(
+        &self,
+        signed_prekey_id: SignedPreKeyId,
+    ) -> Result<SignedPreKeyRecord> {
         let id = signed_prekey_id.into();
         let record = decode_signed_prekey(id, &self.prekey(PreKeyKind::Signed, id)?)?;
         self.verify_prekey_signature(&record.public_key()?.serialize(), &record.signature()?)?;
@@ -383,23 +426,33 @@ impl KyberPreKeyStore for SignalStore<'_, '_> {
         let signed_id = signed_prekey_id.into();
         PreKeyKind::Kyber.check_id(kyber_id)?;
         PreKeyKind::Signed.check_id(signed_id)?;
-        let last_resort: bool = self.tx.query_row(
-            "SELECT last_resort FROM signal_prekeys WHERE kind = 'kyber' AND id = ?1",
-            [kyber_id], |row| row.get(0),
-        ).optional().map_err(storage_error)?.ok_or(SignalProtocolError::InvalidKyberPreKeyId)?;
+        let last_resort: bool = self
+            .tx
+            .query_row(
+                "SELECT last_resort FROM signal_prekeys WHERE kind = 'kyber' AND id = ?1",
+                [kyber_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or(SignalProtocolError::InvalidKyberPreKeyId)?;
         if !last_resort {
             return self.remove_prekey(PreKeyKind::Kyber, kyber_id);
         }
         let encoded = base_key.serialize();
-        let inserted = self.tx.execute(
-            "INSERT INTO signal_kyber_uses (kyber_prekey_id, signed_prekey_id, base_key)
+        let inserted = self
+            .tx
+            .execute(
+                "INSERT INTO signal_kyber_uses (kyber_prekey_id, signed_prekey_id, base_key)
              VALUES (?1, ?2, ?3)
              ON CONFLICT (kyber_prekey_id, signed_prekey_id, base_key) DO NOTHING",
-            params![kyber_id, signed_id, encoded.as_ref()],
-        ).map_err(storage_error)?;
+                params![kyber_id, signed_id, encoded.as_ref()],
+            )
+            .map_err(storage_error)?;
         if inserted != 1 {
             return Err(SignalProtocolError::InvalidMessage(
-                CiphertextMessageType::PreKey, "reused base key".into(),
+                CiphertextMessageType::PreKey,
+                "reused base key".into(),
             ));
         }
         Ok(())

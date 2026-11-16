@@ -3,7 +3,7 @@ use crate::{
     account::RegisteredIdentity,
     messaging,
     relay::{
-        Activity, Connection, Request, RequestError, Session,
+        Activity, Connection, Request, RequestError, Session, Worker,
         tests::{Socket, expiry, receive_json, send_json, verify_account_proof},
     },
 };
@@ -42,13 +42,14 @@ fn open(dir: &TestDir, id: &str) -> Database {
 
 struct Client {
     relay: Connection,
+    _worker: Worker,
     events: mpsc::Receiver<Activity>,
 }
 
 impl Client {
     fn new(endpoint: &str) -> Self {
         let (events, receiver) = mpsc::channel();
-        let relay = Connection::spawn_with_activity(
+        let (relay, worker) = Connection::spawn_with_activity(
             endpoint.into(),
             |id| {
                 Ok(RegisteredIdentity {
@@ -64,12 +65,17 @@ impl Client {
         .unwrap();
         Self {
             relay,
+            _worker: worker,
             events: receiver,
         }
     }
 
     fn connect(&self, who: &str) -> Session {
         assert!(self.relay.connect_messaging(who.into()));
+        self.next_session()
+    }
+
+    fn next_session(&self) -> Session {
         loop {
             match self.events.recv_timeout(WAIT).unwrap() {
                 Activity::Online(session) => return session,
@@ -376,7 +382,7 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     );
     bob.close().unwrap();
     let mut bob = open(&bob_dir, BOB);
-    let replacement = client.connect(BOB);
+    let replacement = client.next_session();
     assert_ne!(session.generation, replacement.generation);
     assert!(matches!(
         session.request(Request::Lookup {
@@ -406,12 +412,10 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     assert!(messaging::send(&mut alice, Some(&session), &event_id).is_err());
     assert!(alice.committed_outgoing(&event_id).unwrap().is_none());
     assert_eq!(alice.outgoing_operation(&event_id).unwrap().body, BODY);
-    drop(client);
     alice.close().unwrap();
     let mut alice = open(&alice_dir, ALICE);
 
-    let client = Client::new(&endpoint);
-    let session = client.connect(ALICE);
+    let session = client.next_session();
     assert!(messaging::send(&mut alice, Some(&session), &event_id).is_err());
     let payload = alice
         .committed_outgoing(&event_id)
@@ -426,7 +430,11 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     let alice_session = session_record(&alice, BOB);
     alice.close().unwrap();
     let mut alice = open(&alice_dir, ALICE);
-    let replacement = client.connect(ALICE);
+    let replacement = client.next_session();
+    assert_eq!(
+        alice.outgoing_operation(&event_id).unwrap().state,
+        "unconfirmed"
+    );
     assert!(
         matches!(messaging::send(&mut alice, Some(&replacement), &event_id),
         Err(messaging::Error::Relay(RequestError::Rejected(code))) if code == "duplicate_event")
@@ -484,7 +492,7 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     let bob_session = session_record(&bob, ALICE);
     bob.close().unwrap();
     let mut bob = open(&bob_dir, BOB);
-    let session = client.connect(BOB);
+    let session = client.next_session();
     client.receive(&mut bob, &session).unwrap();
     assert_eq!(bob.messages(request.id).unwrap().len(), 1);
     assert_eq!(session_record(&bob, ALICE), bob_session);

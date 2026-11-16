@@ -100,7 +100,9 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         SendState::Failed
     };
     let attempt = (|| -> Result<()> {
-        let session = session.ok_or(Error::Offline)?;
+        let session = session
+            .filter(|session| session.is_active())
+            .ok_or(Error::Offline)?;
         let peer = lookup(session, &operation.peer)?;
         let session_exists = db.has_signal_session(&peer)?;
         let payload = if let Some(committed) = db.committed_outgoing(event_id)? {
@@ -125,6 +127,9 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
                         void_id,
                         payload_base64,
                     }) if reply_id == request_id && void_id == operation.peer => {
+                        if !session.is_active() {
+                            return Err(RequestError::Interrupted.into());
+                        }
                         db.establish_signal_session(
                             &peer,
                             &void_id,
@@ -141,6 +146,9 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
                     }
                     _ => return Err(RequestError::Interrupted.into()),
                 }
+            }
+            if !session.is_active() {
+                return Err(RequestError::Interrupted.into());
             }
             db.encrypt_signal_message(
                 &peer,
