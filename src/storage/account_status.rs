@@ -8,14 +8,25 @@ pub(crate) enum AccountStatus {
     Deleted,
 }
 
-/// An explicit peer status from the future authenticated backend adapter.
-#[allow(dead_code, reason = "The backend account-status contract is pending")]
+/// An explicit peer status from an authenticated, correlated relay reply.
 pub(crate) enum VerifiedPeerStatus {
     Active,
     Deleted,
 }
 
 impl Database {
+    pub(crate) fn peers_to_refresh(&self, selected: Option<i64>) -> Result<Vec<String>> {
+        let mut query = self.connection.prepare(
+            "SELECT c.peer_void_id FROM conversations c
+             LEFT JOIN peer_account_status account ON account.void_id = c.peer_void_id
+             WHERE account.status IS NULL OR account.status <> 'deleted'
+             ORDER BY (c.id = ?1) DESC, c.last_activity_at DESC, c.id",
+        )?;
+        Ok(query
+            .query_map([selected], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Read the saved evidence for a VOID-ID. A missing row means Unknown.
     pub(crate) fn peer_account_status(&self, void_id: &str) -> Result<AccountStatus> {
         let status = self.connection.query_row(

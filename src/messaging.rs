@@ -3,8 +3,13 @@
 
 use crate::{
     account::valid_void_id,
-    relay::{Reply, Request, RequestError, Session},
-    storage::{Database, Error as StorageError, messaging::SendState, signal::peer::TrustedPeer},
+    relay::{AccountState, Reply, Request, RequestError, Session},
+    storage::{
+        Database, Error as StorageError,
+        account_status::{AccountStatus, VerifiedPeerStatus},
+        messaging::SendState,
+        signal::peer::TrustedPeer,
+    },
 };
 use std::time::SystemTime;
 
@@ -13,6 +18,7 @@ pub(crate) enum Error {
     Storage(StorageError),
     Relay(RequestError),
     Offline,
+    UnconfirmedPeerStatus,
 }
 
 impl From<StorageError> for Error {
@@ -31,6 +37,9 @@ impl Error {
     pub(crate) fn message(&self) -> &'static str {
         match self {
             Self::Offline => "The message is saved locally. Choose Resend when messaging is ready.",
+            Self::UnconfirmedPeerStatus => {
+                "The relay reported a deleted account. Reconnect to verify the peer’s status."
+            }
             Self::Relay(RequestError::Interrupted) => {
                 "The relay response was interrupted. Check the connection and try again."
             }
@@ -104,13 +113,65 @@ pub(crate) fn publish(db: &mut Database, session: &Session) -> Result<()> {
     Ok(())
 }
 
-fn lookup(session: &Session, void_id: &str) -> Result<TrustedPeer> {
+pub(crate) fn refresh_peer_status(
+    db: &Database,
+    session: &Session,
+    void_id: &str,
+) -> Result<AccountStatus> {
+    let cached = db.peer_account_status(void_id)?;
+    if cached == AccountStatus::Deleted {
+        return Ok(cached);
+    }
+    let request_id = format!("status:{:016x}", rand::random::<u64>());
+    let reply = session.request(Request::AccountStatus {
+        request_id,
+        void_id: void_id.into(),
+    })?;
+    // Session::request matches both the request ID and the peer's VOID-ID.
+    let Reply::AccountStatus { state, .. } = reply else {
+        return Err(RequestError::Interrupted.into());
+    };
+    let evidence = match state {
+        AccountState::Active => VerifiedPeerStatus::Active,
+        AccountState::Deleted => VerifiedPeerStatus::Deleted,
+        AccountState::Unknown => return Ok(AccountStatus::Unknown),
+    };
+    db.record_verified_peer_status(void_id, evidence)?;
+    Ok(db.peer_account_status(void_id)?)
+}
+
+fn peer_request(
+    db: &Database,
+    session: &Session,
+    void_id: &str,
+    request: Request,
+) -> Result<Reply> {
+    match session.request(request) {
+        // A generic rejection can mean the requester itself was revoked. Require a
+        // correlated peer snapshot before persisting a terminal status for the target.
+        Err(RequestError::Rejected { code, .. }) if code == "account_deleted" => {
+            match refresh_peer_status(db, session, void_id) {
+                Ok(AccountStatus::Deleted) => Err(StorageError::PeerDeleted.into()),
+                Err(error @ Error::Storage(_)) => Err(error),
+                _ => Err(Error::UnconfirmedPeerStatus),
+            }
+        }
+        result => Ok(result?),
+    }
+}
+
+fn lookup(db: &Database, session: &Session, void_id: &str) -> Result<TrustedPeer> {
     if !valid_void_id(void_id) {
         return Err(StorageError::SignalPeer.into());
     }
-    match session.request(Request::Lookup {
-        void_id: void_id.into(),
-    })? {
+    match peer_request(
+        db,
+        session,
+        void_id,
+        Request::Lookup {
+            void_id: void_id.into(),
+        },
+    )? {
         Reply::Person {
             void_id: reported,
             public_key,
@@ -121,9 +182,7 @@ fn lookup(session: &Session, void_id: &str) -> Result<TrustedPeer> {
 
 pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str) -> Result<()> {
     let operation = db.outgoing_operation(event_id)?;
-    if db.peer_account_status(&operation.peer)?
-        == crate::storage::account_status::AccountStatus::Deleted
-    {
+    if db.peer_account_status(&operation.peer)? == AccountStatus::Deleted {
         return Err(StorageError::PeerDeleted.into());
     }
     if operation.state == "sent" {
@@ -138,7 +197,7 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         let session = session
             .filter(|session| session.is_active())
             .ok_or(Error::Offline)?;
-        let peer = lookup(session, &operation.peer)?;
+        let peer = lookup(db, session, &operation.peer)?;
         let session_exists = db.has_signal_session(&peer)?;
         let payload = if let Some(committed) = db.committed_outgoing(event_id)? {
             if !session_exists
@@ -152,10 +211,15 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         } else {
             if !session_exists {
                 let request_id = db.outgoing_claim(event_id)?;
-                let bundle = session.request(Request::PrekeysClaim {
-                    request_id: request_id.clone(),
-                    void_id: operation.peer.clone(),
-                });
+                let bundle = peer_request(
+                    db,
+                    session,
+                    &operation.peer,
+                    Request::PrekeysClaim {
+                        request_id: request_id.clone(),
+                        void_id: operation.peer.clone(),
+                    },
+                );
                 match bundle {
                     Ok(Reply::Bundle {
                         request_id: reply_id,
@@ -173,11 +237,11 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
                         )?;
                     }
                     Err(error) => {
-                        if matches!(&error, RequestError::Rejected { code, .. } if code == "prekey_claim_expired")
+                        if matches!(&error, Error::Relay(RequestError::Rejected { code, .. }) if code == "prekey_claim_expired")
                         {
                             db.clear_expired_claim(event_id)?;
                         }
-                        return Err(error.into());
+                        return Err(error);
                     }
                     _ => return Err(RequestError::Interrupted.into()),
                 }
@@ -197,17 +261,22 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         // Crash or timeout from this point forward means the send may have reached the relay.
         db.set_send_state(event_id, SendState::Unconfirmed)?;
         outcome = SendState::Unconfirmed;
-        let reply = session.request(Request::Send {
-            event_id: event_id.into(),
-            to_void_id: operation.peer,
-            payload_base64,
-        });
+        let reply = peer_request(
+            db,
+            session,
+            &operation.peer,
+            Request::Send {
+                event_id: event_id.into(),
+                to_void_id: operation.peer.clone(),
+                payload_base64,
+            },
+        );
         match reply {
             Ok(Reply::Accepted { event_id: accepted }) if accepted == event_id => {
                 db.set_send_state(event_id, SendState::Sent)?;
                 Ok(())
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
             _ => Err(RequestError::Interrupted.into()),
         }
     })();
@@ -250,6 +319,7 @@ pub(crate) fn publication_failure(error: &Error) -> (&'static str, bool) {
             "Signal key publication was interrupted. VOID will retry when it reconnects.",
             false,
         ),
+        Error::UnconfirmedPeerStatus => (error.message(), false),
         Error::Storage(StorageError::Database | StorageError::Unavailable | StorageError::Busy) => {
             (
                 "VOID could not save the Signal key publication in local storage. Keep your VOID data and retry messaging.",
@@ -271,7 +341,7 @@ pub(crate) fn receive(
     json: &str,
 ) -> Result<()> {
     // Validate that the delivery handoff is the same event that will be committed.
-    let peer = lookup(session, sender)?;
+    let peer = lookup(db, session, sender)?;
     db.decrypt_signal_delivery(&peer, json.as_bytes(), SystemTime::now(), Some(event_id))?;
     acknowledge(session, sender, event_id)
 }

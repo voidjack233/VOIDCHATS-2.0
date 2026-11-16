@@ -18,8 +18,8 @@ fn connect_relay(ui: &AppWindow, relay: &Connection) {
     if !matches!(ui.get_setup_page(), 0 | account::ENROLLMENT_PAGE)
         || !ui.get_storage_ready()
         || !account::valid_void_id(&void_id)
-        || ui.get_local_removal_busy()
-        || !ui.get_local_removal_error().is_empty()
+        || ui.get_removal_busy()
+        || !ui.get_removal_error().is_empty()
     {
         return;
     }
@@ -107,6 +107,84 @@ fn report_relay_status(ui: &AppWindow) -> impl Fn(ConnectionStatus) + Send + 'st
     }
 }
 
+fn bind_account_removal(
+    ui: &AppWindow,
+    messaging: Rc<RefCell<Option<MessagingWorkers>>>,
+    worker: &account::Worker,
+) {
+    ui.set_account_management_ready(true);
+    let remove = worker.remover();
+    let runtime = messaging;
+    let weak = ui.as_weak();
+    ui.on_request_account_removal(move |permanent| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_removal_busy() || !ui.get_account_management_ready() {
+            return;
+        }
+        let continuing = !ui.get_removal_error().is_empty();
+        let id = ui.get_account_void_id();
+        let expected_id = account::valid_void_id(&id).then(|| id.to_string());
+        let confirmed = if permanent {
+            ui.get_can_permanently_delete()
+        } else {
+            ui.get_local_removal_confirmed()
+        };
+        if (continuing && permanent != ui.get_removal_permanent())
+            || (!continuing && (!confirmed || expected_id.is_none()))
+        {
+            return;
+        }
+        ui.set_removal_permanent(permanent);
+        ui.set_removal_status(
+            if permanent {
+                "Preparing account deletion…"
+            } else {
+                "Removing this device’s VOID data…"
+            }
+            .into(),
+        );
+        ui.set_removal_busy(true);
+        ui.set_removal_error("".into());
+        ui.set_removal_can_go_back(false);
+        ui.invoke_cancel_local_removal();
+        ui.invoke_cancel_permanent_deletion();
+        let messaging = runtime.borrow_mut().take();
+        if !remove(
+            expected_id,
+            permanent,
+            Box::new(move || {
+                if let Some(workers) = messaging {
+                    workers.finish();
+                }
+            }),
+        ) {
+            ui.set_removal_busy(false);
+            ui.set_removal_error("Local account management stopped. Close and reopen VOID.".into());
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_leave_failed_removal(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if !ui.get_removal_can_go_back() || ui.get_removal_busy() {
+            return;
+        }
+        ui.set_removal_can_go_back(false);
+        ui.set_removal_error("".into());
+        ui.set_removal_permanent(false);
+        ui.set_storage_ready(false);
+        ui.set_messaging_ready(false);
+        ui.set_publishing_keys(false);
+        ui.set_publication_error("".into());
+        ui.set_publication_retryable(false);
+        ui.set_connection_status(ConnectionStatus::Disconnected.label().into());
+        ui.invoke_account_registered();
+    });
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let mut args = std::env::args_os().skip(1);
     if args
@@ -167,60 +245,7 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     let account = match account::bind(&ui) {
         Ok(worker) => {
-            let remove = worker.remover();
-            let runtime = messaging.clone();
-            let weak = ui.as_weak();
-            ui.on_request_local_removal(move || {
-                let Some(ui) = weak.upgrade() else {
-                    return;
-                };
-                if ui.get_local_removal_busy() {
-                    return;
-                }
-                let continuing = !ui.get_local_removal_error().is_empty();
-                let id = ui.get_account_void_id();
-                let expected_id = account::valid_void_id(&id).then(|| id.to_string());
-                if !continuing && (!ui.get_local_removal_confirmed() || expected_id.is_none()) {
-                    return;
-                }
-                ui.set_local_removal_busy(true);
-                ui.set_local_removal_error("".into());
-                ui.set_local_removal_can_go_back(false);
-                ui.invoke_cancel_local_removal();
-                let messaging = runtime.borrow_mut().take();
-                if !remove(
-                    expected_id,
-                    Box::new(move || {
-                        if let Some(workers) = messaging {
-                            workers.finish();
-                        }
-                    }),
-                ) {
-                    ui.set_local_removal_busy(false);
-                    ui.set_local_removal_error(
-                        "Local account management stopped. Close and reopen VOID.".into(),
-                    );
-                }
-            });
-            let weak = ui.as_weak();
-            ui.on_leave_failed_removal(move || {
-                let Some(ui) = weak.upgrade() else {
-                    return;
-                };
-                if !ui.get_local_removal_can_go_back() || ui.get_local_removal_busy() {
-                    return;
-                }
-                ui.set_local_removal_can_go_back(false);
-                ui.set_local_removal_error("".into());
-                ui.set_setup_page(account::ENROLLMENT_PAGE);
-                ui.set_storage_ready(false);
-                ui.set_messaging_ready(false);
-                ui.set_publishing_keys(false);
-                ui.set_publication_error("".into());
-                ui.set_publication_retryable(false);
-                ui.set_connection_status(ConnectionStatus::Disconnected.label().into());
-                ui.invoke_account_registered();
-            });
+            bind_account_removal(&ui, messaging.clone(), &worker);
             Some(worker)
         }
         Err(_) => {

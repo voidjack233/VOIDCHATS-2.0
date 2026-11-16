@@ -1,4 +1,5 @@
 //! Authenticated relay sessions and serialized command dispatch.
+pub(crate) mod deletion;
 mod protocol;
 
 #[cfg(test)]
@@ -8,8 +9,8 @@ use crate::account::{API_BASE, RegisteredIdentity as SessionIdentity, load_regis
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::Signer;
 use futures_util::{SinkExt, StreamExt};
+pub(crate) use protocol::{AccountState, Reply, Request, valid_utc_timestamp};
 use protocol::{MAX_FRAME_SIZE, ServerFrame};
-pub(crate) use protocol::{Reply, Request};
 use serde_json::json;
 use std::{
     io,
@@ -115,7 +116,9 @@ fn report_rejection(command: &str, code: &str) {
         | "prekeys_conflict"
         | "prekeys_capacity"
         | "prekeys_unavailable"
-        | "prekey_claim_expired" => code,
+        | "prekey_claim_expired"
+        | "account_deleted"
+        | "deletion_authorization_failed" => code,
         _ => "unknown_code",
     };
     eprintln!("command={command} code={code}");

@@ -11,6 +11,11 @@ const MAX_DELIVERY_PAYLOAD: usize = 1_048_576;
 pub(super) enum ServerFrame {
     Challenge(Challenge),
     AuthOk(String),
+    DeleteChallenge(Challenge),
+    AccountDeleted {
+        void_id: String,
+        deleted_at: String,
+    },
     Error(String),
     Delivery {
         sender: String,
@@ -28,6 +33,10 @@ pub(super) enum ServerFrame {
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Request {
+    AccountStatus {
+        request_id: String,
+        void_id: String,
+    },
     Lookup {
         void_id: String,
     },
@@ -52,6 +61,11 @@ pub(crate) enum Request {
 
 #[derive(Debug)]
 pub(crate) enum Reply {
+    AccountStatus {
+        request_id: String,
+        void_id: String,
+        state: AccountState,
+    },
     Person {
         void_id: String,
         public_key: [u8; 32],
@@ -73,9 +87,18 @@ pub(crate) enum Reply {
     },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AccountState {
+    Active,
+    Deleted,
+    Unknown,
+}
+
 impl Request {
     pub(super) fn name(&self) -> &'static str {
         match self {
+            Self::AccountStatus { .. } => "account_status",
             Self::Lookup { .. } => "lookup",
             Self::PrekeysPublish { .. } => "prekeys_publish",
             Self::PrekeysClaim { .. } => "prekeys_claim",
@@ -86,6 +109,17 @@ impl Request {
 
     pub(super) fn matches(&self, reply: &Reply) -> bool {
         match (self, reply) {
+            (
+                Self::AccountStatus {
+                    request_id,
+                    void_id,
+                },
+                Reply::AccountStatus {
+                    request_id: id,
+                    void_id: peer,
+                    ..
+                },
+            ) => request_id == id && void_id == peer,
             (Self::Lookup { void_id }, Reply::Person { void_id: id, .. }) => void_id == id,
             (
                 Self::PrekeysPublish { publication_id, .. },
@@ -141,6 +175,42 @@ impl Challenge {
         public_key: &str,
         now_ms: i64,
     ) -> Option<Vec<u8>> {
+        self.validate_transcript(
+            "VOID-NOTHINGNESS:authenticate:v2",
+            "",
+            audience,
+            void_id,
+            public_key,
+            now_ms,
+        )
+    }
+
+    pub(super) fn validate_deletion(
+        &self,
+        audience: &str,
+        void_id: &str,
+        public_key: &str,
+        now_ms: i64,
+    ) -> Option<Vec<u8>> {
+        self.validate_transcript(
+            "VOID:delete-account:v1",
+            "DELETE\n",
+            audience,
+            void_id,
+            public_key,
+            now_ms,
+        )
+    }
+
+    fn validate_transcript(
+        &self,
+        domain: &str,
+        confirmation: &str,
+        audience: &str,
+        void_id: &str,
+        public_key: &str,
+        now_ms: i64,
+    ) -> Option<Vec<u8>> {
         if self.is_expired(now_ms)
             || self.expiry_ms > now_ms.saturating_add(MAX_CHALLENGE_LIFETIME_MS)
         {
@@ -155,7 +225,7 @@ impl Challenge {
         // Preserve the server's exact timestamp representation and the HTTPS API audience.
         let audience = STANDARD.encode(audience);
         let prefix = format!(
-            "VOID-NOTHINGNESS:authenticate:v2\n{}\n{void_id}\n{public_key}\n{}\n{audience}\n",
+            "{domain}\n{}\n{void_id}\n{public_key}\n{}\n{audience}\n{confirmation}",
             self.id, self.expiry,
         );
         let nonce = bytes.strip_prefix(prefix.as_bytes())?.strip_suffix(b"\n")?;
@@ -170,6 +240,31 @@ impl Challenge {
     }
 }
 
+fn parse_challenge(id: String, message: String, expiry: String) -> Option<Challenge> {
+    if !valid_token(&id)
+        || message.len() > MAX_CHALLENGE_MESSAGE
+        || !valid_base64(&message, MAX_CHALLENGE_MESSAGE)
+    {
+        return None;
+    }
+    Some(Challenge {
+        id,
+        encoded_message: message,
+        expiry_ms: timestamp_ms(&expiry)?,
+        expiry,
+    })
+}
+
+pub(crate) fn valid_utc_timestamp(value: &str) -> bool {
+    value.ends_with('Z') && timestamp_ms(value).is_some()
+}
+
+fn present_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WireFrame {
@@ -180,6 +275,22 @@ enum WireFrame {
     },
     AuthOk {
         void_id: String,
+    },
+    AccountDeleteChallenge {
+        challenge_id: String,
+        message: String,
+        expires_at: String,
+    },
+    AccountDeleted {
+        void_id: String,
+        deleted_at: String,
+    },
+    AccountStatus {
+        request_id: String,
+        void_id: String,
+        state: AccountState,
+        #[serde(default, deserialize_with = "present_string")]
+        deleted_at: Option<String>,
     },
     Error {
         code: String,
@@ -235,16 +346,39 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
             challenge_id,
             message,
             expires_at,
-        } if valid_token(&challenge_id)
-            && message.len() <= MAX_CHALLENGE_MESSAGE
-            && valid_base64(&message, MAX_CHALLENGE_MESSAGE) =>
+        } => parse_challenge(challenge_id, message, expires_at).map(ServerFrame::Challenge),
+        WireFrame::AccountDeleteChallenge {
+            challenge_id,
+            message,
+            expires_at,
+        } if valid_utc_timestamp(&expires_at) => {
+            parse_challenge(challenge_id, message, expires_at).map(ServerFrame::DeleteChallenge)
+        }
+        WireFrame::AccountDeleted {
+            void_id,
+            deleted_at,
+        } if valid_void_id(&void_id) && valid_utc_timestamp(&deleted_at) => {
+            Some(ServerFrame::AccountDeleted {
+                void_id,
+                deleted_at,
+            })
+        }
+        WireFrame::AccountStatus {
+            request_id,
+            void_id,
+            state,
+            deleted_at,
+        } if valid_request_id(&request_id)
+            && valid_void_id(&void_id)
+            && match state {
+                AccountState::Deleted => deleted_at.as_deref().is_some_and(valid_utc_timestamp),
+                AccountState::Active | AccountState::Unknown => deleted_at.is_none(),
+            } =>
         {
-            let expiry_ms = timestamp_ms(&expires_at)?;
-            Some(ServerFrame::Challenge(Challenge {
-                id: challenge_id,
-                encoded_message: message,
-                expiry: expires_at,
-                expiry_ms,
+            Some(ServerFrame::Reply(Reply::AccountStatus {
+                request_id,
+                void_id,
+                state,
             }))
         }
         WireFrame::AuthOk { void_id } if valid_void_id(&void_id) => {
@@ -299,6 +433,7 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
                         | "prekeys_capacity"
                         | "prekey_claim_expired"
                         | "prekeys_unavailable"
+                        | "account_deleted"
                 ) =>
         {
             Some(ServerFrame::PrekeyError { request_id, code })
@@ -353,6 +488,13 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
         }
         _ => None,
     }
+}
+
+fn valid_request_id(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:".contains(&byte))
 }
 
 fn valid_count(value: &str) -> bool {
@@ -437,6 +579,90 @@ mod tests {
         assert!(validate(audience, void_id, &public_key, expiry_ms).is_none());
         assert!(validate("wss://example.invalid/void/ws", void_id, &public_key, now).is_none());
         assert!(validate(audience, "102", &public_key, now).is_none());
+    }
+
+    #[test]
+    fn deletion_validates_the_signed_confirmation_and_correlates_status() {
+        let audience = "https://example.invalid/void";
+        let id = URL_SAFE_NO_PAD.encode([1; 32]);
+        let nonce = URL_SAFE_NO_PAD.encode([2; 32]);
+        let key = STANDARD.encode([3; 32]);
+        let expires_at = "2026-11-16T00:00:30.123456789Z";
+        let expires_ms = timestamp_ms(expires_at).unwrap();
+        let fields = [
+            "VOID:delete-account:v1".into(),
+            id.clone(),
+            "123".into(),
+            key.clone(),
+            expires_at.into(),
+            STANDARD.encode(audience),
+            "DELETE".into(),
+            nonce,
+        ];
+        let decode_challenge = |message: &str| {
+            let frame = json!({"type": "account_delete_challenge", "challenge_id": id,
+                "message": STANDARD.encode(message), "expires_at": expires_at});
+            let Some(ServerFrame::DeleteChallenge(challenge)) = decode(&frame.to_string()) else {
+                panic!("expected a deletion challenge");
+            };
+            challenge
+        };
+        let message = fields.join("\n") + "\n";
+        let challenge = decode_challenge(&message);
+        let now = expires_ms - MAX_CHALLENGE_LIFETIME_MS;
+        assert_eq!(
+            challenge
+                .validate_deletion(audience, "123", &key, now)
+                .unwrap(),
+            message.as_bytes()
+        );
+        assert!(
+            challenge
+                .validate_deletion(audience, "123", &key, now - 1)
+                .is_none()
+        );
+        assert!(
+            challenge
+                .validate_deletion(audience, "123", &key, expires_ms)
+                .is_none()
+        );
+        for index in 0..fields.len() {
+            let mut tampered = fields.clone();
+            tampered[index].push('x');
+            let challenge = decode_challenge(&(tampered.join("\n") + "\n"));
+            assert!(
+                challenge
+                    .validate_deletion(audience, "123", &key, now)
+                    .is_none()
+            );
+        }
+        assert!(
+            decode_challenge(message.trim_end())
+                .validate_deletion(audience, "123", &key, now)
+                .is_none()
+        );
+
+        let request = Request::AccountStatus {
+            request_id: "status:1".into(),
+            void_id: "456".into(),
+        };
+        let response = |id: &str, peer: &str, state: &str| json!({"type": "account_status", "request_id": id, "void_id": peer, "state": state});
+        let mut frame = response("status:1", "456", "deleted");
+        assert!(decode(&frame.to_string()).is_none());
+        frame["deleted_at"] = json!(expires_at);
+        assert!(matches!(
+            decode(&frame.to_string()),
+            Some(ServerFrame::Reply(reply @ Reply::AccountStatus { state: AccountState::Deleted, .. }))
+                if request.matches(&reply)
+        ));
+        for (id, peer) in [("status:2", "456"), ("status:1", "457")] {
+            assert!(matches!(decode(&response(id, peer, "active").to_string()),
+                Some(ServerFrame::Reply(reply)) if !request.matches(&reply)));
+        }
+        frame["state"] = json!("active");
+        assert!(decode(&frame.to_string()).is_none());
+        frame["deleted_at"] = json!(null);
+        assert!(decode(&frame.to_string()).is_none());
     }
 
     #[test]

@@ -378,7 +378,7 @@ async fn relay_script(listener: TcpListener) {
     ack(&mut bob, &next_event, ALICE, true).await;
 }
 
-fn mock_relay<F: Future<Output = ()> + 'static>(
+pub(crate) fn mock_relay<F: Future<Output = ()> + 'static>(
     script: impl FnOnce(TcpListener) -> F + Send + 'static,
 ) -> (String, thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -399,6 +399,74 @@ fn mock_relay<F: Future<Output = ()> + 'static>(
             });
     });
     (format!("ws://{address}/ws"), worker)
+}
+
+#[test]
+fn a_rejected_send_requires_correlated_deleted_peer_status() {
+    use crate::storage::{Error as StorageError, account_status::AccountStatus};
+
+    let (endpoint, mock) = mock_relay(|listener| async move {
+        let mut socket = authenticate(&listener, ALICE).await;
+        for state in ["unknown", "deleted"] {
+            assert_eq!(
+                receive_json(&mut socket).await,
+                json!({"type": "lookup", "void_id": BOB})
+            );
+            send_json(
+                &mut socket,
+                json!({"type": "error", "code": "account_deleted"}),
+            )
+            .await;
+            let request = receive_json(&mut socket).await;
+            assert_eq!(
+                request,
+                json!({"type": "account_status", "request_id": request["request_id"], "void_id": BOB})
+            );
+            let mut reply = json!({"type": "account_status", "request_id": request["request_id"], "void_id": BOB, "state": state});
+            if state == "deleted" {
+                reply["deleted_at"] = json!("2026-11-16T00:00:12Z");
+            }
+            send_json(&mut socket, reply).await;
+        }
+        assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
+    });
+    let dir = TestDir::new();
+    let mut db = open(&dir, ALICE);
+    let conversation = db.create_conversation(BOB, 100).unwrap();
+    let (event, _) = db
+        .queue_outgoing(conversation, "Fixture message", 120)
+        .unwrap();
+    db.save_draft(conversation, "Keep this fixture draft")
+        .unwrap();
+    let client = Client::new(&endpoint);
+    let session = client.connect(ALICE);
+    assert!(matches!(
+        messaging::send(&mut db, Some(&session), &event),
+        Err(messaging::Error::UnconfirmedPeerStatus)
+    ));
+    assert_eq!(db.peer_account_status(BOB).unwrap(), AccountStatus::Unknown);
+    assert!(matches!(
+        messaging::send(&mut db, Some(&session), &event),
+        Err(messaging::Error::Storage(StorageError::PeerDeleted))
+    ));
+    assert_eq!(db.peer_account_status(BOB).unwrap(), AccountStatus::Deleted);
+    db.close().unwrap();
+    let mut db = open(&dir, ALICE);
+    assert!(matches!(
+        messaging::send(&mut db, Some(&session), &event),
+        Err(messaging::Error::Storage(StorageError::PeerDeleted))
+    ));
+    assert!(matches!(
+        db.queue_outgoing(conversation, "Cannot send", 121),
+        Err(StorageError::PeerDeleted)
+    ));
+    assert_eq!(db.conversation_timeline(conversation).unwrap().len(), 1);
+    assert_eq!(
+        db.draft(conversation).unwrap().as_deref(),
+        Some("Keep this fixture draft")
+    );
+    client._worker.finish();
+    mock.join().unwrap();
 }
 
 fn count(db: &Database, sql: &str) -> i64 {

@@ -2,16 +2,18 @@ use crate::{AppWindow, StoredContact, StoredConversation, StoredMessage, account
 use crate::{
     messaging,
     relay::{Activity, Session},
-    storage::account_status::{AccountStatus, VerifiedPeerStatus},
+    storage::account_status::AccountStatus,
 };
 use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io,
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+const PEER_STATUS_INTERVAL: Duration = Duration::from_millis(600);
 
 enum Command {
     Open(String),
@@ -22,7 +24,7 @@ enum Command {
     Resend(String),
     RetryMessaging,
     Relay(Activity),
-    VerifiedPeerStatus(String, VerifiedPeerStatus),
+    RefreshPeer(String),
     Close,
 }
 
@@ -32,18 +34,6 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    /// Entry point for a future adapter after it authenticates and correlates a status response.
-    #[allow(dead_code, reason = "The backend account-status contract is pending")]
-    pub(crate) fn record_verified_peer_status(
-        &self,
-        peer: String,
-        status: VerifiedPeerStatus,
-    ) -> io::Result<()> {
-        self.sender
-            .send(Command::VerifiedPeerStatus(peer, status))
-            .map_err(|_| io::Error::other("Local storage worker stopped"))
-    }
-
     pub(crate) fn relay_activity(&self) -> impl Fn(Activity) + Send + 'static {
         let sender = self.sender.clone();
         move |activity| {
@@ -102,7 +92,25 @@ fn bind_with(
             let mut relay: Option<Session> = None;
             let mut messaging_ready = false;
             let mut selected = None;
-            while let Some(mut command) = queued.take().or_else(|| receiver.recv().ok()) {
+            let mut peer_refresh = VecDeque::new();
+            let mut next_peer_refresh = Instant::now();
+            while let Some(mut command) = queued.take().or_else(|| {
+                if peer_refresh.is_empty() {
+                    return receiver.recv().ok();
+                }
+                // Give queued sends, deliveries, and draft edits priority and
+                // leave room for them in the relay's per-account command budget.
+                match receiver
+                    .recv_timeout(next_peer_refresh.saturating_duration_since(Instant::now()))
+                {
+                    Ok(command) => Some(command),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        next_peer_refresh = Instant::now() + PEER_STATUS_INTERVAL;
+                        peer_refresh.pop_front().map(Command::RefreshPeer)
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => None,
+                }
+            }) {
                 if let Command::SaveDraft(id, _, _) = command {
                     // Keep the latest edit in a burst without crossing a selection, create or close.
                     while let Ok(next) = receiver.try_recv() {
@@ -208,6 +216,11 @@ fn bind_with(
                     Command::Relay(Activity::Online(session)) if session.is_active() => {
                         if let Some(db) = &mut database {
                             messaging_ready = initialize_messaging(&weak, db, &session);
+                            if messaging_ready {
+                                peer_refresh =
+                                    db.peers_to_refresh(selected).unwrap_or_default().into();
+                                next_peer_refresh = Instant::now();
+                            }
                         }
                         relay = Some(session);
                     }
@@ -219,27 +232,15 @@ fn bind_with(
                         {
                             relay = None;
                             messaging_ready = false;
+                            peer_refresh.clear();
                         }
                     }
-                    Command::VerifiedPeerStatus(peer, status) => {
-                        if let Some(db) = &database {
-                            match db.record_verified_peer_status(&peer, status) {
-                                Ok(()) => {
-                                    if let Some(id) = selected
-                                        && let Ok(status) = db.conversation_account_status(id)
-                                    {
-                                        let id = id.to_string();
-                                        let _ = weak.upgrade_in_event_loop(move |ui| {
-                                            if ui.get_selected_conversation() == id {
-                                                ui.set_conversation_peer_deleted(
-                                                    status == AccountStatus::Deleted,
-                                                );
-                                            }
-                                        });
-                                    }
-                                }
-                                Err(error) => show_messaging_result(&weak, Err(error.into())),
-                            }
+                    Command::RefreshPeer(peer) => {
+                        if let (Some(db), Some(session)) = (&database, &relay)
+                            && session.is_active()
+                            && messaging::refresh_peer_status(db, session, &peer).is_ok()
+                        {
+                            show_selected_peer_status(&weak, db, selected);
                         }
                     }
                     Command::RetryMessaging => {
@@ -248,6 +249,11 @@ fn bind_with(
                             && session.is_active()
                         {
                             messaging_ready = initialize_messaging(&weak, db, session);
+                            if messaging_ready {
+                                peer_refresh =
+                                    db.peers_to_refresh(selected).unwrap_or_default().into();
+                                next_peer_refresh = Instant::now();
+                            }
                         }
                     }
                     Command::Relay(Activity::Delivery {
@@ -565,8 +571,8 @@ fn initialize_messaging(
 
 fn finish_enrollment(ui: &AppWindow) {
     if ui.get_setup_page() == account::ENROLLMENT_PAGE
-        && !ui.get_local_removal_busy()
-        && ui.get_local_removal_error().is_empty()
+        && !ui.get_removal_busy()
+        && ui.get_removal_error().is_empty()
     {
         ui.set_setup_status("Messaging ready".into());
         ui.set_section("Chats".into());
@@ -593,6 +599,7 @@ fn refresh_messages(
     selected: Option<i64>,
     promoted: Option<i64>,
 ) {
+    show_selected_peer_status(weak, db, selected);
     let lists = load_lists(db);
     let timeline = selected.and_then(|id| {
         db.conversation_timeline(id)
@@ -615,6 +622,23 @@ fn refresh_messages(
             show_messages(&ui, messages);
         }
     });
+}
+
+fn show_selected_peer_status(
+    weak: &Weak<AppWindow>,
+    db: &storage::Database,
+    selected: Option<i64>,
+) {
+    if let Some(id) = selected
+        && let Ok(status) = db.conversation_account_status(id)
+    {
+        let id = id.to_string();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if ui.get_selected_conversation() == id {
+                ui.set_conversation_peer_deleted(status == AccountStatus::Deleted);
+            }
+        });
+    }
 }
 
 fn draft_feedback(ui: &AppWindow, pending: Option<bool>) {
@@ -773,7 +797,7 @@ fn display_time(timestamp: i64) -> String {
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::storage::{Database, DeliveryState, Direction, Message, Owner, tests::TestDir};
     use slint::{Model, Timer, TimerMode};
@@ -800,7 +824,7 @@ mod tests {
         })
     }
 
-    fn in_test_process(test: &str) -> bool {
+    pub(crate) fn in_test_process(test: &str) -> bool {
         const CHILD: &str = "VOID_STORAGE_UI_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             // Slint's threaded testing backend is process-global. Keep it separate from the relay UI test.
@@ -1001,21 +1025,36 @@ mod tests {
         ) {
             return;
         }
-        use crate::{relay::ConnectionStatus, report_relay_status};
-        use std::rc::Rc;
+        use crate::{
+            relay::{
+                Connection,
+                tests::{next_attempt, receive_json, send_json, verify_account_proof},
+            },
+            report_relay_status,
+            storage::{account_status::VerifiedPeerStatus, tests::relay_messaging::mock_relay},
+        };
+        use futures_util::StreamExt;
+        use serde_json::json;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
         let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
         let public = key.verifying_key();
         let owner = Owner {
-            void_id: "41",
+            void_id: "123",
             public_key: public.as_bytes(),
         };
         let temp = TestDir::new();
         let mut db = Database::open(&temp.0, owner).unwrap();
-        let chat = db.create_conversation("123", 100).unwrap();
+        let chat = db.create_conversation("234", 100).unwrap();
         let request = db.create_conversation("456", 100).unwrap();
         db.set_request(request, true).unwrap();
-        db.record_verified_peer_status("123", VerifiedPeerStatus::Active)
+        db.record_verified_peer_status("234", VerifiedPeerStatus::Active)
             .unwrap();
+        db.initialize_signal(owner.void_id, &key).unwrap();
+        let publication = db.prepare_publication().unwrap().unwrap();
+        db.confirm_publication(&publication.id).unwrap();
         for id in [chat, request] {
             db.save_message(&Message {
                 id: format!("incoming-{id}"),
@@ -1033,15 +1072,52 @@ mod tests {
             .unwrap();
         db.close().unwrap();
 
+        let both_deleted = Arc::new(AtomicBool::new(false));
+        let complete = both_deleted.clone();
+        let (endpoint, mock) = mock_relay(move |listener| async move {
+            for state in ["active", "deleted"] {
+                let mut socket = next_attempt(&listener).await;
+                verify_account_proof(&mut socket, &public, "123").await;
+                send_json(&mut socket, json!({"type":"auth_ok", "void_id":"123"})).await;
+                for peer in ["234", "456"] {
+                    let request = receive_json(&mut socket).await;
+                    assert_eq!(
+                        request,
+                        json!({"type":"account_status", "request_id":request["request_id"], "void_id":peer})
+                    );
+                    let mut response = json!({"type":"account_status", "request_id":request["request_id"], "void_id":peer, "state":state});
+                    if state == "deleted" {
+                        response["deleted_at"] = json!("2026-11-16T00:00:12.345678Z");
+                    }
+                    send_json(&mut socket, response).await;
+                }
+                if state == "deleted" {
+                    complete.store(true, Ordering::Release);
+                    // Keep the authenticated socket open for the UI assertions.
+                    let _ = socket.next().await;
+                }
+            }
+        });
         i_slint_backend_testing::init_integration_test_with_system_time();
         let ui = AppWindow::new().unwrap();
         ui.set_account_void_id(owner.void_id.into());
         ui.set_setup_page(0);
         let root = temp.0.clone();
-        let worker = Rc::new(bind_fixture(&ui, move |_| (root.clone(), key.clone())).unwrap());
+        let relay_key = key.clone();
+        let worker = bind_fixture(&ui, move |_| (root.clone(), key.clone())).unwrap();
+        let (relay, relay_worker) = Connection::spawn_with_activity(
+            endpoint,
+            move |id| {
+                Ok(account::RegisteredIdentity {
+                    void_id: id.into(),
+                    key: relay_key.clone(),
+                })
+            },
+            report_relay_status(&ui),
+            worker.relay_activity(),
+        )
+        .unwrap();
         worker.opener()(&ui);
-        let post_status = worker.clone();
-        let relay_status = report_relay_status(&ui);
         let weak = ui.as_weak();
         let step = Cell::new(0);
         let poll = Timer::default();
@@ -1067,11 +1143,7 @@ mod tests {
                 2 if ui.get_selected_conversation() == chat && !ui.get_conversation_loading() => {
                     assert!(ui.get_conversation_can_compose());
                     assert!(ui.get_conversation_account_notice().is_empty());
-                    for peer in ["123", "456"] {
-                        post_status
-                            .record_verified_peer_status(peer.into(), VerifiedPeerStatus::Deleted)
-                            .unwrap();
-                    }
+                    assert!(relay.connect("123".into()));
                     step.set(3);
                 }
                 3 if ui.get_conversation_peer_deleted() => {
@@ -1090,11 +1162,11 @@ mod tests {
                     ui.invoke_send_message();
                     ui.invoke_resend_message(event.clone());
                     assert!(!ui.get_send_busy());
-                    relay_status(ConnectionStatus::Reconnecting);
-                    relay_status(ConnectionStatus::Connected);
                     step.set(4);
                 }
-                4 if ui.get_connection_status() == "Connected" => {
+                4 if ui.get_connection_status() == "Connected"
+                    && both_deleted.load(Ordering::Acquire) =>
+                {
                     assert!(ui.get_conversation_peer_deleted());
                     ui.set_section("Requests".into());
                     ui.invoke_select_stored_conversation(request.clone().into());
@@ -1109,7 +1181,7 @@ mod tests {
             }
         });
         let watchdog = Timer::default();
-        watchdog.start(TimerMode::SingleShot, Duration::from_secs(4), || {
+        watchdog.start(TimerMode::SingleShot, Duration::from_secs(9), || {
             slint::quit_event_loop().unwrap();
         });
         slint::run_event_loop_until_quit().unwrap();
@@ -1124,13 +1196,15 @@ mod tests {
         assert_eq!(ui.get_stored_messages().row_count(), 1);
         drop(poll);
         drop(ui);
-        Rc::into_inner(worker).unwrap().finish();
+        relay_worker.finish();
+        worker.finish();
+        mock.join().unwrap();
     }
 
     #[test]
-    fn permanent_deletion_requires_exact_text_and_remains_unavailable() {
+    fn permanent_deletion_requires_exact_text_and_a_ready_account_worker() {
         if !in_test_process(
-            "storage_ui::tests::permanent_deletion_requires_exact_text_and_remains_unavailable",
+            "storage_ui::tests::permanent_deletion_requires_exact_text_and_a_ready_account_worker",
         ) {
             return;
         }
@@ -1151,6 +1225,11 @@ mod tests {
         ui.set_permanent_deletion_phrase("DELETE".into());
         assert!(ui.get_permanent_deletion_confirmed());
         assert!(!ui.get_can_permanently_delete());
+        ui.set_account_management_ready(true);
+        assert!(ui.get_can_permanently_delete());
+        ui.set_removal_busy(true);
+        assert!(!ui.get_can_permanently_delete());
+        ui.set_removal_busy(false);
 
         ui.invoke_cancel_permanent_deletion();
         assert!(!ui.get_permanent_deletion_open());
@@ -1180,6 +1259,7 @@ mod tests {
         i_slint_backend_testing::init_integration_test_with_system_time();
         let ui = AppWindow::new().unwrap();
         ui.set_account_void_id("41".into());
+        ui.set_account_management_ready(true);
         ui.set_setup_page(account::ENROLLMENT_PAGE);
         ui.set_storage_loading(false);
         ui.set_storage_ready(true);
@@ -1213,7 +1293,7 @@ mod tests {
         ui.invoke_open_permanent_deletion();
         ui.set_permanent_deletion_phrase("DELETE".into());
         assert!(ui.get_permanent_deletion_confirmed());
-        assert!(!ui.get_can_permanently_delete());
+        assert!(ui.get_can_permanently_delete());
         assert!(!ui.get_local_removal_confirmed());
         ui.invoke_cancel_permanent_deletion();
         assert!(std::fs::read(&file).unwrap() == identity);
@@ -1318,6 +1398,9 @@ mod tests {
                                 "ec_remaining":"20", "kyber_remaining":"20"}),
                             )
                             .await;
+                            let status = receive_json(&mut second).await;
+                            assert_eq!(status, json!({"type":"account_status", "request_id":status["request_id"], "void_id":"456"}));
+                            send_json(&mut second, json!({"type":"account_status", "request_id":status["request_id"], "void_id":"456", "state":"active"})).await;
                             assert!(
                                 timeout(Duration::from_millis(200), second.next())
                                     .await

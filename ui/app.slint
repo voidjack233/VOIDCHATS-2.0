@@ -139,6 +139,7 @@ component SettingDetail inherits Rectangle {
 component AccountRemovalPage inherits Rectangle {
     in property <bool> permanent;
     in property <bool> busy;
+    in property <string> status;
     in property <string> error;
     in property <string> phrase;
     in property <bool> can-confirm;
@@ -169,7 +170,7 @@ component AccountRemovalPage inherits Rectangle {
             if root.busy: HorizontalLayout {
                 spacing: 12px;
                 Spinner { width: 20px; height: 20px; }
-                Text { text: "Removing this device’s VOID data…"; color: Theme.secondary; }
+                Text { text: root.status; color: Theme.secondary; wrap: word-wrap; }
             }
             if root.error != "": Text { text: root.error; color: Theme.error; wrap: word-wrap; }
             if !root.busy && root.error == "": VerticalLayout {
@@ -200,11 +201,6 @@ component AccountRemovalPage inherits Rectangle {
                     text: root.phrase;
                     edited(text) => { root.edit-phrase(text); }
                 }
-                if root.permanent: Text {
-                    text: "Permanent deletion is unavailable until the server supports authenticated account deletion.";
-                    color: Theme.secondary;
-                    wrap: word-wrap;
-                }
             }
             if !root.busy: HorizontalLayout {
                 spacing: 8px;
@@ -214,7 +210,7 @@ component AccountRemovalPage inherits Rectangle {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Action {
-                    label: root.error != "" ? "Retry local removal"
+                    label: root.error != "" ? (root.permanent ? "Retry deletion" : "Retry local removal")
                         : root.permanent ? "Delete account permanently" : "Remove from this device";
                     enabled: root.error != "" || root.can-confirm;
                     clicked => { root.confirm(); }
@@ -616,21 +612,24 @@ export component AppWindow inherits Window {
     out property <bool> permanent-deletion-open: false;
     out property <bool> permanent-deletion-confirmed:
         root.permanent-deletion-open && root.permanent-deletion-phrase == "DELETE";
-    private property <bool> permanent-deletion-supported: false;
+    in property <bool> account-management-ready;
     out property <bool> can-permanently-delete:
-        root.permanent-deletion-supported && root.permanent-deletion-confirmed;
+        root.account-management-ready && root.account-void-id != "" && !root.removal-busy
+        && root.removal-error == "" && root.permanent-deletion-confirmed;
     callback open-permanent-deletion();
     callback cancel-permanent-deletion();
     in-out property <string> local-removal-phrase;
     out property <bool> local-removal-open: false;
     out property <bool> local-removal-confirmed:
         root.local-removal-open && root.local-removal-phrase == "DELETE";
-    in property <bool> local-removal-busy;
-    in property <string> local-removal-error;
-    in property <bool> local-removal-can-go-back;
+    in property <bool> removal-busy;
+    in property <string> removal-error;
+    in property <bool> removal-can-go-back;
+    in property <bool> removal-permanent;
+    in property <string> removal-status;
     callback open-local-removal();
     callback cancel-local-removal();
-    callback request-local-removal();
+    callback request-account-removal(bool);
     callback leave-failed-removal();
 
     open-permanent-deletion => {
@@ -692,7 +691,7 @@ export component AppWindow inherits Window {
     private property <bool> enrolling: root.setup-page == 6;
     out property <bool> can-manage-enrollment-account: root.enrolling && root.account-void-id != "";
     private property <bool> showing-account-removal: root.permanent-deletion-open || root.local-removal-open
-        || root.local-removal-busy || root.local-removal-error != "";
+        || root.removal-busy || root.removal-error != "";
     out property <bool> enrollment-can-retry: root.enrolling && !root.storage-loading
         && ((root.storage-error != "" && root.storage-retryable)
             || root.connection-status == "Authentication failed"
@@ -708,10 +707,11 @@ export component AppWindow inherits Window {
         : root.publication-error;
 
     if root.showing-account-removal: AccountRemovalPage {
-        permanent: root.permanent-deletion-open;
-        busy: root.local-removal-busy;
-        error: root.local-removal-error;
-        can-go-back: root.local-removal-can-go-back;
+        permanent: root.permanent-deletion-open || root.removal-permanent;
+        busy: root.removal-busy;
+        status: root.removal-status;
+        error: root.removal-error;
+        can-go-back: root.removal-can-go-back;
         phrase: self.permanent ? root.permanent-deletion-phrase : root.local-removal-phrase;
         can-confirm: self.permanent ? root.can-permanently-delete : root.local-removal-confirmed;
         edit-phrase(text) => {
@@ -719,14 +719,14 @@ export component AppWindow inherits Window {
             else { root.local-removal-phrase = text; }
         }
         cancel => {
-            if root.local-removal-error != "" {
+            if root.removal-error != "" {
                 root.leave-failed-removal();
             } else {
                 root.cancel-local-removal();
                 root.cancel-permanent-deletion();
             }
         }
-        confirm => { if !self.permanent { root.request-local-removal(); } }
+        confirm => { root.request-account-removal(self.permanent); }
     }
 
     if root.setup-page != 0 && !root.showing-account-removal: AccountSetup {

@@ -11,9 +11,18 @@ const MAGIC: &[u8] = b"VOID-LOCAL-REMOVAL\x01";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Removal {
-    void_id: String,
-    public_key: [u8; 32],
+pub(super) struct Removal {
+    pub(super) void_id: String,
+    pub(super) public_key: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) deletion: Option<Deletion>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum Deletion {
+    Pending,
+    Confirmed { deleted_at: String },
 }
 
 #[derive(Debug)]
@@ -23,6 +32,7 @@ pub(super) enum Error {
     UnverifiedStorage,
     UnexpectedFiles,
     Unavailable,
+    PendingDeletion,
 }
 
 impl Error {
@@ -38,6 +48,9 @@ impl Error {
             }
             Self::Unavailable => {
                 "VOID could not finish removing this device’s data. Check that the files are accessible, then retry."
+            }
+            Self::PendingDeletion => {
+                "Finish permanent account deletion before removing this device’s data."
             }
         }
     }
@@ -59,11 +72,7 @@ pub(super) fn pending(store: &Store) -> io::Result<bool> {
     metadata(&store.path().join(JOURNAL)).map(|entry| entry.is_some())
 }
 
-/// With no explicit target, resume only a previously confirmed removal.
-pub(super) fn remove(store: &Store, expected_id: Option<&str>) -> Result<bool> {
-    if expected_id.is_none() && !pending(store)? {
-        return Ok(false);
-    }
+pub(super) fn lock_account(store: &Store) -> Result<fs::File> {
     let root = store.path();
     require_directory(root)?;
     require_directory(root.parent().ok_or(Error::UnexpectedFiles)?)?;
@@ -77,26 +86,58 @@ pub(super) fn remove(store: &Store, expected_id: Option<&str>) -> Result<bool> {
         regular_file(&root.join(name))?;
     }
 
-    let _account = store.lock()?;
-    let _messages = storage::lock_messages(root).map_err(|error| match error {
-        storage::Error::Busy => Error::Busy,
-        _ => Error::Unavailable,
-    })?;
-    let journal_path = root.join(JOURNAL);
-    let journal = read_protected(&journal_path)?
+    Ok(store.lock()?)
+}
+
+pub(super) fn read_journal(store: &Store) -> Result<Option<Removal>> {
+    let path = store.path().join(JOURNAL);
+    regular_file(&path)?;
+    read_protected(&path)?
         .map(|bytes| {
             let bytes = bytes.strip_prefix(MAGIC).ok_or(Error::UnverifiedAccount)?;
             let target: Removal =
                 serde_json::from_slice(bytes).map_err(|_| Error::UnverifiedAccount)?;
-            if !super::valid_void_id(&target.void_id) {
+            if !super::valid_void_id(&target.void_id)
+                || matches!(&target.deletion, Some(Deletion::Confirmed { deleted_at })
+                    if !crate::relay::valid_utc_timestamp(deleted_at))
+            {
                 return Err(Error::UnverifiedAccount);
             }
             Ok(target)
         })
-        .transpose()?;
+        .transpose()
+}
+
+pub(super) fn write_journal(store: &Store, target: &Removal) -> io::Result<()> {
+    let mut bytes = MAGIC.to_vec();
+    serde_json::to_writer(&mut bytes, target)?;
+    store.write_protected(JOURNAL, &bytes)
+}
+
+/// With no explicit target, resume only a previously confirmed removal.
+pub(super) fn remove(store: &Store, expected_id: Option<&str>) -> Result<bool> {
+    if expected_id.is_none() && !pending(store)? {
+        return Ok(false);
+    }
+    let root = store.path();
+    let _account = lock_account(store)?;
+    let journal = read_journal(store)?;
     if journal.is_none() && expected_id.is_none() {
         return Ok(false);
     }
+    if matches!(
+        &journal,
+        Some(Removal {
+            deletion: Some(Deletion::Pending),
+            ..
+        })
+    ) {
+        return Err(Error::PendingDeletion);
+    }
+    let _messages = storage::lock_messages(root).map_err(|error| match error {
+        storage::Error::Busy => Error::Busy,
+        _ => Error::Unavailable,
+    })?;
     let identity = store
         .load_for_removal()
         .map_err(|_| Error::UnverifiedAccount)?;
@@ -109,6 +150,7 @@ pub(super) fn remove(store: &Store, expected_id: Option<&str>) -> Result<bool> {
             Ok(Removal {
                 void_id: account.void_id.clone(),
                 public_key: identity.key.verifying_key().to_bytes(),
+                deletion: None,
             })
         })
         .transpose()?;
@@ -150,9 +192,7 @@ pub(super) fn remove(store: &Store, expected_id: Option<&str>) -> Result<bool> {
     }
 
     if !resuming {
-        let mut bytes = MAGIC.to_vec();
-        serde_json::to_writer(&mut bytes, target).map_err(|_| Error::UnverifiedAccount)?;
-        store.write_protected(JOURNAL, &bytes)?;
+        write_journal(store, target)?;
     }
     for (directory, files) in stores.into_iter().flatten() {
         // Keep the database key and any journals available until the database file is removed.
@@ -167,7 +207,7 @@ pub(super) fn remove(store: &Store, expected_id: Option<&str>) -> Result<bool> {
     }
     remove_file(&root.join(CONFIRMATION_FILE))?;
     remove_file(&root.join("account.dpapi"))?;
-    remove_file(&journal_path)?;
+    remove_file(&root.join(JOURNAL))?;
     Ok(true)
 }
 

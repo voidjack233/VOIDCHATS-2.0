@@ -1,3 +1,4 @@
+mod deletion;
 mod enrollment;
 mod protocol;
 mod removal;
@@ -65,8 +66,9 @@ impl SetupError {
 enum Command {
     CheckStorage,
     CreateAccount,
-    RemoveLocal {
+    Remove {
         expected_id: Option<String>,
+        permanent: bool,
         shutdown: Box<dyn FnOnce() + Send>,
     },
     Close,
@@ -92,6 +94,7 @@ enum Startup {
     RemovalIncomplete {
         message: &'static str,
         can_go_back: bool,
+        permanent: bool,
     },
 }
 
@@ -437,12 +440,13 @@ pub(crate) struct Worker {
 impl Worker {
     pub(crate) fn remover(
         &self,
-    ) -> impl Fn(Option<String>, Box<dyn FnOnce() + Send>) -> bool + 'static {
+    ) -> impl Fn(Option<String>, bool, Box<dyn FnOnce() + Send>) -> bool + 'static {
         let sender = self.sender.clone();
-        move |expected_id, shutdown| {
+        move |expected_id, permanent, shutdown| {
             sender
-                .send(Command::RemoveLocal {
+                .send(Command::Remove {
                     expected_id,
+                    permanent,
                     shutdown,
                 })
                 .is_ok()
@@ -456,6 +460,16 @@ impl Worker {
 }
 
 pub(crate) fn bind(ui: &AppWindow) -> std::io::Result<Worker> {
+    bind_with(ui, Store::for_user, deletion::confirm)
+}
+
+fn bind_with(
+    ui: &AppWindow,
+    open_store: impl Fn() -> std::io::Result<Store> + Send + 'static,
+    confirm: impl Fn(&Store, Option<&str>, &dyn Fn(&'static str)) -> Result<(), &'static str>
+    + Send
+    + 'static,
+) -> std::io::Result<Worker> {
     let (send, receive) = mpsc::channel();
     let weak = ui.as_weak();
     let thread = thread::Builder::new()
@@ -465,23 +479,35 @@ pub(crate) fn bind(ui: &AppWindow) -> std::io::Result<Worker> {
             let mut command = Command::CheckStorage;
             loop {
                 let checking = matches!(command, Command::CheckStorage);
+                let update_removal = |permanent, stage: &'static str| {
+                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_removal_permanent(permanent);
+                        ui.set_removal_busy(true);
+                        ui.set_removal_status(stage.into());
+                    });
+                };
                 let result = match command {
                     Command::Close => break,
-                    Command::RemoveLocal { expected_id, shutdown } => {
+                    Command::Remove { expected_id, permanent, shutdown } => {
                         shutdown();
                         setup = Setup::default();
-                        match Store::for_user() {
+                        match open_store() {
+                            Ok(store) if permanent => remove_permanently(
+                                &store, expected_id.as_deref(), &|stage| update_removal(true, stage),
+                                &confirm,
+                            ),
                             Ok(store) => resume_or_remove(&store, expected_id.as_deref()),
                             Err(_) => Ok(Startup::RemovalIncomplete {
                                 message: removal::Error::Unavailable.message(), can_go_back: true,
+                                permanent,
                             }),
                         }
                     }
-                    Command::CheckStorage | Command::CreateAccount => Store::for_user().map_err(|_| SetupError::retry(
+                    Command::CheckStorage | Command::CreateAccount => open_store().map_err(|_| SetupError::retry(
                         "The Windows local app data directory is unavailable. Retry opening local storage."
                     )).and_then(|store| {
                         if checking {
-                            resume_or_remove(&store, None)
+                            resume_setup(&store, &|stage| update_removal(true, stage), &confirm)
                         } else {
                             setup.run(&store, HttpAccountApi::new, |stage| {
                                 let _ = weak.upgrade_in_event_loop(move |ui| ui.set_setup_status(stage.into()));
@@ -545,14 +571,67 @@ fn resume_or_remove(store: &Store, expected_id: Option<&str>) -> Result<Startup,
         Err(error) => Ok(Startup::RemovalIncomplete {
             message: error.message(),
             can_go_back: removal::pending(store).is_ok_and(|pending| !pending),
+            permanent: matches!(error, removal::Error::PendingDeletion),
+        }),
+    }
+}
+
+fn resume_setup(
+    store: &Store,
+    progress: &impl Fn(&'static str),
+    confirm: impl FnOnce(&Store, Option<&str>, &dyn Fn(&'static str)) -> Result<(), &'static str>,
+) -> Result<Startup, SetupError> {
+    match removal::read_journal(store) {
+        Ok(Some(journal)) if journal.deletion.is_some() => {
+            remove_permanently(store, None, progress, confirm)
+        }
+        _ => resume_or_remove(store, None),
+    }
+}
+
+fn remove_permanently(
+    store: &Store,
+    expected_id: Option<&str>,
+    progress: &impl Fn(&'static str),
+    confirm: impl FnOnce(&Store, Option<&str>, &dyn Fn(&'static str)) -> Result<(), &'static str>,
+) -> Result<Startup, SetupError> {
+    if let Err(message) = confirm(store, expected_id, progress) {
+        return Ok(Startup::RemovalIncomplete {
+            message,
+            can_go_back: removal::pending(store).is_ok_and(|pending| !pending),
+            permanent: true,
+        });
+    }
+    progress("Deletion confirmed. Removing this device’s VOID data…");
+    match removal::remove(store, None) {
+        Ok(_) => Ok(Startup::Removed),
+        Err(error) => Ok(Startup::RemovalIncomplete {
+            message: match error {
+                removal::Error::Busy => {
+                    "Deletion was confirmed. Close other VOID windows, then retry cleanup."
+                }
+                removal::Error::UnverifiedStorage => {
+                    "Deletion was confirmed. VOID could not verify ownership of the encrypted database. Keep the original files."
+                }
+                removal::Error::UnexpectedFiles => {
+                    "Deletion was confirmed. VOID found unexpected files or links. Review them, then retry cleanup."
+                }
+                _ => {
+                    "Deletion was confirmed. Check that this device’s account files are accessible, then retry cleanup."
+                }
+            },
+            can_go_back: false,
+            permanent: true,
         }),
     }
 }
 
 fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startup, SetupError>) {
-    ui.set_local_removal_busy(false);
-    ui.set_local_removal_error("".into());
-    ui.set_local_removal_can_go_back(false);
+    ui.set_removal_busy(false);
+    ui.set_removal_error("".into());
+    ui.set_removal_can_go_back(false);
+    ui.set_removal_status("".into());
+    ui.set_removal_permanent(false);
     ui.set_setup_busy(false);
     ui.set_setup_status("".into());
     ui.set_setup_retry_storage(checking && result.is_err());
@@ -600,9 +679,11 @@ fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startu
         Ok(Startup::RemovalIncomplete {
             message,
             can_go_back,
+            permanent,
         }) => {
-            ui.set_local_removal_error(message.into());
-            ui.set_local_removal_can_go_back(can_go_back && !ui.get_account_void_id().is_empty());
+            ui.set_removal_permanent(permanent);
+            ui.set_removal_error(message.into());
+            ui.set_removal_can_go_back(can_go_back && !ui.get_account_void_id().is_empty());
         }
         Ok(Startup::Registered(id)) => {
             ui.set_account_void_id(id.into());

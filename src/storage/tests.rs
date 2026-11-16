@@ -1,6 +1,6 @@
 use super::*;
 
-mod relay_messaging;
+pub(crate) mod relay_messaging;
 
 const PUBLIC_KEY: [u8; 32] = [5; 32];
 const OWNER: Owner<'_> = Owner {
