@@ -6,6 +6,9 @@ use crate::account::{timestamp_ms, valid_token, valid_void_id};
 pub(super) const MAX_FRAME_SIZE: usize = 1_410_000;
 const MAX_CHALLENGE_MESSAGE: usize = 4096;
 const MAX_CHALLENGE_LIFETIME_MS: i64 = 30_000;
+pub(super) const DELETION_CHALLENGE_LIFETIME: std::time::Duration =
+    std::time::Duration::from_secs(30);
+const DELETION_CLOCK_SKEW_MS: i64 = 10_000;
 const MAX_DELIVERY_PAYLOAD: usize = 1_048_576;
 
 pub(super) enum ServerFrame {
@@ -167,45 +170,16 @@ pub(super) struct Challenge {
     expiry_ms: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DeletionChallengeError {
+    Expired,
+    ClockMismatch,
+    Transcript,
+}
+
 impl Challenge {
     pub(super) fn validate(
         &self,
-        audience: &str,
-        void_id: &str,
-        public_key: &str,
-        now_ms: i64,
-    ) -> Option<Vec<u8>> {
-        self.validate_transcript(
-            "VOID-NOTHINGNESS:authenticate:v2",
-            "",
-            audience,
-            void_id,
-            public_key,
-            now_ms,
-        )
-    }
-
-    pub(super) fn validate_deletion(
-        &self,
-        audience: &str,
-        void_id: &str,
-        public_key: &str,
-        now_ms: i64,
-    ) -> Option<Vec<u8>> {
-        self.validate_transcript(
-            "VOID:delete-account:v1",
-            "DELETE\n",
-            audience,
-            void_id,
-            public_key,
-            now_ms,
-        )
-    }
-
-    fn validate_transcript(
-        &self,
-        domain: &str,
-        confirmation: &str,
         audience: &str,
         void_id: &str,
         public_key: &str,
@@ -216,7 +190,47 @@ impl Challenge {
         {
             return None;
         }
+        self.validate_transcript(
+            "VOID-NOTHINGNESS:authenticate:v2",
+            "",
+            audience,
+            void_id,
+            public_key,
+        )
+    }
 
+    pub(super) fn validate_deletion(
+        &self,
+        audience: &str,
+        void_id: &str,
+        public_key: &str,
+        now_ms: i64,
+    ) -> Result<Vec<u8>, DeletionChallengeError> {
+        if self.is_expired(now_ms) {
+            return Err(DeletionChallengeError::Expired);
+        }
+        let maximum_ms = DELETION_CHALLENGE_LIFETIME.as_millis() as i64 + DELETION_CLOCK_SKEW_MS;
+        if self.expiry_ms > now_ms.saturating_add(maximum_ms) {
+            return Err(DeletionChallengeError::ClockMismatch);
+        }
+        self.validate_transcript(
+            "VOID:delete-account:v1",
+            "DELETE\n",
+            audience,
+            void_id,
+            public_key,
+        )
+        .ok_or(DeletionChallengeError::Transcript)
+    }
+
+    fn validate_transcript(
+        &self,
+        domain: &str,
+        confirmation: &str,
+        audience: &str,
+        void_id: &str,
+        public_key: &str,
+    ) -> Option<Vec<u8>> {
         let bytes = STANDARD.decode(&self.encoded_message).ok()?;
         if !bytes.is_ascii() {
             return None;
@@ -609,37 +623,38 @@ mod tests {
         };
         let message = fields.join("\n") + "\n";
         let challenge = decode_challenge(&message);
-        let now = expires_ms - MAX_CHALLENGE_LIFETIME_MS;
+        let lifetime = DELETION_CHALLENGE_LIFETIME.as_millis() as i64;
+        let now = expires_ms - lifetime;
         assert_eq!(
             challenge
                 .validate_deletion(audience, "123", &key, now)
                 .unwrap(),
             message.as_bytes()
         );
-        assert!(
-            challenge
-                .validate_deletion(audience, "123", &key, now - 1)
-                .is_none()
+        assert_eq!(
+            challenge.validate_deletion(audience, "123", &key, now - DELETION_CLOCK_SKEW_MS),
+            Ok(message.as_bytes().to_vec())
         );
-        assert!(
-            challenge
-                .validate_deletion(audience, "123", &key, expires_ms)
-                .is_none()
+        assert_eq!(
+            challenge.validate_deletion(audience, "123", &key, now - DELETION_CLOCK_SKEW_MS - 1),
+            Err(DeletionChallengeError::ClockMismatch)
+        );
+        assert_eq!(
+            challenge.validate_deletion(audience, "123", &key, expires_ms),
+            Err(DeletionChallengeError::Expired)
         );
         for index in 0..fields.len() {
             let mut tampered = fields.clone();
             tampered[index].push('x');
             let challenge = decode_challenge(&(tampered.join("\n") + "\n"));
-            assert!(
-                challenge
-                    .validate_deletion(audience, "123", &key, now)
-                    .is_none()
+            assert_eq!(
+                challenge.validate_deletion(audience, "123", &key, now),
+                Err(DeletionChallengeError::Transcript)
             );
         }
-        assert!(
-            decode_challenge(message.trim_end())
-                .validate_deletion(audience, "123", &key, now)
-                .is_none()
+        assert_eq!(
+            decode_challenge(message.trim_end()).validate_deletion(audience, "123", &key, now),
+            Err(DeletionChallengeError::Transcript)
         );
 
         let request = Request::AccountStatus {

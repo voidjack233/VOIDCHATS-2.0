@@ -116,8 +116,13 @@ mod tests {
         socket
     }
 
-    async fn challenge(socket: &mut Socket, key: &VerifyingKey, token: u8) -> (String, String) {
-        let expires_at = expiry(20);
+    async fn challenge(
+        socket: &mut Socket,
+        key: &VerifyingKey,
+        token: u8,
+        seconds_until_expiry: i64,
+    ) -> (String, String) {
+        let expires_at = expiry(seconds_until_expiry);
         let id = URL_SAFE_NO_PAD.encode([token; 32]);
         let nonce = URL_SAFE_NO_PAD.encode([88; 32]);
         let message = format!(
@@ -155,7 +160,8 @@ mod tests {
         let (allow_ack, wait_for_ui) = tokio::sync::oneshot::channel();
         let (endpoint, mock) = mock_relay(move |listener| async move {
             let mut socket = accept_delete(&listener).await;
-            let (id, message) = challenge(&mut socket, &public, 3).await;
+            // The relay's clock is six seconds ahead of the client.
+            let (id, message) = challenge(&mut socket, &public, 3, 36).await;
             let proof = receive_json(&mut socket).await;
             assert_eq!(proof["challenge_id"], id);
             assert_eq!(proof["confirmation"], "DELETE");
@@ -275,12 +281,12 @@ mod tests {
                         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
                         address.send(format!("ws://{}/ws", listener.local_addr().unwrap())).unwrap();
                         let mut socket = accept_delete(&listener).await;
-                        challenge(&mut socket, &wrong_key, 1).await;
+                        challenge(&mut socket, &wrong_key, 1, 20).await;
                         assert!(!matches!(socket.next().await, Some(Ok(Message::Text(_)))));
                         drop(socket);
                         for token in [2, 3] {
                             let mut socket = accept_delete(&listener).await;
-                            let (id, message) = challenge(&mut socket, &public, token).await;
+                            let (id, message) = challenge(&mut socket, &public, token, 20).await;
                             let proof = receive_json(&mut socket).await;
                             let signature = proof["signature"].as_str().unwrap();
                             assert_eq!(

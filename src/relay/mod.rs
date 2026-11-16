@@ -118,6 +118,9 @@ fn report_rejection(command: &str, code: &str) {
         | "prekeys_unavailable"
         | "prekey_claim_expired"
         | "account_deleted"
+        | "challenge_expired"
+        | "challenge_clock_mismatch"
+        | "challenge_binding_invalid"
         | "deletion_authorization_failed" => code,
         _ => "unknown_code",
     };

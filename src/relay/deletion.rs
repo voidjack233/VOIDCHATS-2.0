@@ -1,6 +1,7 @@
 //! A dedicated deletion socket never starts a normal messaging session.
 use super::{
     API_BASE, ENDPOINT, Message, ServerFrame, SessionIdentity, Socket, WireError, now_ms, protocol,
+    protocol::{DELETION_CHALLENGE_LIFETIME, DeletionChallengeError},
     report_rejection,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -8,7 +9,7 @@ use ed25519_dalek::Signer;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{io, time::Duration};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 use tokio_tungstenite::{connect_async_with_config, tungstenite::protocol::WebSocketConfig};
 
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(35);
@@ -18,6 +19,8 @@ const MAX_FRAME: usize = 8 * 1024;
 pub(crate) enum Error {
     Interrupted,
     InvalidResponse,
+    ChallengeExpired,
+    ChallengeClockMismatch,
     Rejected(String),
     IntentNotSaved,
 }
@@ -27,6 +30,12 @@ impl Error {
         match self {
             Self::IntentNotSaved => {
                 "VOID could not save the deletion request on this device. Check that its account files are writable, then retry."
+            }
+            Self::ChallengeExpired => {
+                "The deletion challenge expired. Check your connection and Windows date and time, then retry."
+            }
+            Self::ChallengeClockMismatch => {
+                "The deletion challenge’s expiry differs too much from this device’s clock. Sync Windows date and time, then retry."
             }
             Self::Rejected(code) if matches!(code.as_str(), "rate_limited" | "overloaded") => {
                 "The relay is limiting deletion requests. Wait a minute, then retry."
@@ -50,6 +59,22 @@ impl Error {
             }
             _ => "The relay could not start account deletion. Check your connection and retry.",
         }
+    }
+}
+
+impl From<DeletionChallengeError> for Error {
+    fn from(error: DeletionChallengeError) -> Self {
+        let (code, error) = match error {
+            DeletionChallengeError::Expired => ("challenge_expired", Self::ChallengeExpired),
+            DeletionChallengeError::ClockMismatch => {
+                ("challenge_clock_mismatch", Self::ChallengeClockMismatch)
+            }
+            DeletionChallengeError::Transcript => {
+                ("challenge_binding_invalid", Self::InvalidResponse)
+            }
+        };
+        report_rejection("account_delete_begin", code);
+        error
     }
 }
 
@@ -92,35 +117,43 @@ async fn exchange(
     let (mut socket, _) = connect_async_with_config(endpoint, Some(config), true)
         .await
         .map_err(|_| Error::Interrupted)?;
+    // The relay creates the challenge after it receives begin on this socket.
+    // Clock skew in the signed expiry must never extend this monotonic window.
+    let proof_deadline = Instant::now() + DELETION_CHALLENGE_LIFETIME;
     send(
         &mut socket,
         json!({"type": "account_delete_begin", "void_id": identity.void_id}),
     )
     .await?;
     let ServerFrame::DeleteChallenge(challenge) =
-        receive(&mut socket, "account_delete_begin").await?
+        timeout_at(proof_deadline, receive(&mut socket, "account_delete_begin"))
+            .await
+            .map_err(|_| Error::ChallengeExpired)??
     else {
         return Err(Error::InvalidResponse);
     };
     let public_key = STANDARD.encode(identity.key.verifying_key().as_bytes());
-    let message = challenge
-        .validate_deletion(API_BASE, &identity.void_id, &public_key, now_ms())
-        .ok_or(Error::InvalidResponse)?;
+    let message =
+        challenge.validate_deletion(API_BASE, &identity.void_id, &public_key, now_ms())?;
 
     // A proof can reach the relay even when a write fails or its response is lost.
     before_confirm().map_err(|_| Error::IntentNotSaved)?;
-    let signature = STANDARD.encode(identity.key.sign(&message).to_bytes());
-    if challenge.is_expired(now_ms()) {
-        return Err(Error::Interrupted);
+    if challenge.is_expired(now_ms()) || Instant::now() >= proof_deadline {
+        return Err(Error::ChallengeExpired);
     }
-    send(
-        &mut socket,
-        json!({
-            "type": "account_delete_confirm", "challenge_id": challenge.id,
-            "confirmation": "DELETE", "signature": signature,
-        }),
+    let signature = STANDARD.encode(identity.key.sign(&message).to_bytes());
+    timeout_at(
+        proof_deadline,
+        send(
+            &mut socket,
+            json!({
+                "type": "account_delete_confirm", "challenge_id": challenge.id,
+                "confirmation": "DELETE", "signature": signature,
+            }),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| Error::ChallengeExpired)??;
     match receive(&mut socket, "account_delete_confirm").await? {
         ServerFrame::AccountDeleted {
             void_id,
