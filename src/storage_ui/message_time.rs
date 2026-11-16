@@ -2,6 +2,21 @@ use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate};
 
 const CALENDAR_LABEL: &str = "%-d %B %Y";
 
+pub(super) fn local_separator_days() -> (String, String) {
+    separator_days(Local::now().date_naive())
+}
+
+fn separator_days(today: NaiveDate) -> (String, String) {
+    (
+        calendar_label(today),
+        today.pred_opt().map(calendar_label).unwrap_or_default(),
+    )
+}
+
+fn calendar_label(day: NaiveDate) -> String {
+    day.format(CALENDAR_LABEL).to_string()
+}
+
 pub(super) struct MessageTime(DateTime<FixedOffset>);
 
 impl MessageTime {
@@ -19,7 +34,7 @@ impl MessageTime {
     }
 
     pub(super) fn calendar_label(&self) -> String {
-        self.0.format(CALENDAR_LABEL).to_string()
+        calendar_label(self.day())
     }
 
     pub(super) fn clock_label(&self) -> String {
@@ -58,6 +73,10 @@ mod tests {
         assert_eq!(before.calendar_label(), "31 December 2026");
         assert_eq!(before.activity_label(after.day()), "31 Dec 2026");
         assert_eq!(after.calendar_label(), "1 January 2027");
+        assert_eq!(
+            separator_days(after.day()),
+            (after.calendar_label(), before.calendar_label())
+        );
         assert_eq!(after.activity_label(after.day()), "00:00");
         assert_eq!(after.clock_label(), later.clock_label());
         assert_eq!(after.exact_label(), "1 January 2027, 00:00:02 (UTC+08:00)");

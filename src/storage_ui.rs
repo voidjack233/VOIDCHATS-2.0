@@ -829,6 +829,26 @@ fn load_conversation(db: &storage::Database, id: i64) -> storage::Result<Detail>
     })
 }
 
+pub(crate) fn track_local_calendar(ui: &AppWindow) -> slint::Timer {
+    let weak = ui.as_weak();
+    let mut last_days = None;
+    let mut update = move || {
+        if let Some(ui) = weak.upgrade() {
+            let days = message_time::local_separator_days();
+            if last_days.as_ref() != Some(&days) {
+                ui.set_timeline_today(days.0.as_str().into());
+                ui.set_timeline_yesterday(days.1.as_str().into());
+                last_days = Some(days);
+            }
+        }
+    };
+    update();
+
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated, Duration::from_secs(1), update);
+    timer
+}
+
 fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessage>) {
     let mut previous_day = None;
     let messages: Vec<_> = messages

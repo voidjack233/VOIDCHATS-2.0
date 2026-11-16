@@ -285,7 +285,9 @@ fn main() -> Result<(), slint::PlatformError> {
         );
         timer
     };
+    let calendar_timer = storage_ui::track_local_calendar(&ui);
     let result = ui.run();
+    calendar_timer.stop();
     #[cfg(windows)]
     focus_timer.stop();
     drop(ui);

@@ -725,6 +725,8 @@ export component AppWindow inherits Window {
     min-height: 560px;
     background: Theme.background;
     in property <string> account-void-id;
+    in property <string> timeline-today;
+    in property <string> timeline-yesterday;
     in-out property <int> setup-page: -1;
     in property <bool> setup-busy: true;
     in property <bool> setup-can-retry: true;
@@ -1504,10 +1506,33 @@ export component AppWindow inherits Window {
                         for message[index] in root.stored-messages: VerticalLayout {
                             alignment: start;
                             spacing: 4px;
-                            if message.day != "": Text {
-                                text: message.day;
-                                color: Theme.secondary;
-                                font-size: 11px;
+                            if message.day != "": HorizontalLayout {
+                                spacing: 10px;
+                                padding-top: 3px;
+                                padding-bottom: 3px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        height: 1px;
+                                        background: Theme.divider;
+                                    }
+                                }
+                                Text {
+                                    text: message.day == root.timeline-today ? "Today"
+                                        : message.day == root.timeline-yesterday ? "Yesterday" : message.day;
+                                    color: Theme.secondary;
+                                    font-size: 11px;
+                                    horizontal-stretch: 0;
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        height: 1px;
+                                        background: Theme.divider;
+                                    }
+                                }
                             }
                             HorizontalLayout {
                                 alignment: message.outgoing ? end : start;
@@ -1547,55 +1572,63 @@ export component AppWindow inherits Window {
                 if root.conversation-can-compose: VerticalLayout {
                     alignment: start;
                     vertical-stretch: 0;
-                    padding: 12px;
+                    padding: 8px;
                     padding-left: chat-pane.thread-gutter;
                     padding-right: chat-pane.thread-gutter;
-                    spacing: 6px;
-                    Text { text: "Message"; color: Theme.primary; font-size: 13px; font-weight: 600; }
-                    TextEdit {
-                        accessible-label: "Local message draft";
-                        preferred-height: clamp(root.height * 0.08, 48px, 68px);
-                        min-height: 48px;
-                        max-height: 68px;
-                        vertical-stretch: 0;
-                        wrap: word-wrap;
-                        enabled: !root.conversation-loading;
-                        text <=> root.stored-draft;
-                        edited(text) => { root.save-stored-draft(text); }
-                        key-pressed(event) => {
-                            if event.text == Key.Return && !event.modifiers.shift {
-                                root.send-message();
-                                return accept;
-                            }
-                            return reject;
-                        }
-                    }
-                    if root.draft-save-failed: WrappingText {
-                        text: root.draft-status;
-                        color: Theme.error;
-                        font-size: 12px;
-                    }
-                    HorizontalLayout {
+                    spacing: 8px;
+
+                    if root.draft-save-failed: HorizontalLayout {
                         spacing: 8px;
-                        if !root.draft-save-failed: WrappingText {
-                            text: root.draft-status != "" && root.draft-status != "Drafts stay on this device"
-                                ? root.draft-status : "Enter to send · Shift+Enter for a new line";
-                            color: Theme.secondary;
+                        WrappingText {
+                            text: root.draft-status;
+                            color: Theme.error;
                             font-size: 12px;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        if root.draft-save-failed: Rectangle { horizontal-stretch: 1; }
-                        if root.draft-save-failed: Action {
+                        Action {
                             label: "Retry saving";
                             enabled: !root.conversation-loading;
                             clicked => { root.save-stored-draft(root.stored-draft); }
                         }
-                        Action {
-                            label: root.send-busy ? "Sending…" : "Send";
-                            primary: true;
-                            enabled: !root.send-busy && !root.conversation-loading && root.stored-draft != "";
-                            clicked => { root.send-message(); }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        editor := TextEdit {
+                            accessible-label: "Message. Enter to send. Shift+Enter for a new line.";
+                            placeholder-text: "Write a message…";
+                            height: clamp(draft-measure.preferred-height + 24px, 44px, 92px);
+                            font-size: 14px;
+                            wrap: word-wrap;
+                            enabled: !root.conversation-loading;
+                            text <=> root.stored-draft;
+                            edited(text) => { root.save-stored-draft(text); }
+                            key-pressed(event) => {
+                                if event.text == Key.Return && !event.modifiers.shift {
+                                    root.send-message();
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                        }
+                        Rectangle {
+                            width: 86px;
+                            min-height: 44px;
+                            Action {
+                                label: root.send-busy ? "Sending…" : "Send";
+                                y: parent.height - self.height;
+                                width: parent.width;
+                                primary: true;
+                                enabled: !root.send-busy && !root.conversation-loading && root.stored-draft != "";
+                                clicked => { root.send-message(); }
+                            }
+                            draft-measure := WrappingText {
+                                visible: false;
+                                // Measure within the native input padding, including a trailing newline.
+                                width: max(1px, editor.width - 24px);
+                                text: root.stored-draft + " ";
+                                font-size: editor.font-size;
+                            }
                         }
                     }
                 }
