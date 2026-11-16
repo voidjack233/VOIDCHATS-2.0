@@ -1,18 +1,19 @@
 # VOID-NOTHINGNESS
 
-Permanent account deletion is implemented for review. This source requires
-[migration 007](migrations/007_account_deletion.sql) before startup; it has not
-been applied to production. See the [complete Rust integration contract,
-security audit, verification, and deployment procedure](docs/ACCOUNT_DELETION.md).
-Deleted VOID-IDs remain reserved while queued ciphertext and public prekeys are
-removed transactionally. Startup never applies migrations.
-
+Permanent account deletion was activated on 2026-11-16 at 16:59 (Asia/Manila),
+with [migration 007](migrations/007_account_deletion.sql) and backend source
+`9e6b6d5`. All 13 existing accounts remained Active and their identities, keys,
+queued messages, prekey inventories, and claims were preserved. See the
+[activation and recovery record](docs/ACCOUNT_DELETION_DEPLOYMENT.md) and the
+[complete Rust integration contract](docs/ACCOUNT_DELETION.md). Deleted VOID-IDs
+remain reserved while queued ciphertext and public prekeys are removed
+transactionally. Startup never applies migrations.
 
 A Go backend that authenticates accounts and temporarily queues opaque encrypted events for delivery over WebSockets. VOID-ID is a public contact address, not an authentication credential. Devices retain their own history and encryption state.
 
 Identity and temporary ciphertext delivery use `accounts` and `messages`. The approved Signal extension adds `signal_prekey_inventory` and `signal_prekey_claims` for public setup material. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
 
-**Signal public prekeys activated on 2026-11-03 11:36 (Asia/Manila), after explicit approval.** Backend source `15458d7` is running. Database `void2-0e2ee` has the four reviewed tables; all three existing accounts and authentication keys were preserved. Applied SQL: [004](migrations/004_temporary_relay_queue.sql), [005](migrations/005_drop_account_username.sql) and [006](migrations/006_signal_public_prekeys.sql). See [deployment evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates schema and never applies migrations.
+**Signal public prekeys activated on 2026-11-03 11:36 (Asia/Manila), after explicit approval.** That activation deployed source `15458d7`; the current activation is recorded above. Database `void2-0e2ee` has the four reviewed tables; all three existing accounts and authentication keys were preserved. That activation used SQL: [004](migrations/004_temporary_relay_queue.sql), [005](migrations/005_drop_account_username.sql) and [006](migrations/006_signal_public_prekeys.sql). See [deployment evidence](docs/MESSAGING_DEPLOYMENT.md). Startup validates schema and never applies migrations.
 
 The earlier request/conversation/KeyPackage/session APIs are retired in this source. No server conversation history, delivered column, MLS KeyPackage inventory, delivery-receipt event system, permanent message retry markers or automatic resend/backoff system is implemented. See the [WebSocket contract and limits](docs/MESSAGING_API.md), [approved architecture](docs/ARCHITECTURE_CORRECTION.md) and [verification and activation record](docs/RELAY_VALIDATION.md).
 
@@ -59,7 +60,7 @@ A challenge accepts only the authentication public key:
 {"auth_public_key":"<padded base64 of a valid 32-byte Ed25519 public key>"}
 ```
 
-Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. Migration 005 removes the legacy username column and its CHECK constraint. Accounts contain `id`, `void_id`, `auth_public_key`, `created_at`, and (after migration 007) nullable `deleted_at`; existing account identities and keys are preserved.
+Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. Migration 005 removes the legacy username column and its CHECK constraint. Accounts contain `id`, `void_id`, `auth_public_key`, `created_at`, and nullable `deleted_at`; existing account identities and keys are preserved.
 
 Clients sign the exact decoded `VOID-NOTHINGNESS:register:v1` challenge message and submit `challenge_id` and padded-base64 `signature` to `/accounts`. Registration proofs remain single-use and bind the submitted public key. The v1 proof retains an empty reserved line after the encoded key, so its bytes match the previous username-omitted flow. Registration responses contain only `void_id` and `created_at`. Private keys never leave devices. Registration creates no persistent messaging session.
 

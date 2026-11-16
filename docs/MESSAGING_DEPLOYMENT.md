@@ -1,7 +1,13 @@
 # Relay migration review and deployment
 
+Permanent account deletion was activated on 2026-11-16 at 16:59 (Asia/Manila),
+after explicit owner approval. Migration 007 and source `9e6b6d5` are running;
+all 13 existing accounts and all queued/prekey data were preserved. See the
+[complete activation and recovery record](ACCOUNT_DELETION_DEPLOYMENT.md).
+The earlier dated records below describe prior activations.
+
 Signal public-prekey activation: 2026-11-03 11:36 (Asia/Manila), explicitly approved.
-Source `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e` is running with migration 006 applied.
+That activation deployed source `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e` with migration 006.
 All three existing accounts, keys and message state were preserved exactly.
 The configured owner already had access; the optional privilege SQL was not
 applied. Six HTTP/readiness checks and two WebSocket checks passed without live

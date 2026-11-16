@@ -1,9 +1,11 @@
 # Account deletion change report
 
-Implemented and tested on 2026-11-16 (Asia/Manila). No production migration,
-account deletion, deployment, credential/role change, or Rust edit was performed.
-The configured `.env` was read literally for isolated test connections and was
-not modified. Temporary `void_test_` databases were removed after testing.
+Implementation verification completed on 2026-11-16 (Asia/Manila). The tests
+below preceded production activation and made no production changes. The
+subsequently authorized migration and backend activation are recorded in
+[ACCOUNT_DELETION_DEPLOYMENT.md](ACCOUNT_DELETION_DEPLOYMENT.md). No account was
+deleted and no credentials, roles, `.env`, or Rust source were changed.
+Temporary `void_test_` databases were removed after testing.
 
 ## Results
 
@@ -48,8 +50,8 @@ The [complete Rust contract and deployment procedure](ACCOUNT_DELETION.md)
 defines every new request/response/error frame, exact signed bytes, reconnect and
 uncertain-ACK handling, cache reconciliation, and existing-session behavior.
 
-Deployment still requires explicit approval: stop every old backend, apply the
-reviewed migration and needed grants, start only the matching binary, verify
+The separately approved activation is recorded above. Future deployment must stop
+every old backend, apply the reviewed migration and needed grants, start only the matching binary, verify
 readiness, and coordinate the separate Rust implementation. Never restore an
 older binary/backup that ignores or loses tombstones. No real-account deletion
 is needed for deployment smoke testing.
@@ -61,7 +63,7 @@ immediately. Bounded writes can delay a concurrent deletion until their deadline
 Administrative owners can disable triggers; backup/recovery procedures must
 preserve tombstones.
 
-## Exact files changed
+## Exact files changed in implementation commit `9e6b6d5`
 
 - `README.md`
 - `cmd/void-server/main.go`

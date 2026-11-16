@@ -1,6 +1,12 @@
 # Temporary relay verification and activation
 
-Latest activation verified on 2026-11-03 (Asia/Manila), branch backend. Deployed source: `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e`. Installed binary SHA-256: `b264d818880a84d4e2c3c400b617eaf215950fab66b45eec58a0b22f50dfca41`. Earlier dated records below describe their respective deployments.
+Current activation: migration 007 and backend source `9e6b6d5`, verified on
+2026-11-16 (Asia/Manila). All 13 account identities and all message/prekey rows
+were preserved. Local readiness and public WebSocket rejection checks passed.
+See the [account deletion activation record](ACCOUNT_DELETION_DEPLOYMENT.md).
+The dated entries below are historical.
+
+Earlier activation verified on 2026-11-03 (Asia/Manila), branch backend. Deployed source: `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e`. Installed binary SHA-256: `b264d818880a84d4e2c3c400b617eaf215950fab66b45eec58a0b22f50dfca41`. Earlier dated records below describe their respective deployments.
 
 The owner explicitly authorized migration with "do the migration now". The exact 004 was rehearsed against a full isolated restore, then applied to the existing database at 14:56. Both accounts and keys remain exact; account table identity, metadata and privileges were preserved apart from optional username nullability. Exactly accounts/messages remain, and the new queue was empty after verification. The original matching backend was started after that migration.
 

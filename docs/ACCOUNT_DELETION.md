@@ -1,8 +1,9 @@
 # Permanent account deletion: Rust integration and deployment
 
 This is the contract accompanying the Rust deletion UI in `a91049f`. No Rust
-source changed. This backend is prepared for review, not deployed. Migration 007
-has not been applied to production.
+source changed. Migration 007 and backend source `9e6b6d5` were activated on
+2026-11-16 at 16:59 (Asia/Manila). See the [live activation and recovery
+record](ACCOUNT_DELETION_DEPLOYMENT.md).
 
 ## Transport and state
 
@@ -283,7 +284,7 @@ go build -o /tmp/void-account-deletion-review ./cmd/void-server
 git diff --check
 ```
 
-Deployment requires separate approval:
+The approved activation is recorded above. Future deployments require separate approval:
 
 1. Review migration 007 and this change, retain the owner's normal backup, and
    rehearse in disposable fixtures. Coordinate the Rust protocol implementation.
