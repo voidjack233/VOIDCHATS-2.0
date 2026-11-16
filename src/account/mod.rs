@@ -1,5 +1,6 @@
 mod enrollment;
 mod protocol;
+mod removal;
 mod storage;
 
 pub(crate) use enrollment::open as open_enrollment;
@@ -64,6 +65,11 @@ impl SetupError {
 enum Command {
     CheckStorage,
     CreateAccount,
+    RemoveLocal {
+        expected_id: Option<String>,
+        shutdown: Box<dyn FnOnce() + Send>,
+    },
+    Close,
 }
 
 #[derive(Default)]
@@ -82,6 +88,11 @@ enum Startup {
     Welcome,
     Registered(String),
     Blocked(&'static str),
+    Removed,
+    RemovalIncomplete {
+        message: &'static str,
+        can_go_back: bool,
+    },
 }
 
 fn inspect(store: &Store) -> Result<Startup, SetupError> {
@@ -418,34 +429,72 @@ pub(crate) fn load_registered_identity(expected_id: &str) -> std::io::Result<Reg
     }
 }
 
-pub(crate) fn bind(
-    ui: &AppWindow,
-    on_registered: impl Fn(&AppWindow) + Clone + Send + 'static,
-) -> std::io::Result<()> {
+pub(crate) struct Worker {
+    sender: mpsc::Sender<Command>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl Worker {
+    pub(crate) fn remover(
+        &self,
+    ) -> impl Fn(Option<String>, Box<dyn FnOnce() + Send>) -> bool + 'static {
+        let sender = self.sender.clone();
+        move |expected_id, shutdown| {
+            sender
+                .send(Command::RemoveLocal {
+                    expected_id,
+                    shutdown,
+                })
+                .is_ok()
+        }
+    }
+
+    pub(crate) fn finish(self) {
+        let _ = self.sender.send(Command::Close);
+        let _ = self.thread.join();
+    }
+}
+
+pub(crate) fn bind(ui: &AppWindow) -> std::io::Result<Worker> {
     let (send, receive) = mpsc::channel();
     let weak = ui.as_weak();
-    thread::Builder::new()
+    let thread = thread::Builder::new()
         .name("void-account".into())
         .spawn(move || {
             let mut setup = Setup::default();
             let mut command = Command::CheckStorage;
             loop {
                 let checking = matches!(command, Command::CheckStorage);
-                let result = Store::for_user().map_err(|_| SetupError::retry(
-                "The Windows local app data directory is unavailable. Retry opening local storage."
-            )).and_then(|store| match command {
-                Command::CheckStorage => inspect(&store),
-                Command::CreateAccount => setup.run(&store, HttpAccountApi::new, |stage| {
-                    let _ = weak.upgrade_in_event_loop(move |ui| ui.set_setup_status(stage.into()));
-                }).map(|account| Startup::Registered(account.void_id)),
-            });
+                let result = match command {
+                    Command::Close => break,
+                    Command::RemoveLocal { expected_id, shutdown } => {
+                        shutdown();
+                        setup = Setup::default();
+                        match Store::for_user() {
+                            Ok(store) => resume_or_remove(&store, expected_id.as_deref()),
+                            Err(_) => Ok(Startup::RemovalIncomplete {
+                                message: removal::Error::Unavailable.message(), can_go_back: true,
+                            }),
+                        }
+                    }
+                    Command::CheckStorage | Command::CreateAccount => Store::for_user().map_err(|_| SetupError::retry(
+                        "The Windows local app data directory is unavailable. Retry opening local storage."
+                    )).and_then(|store| {
+                        if checking {
+                            resume_or_remove(&store, None)
+                        } else {
+                            setup.run(&store, HttpAccountApi::new, |stage| {
+                                let _ = weak.upgrade_in_event_loop(move |ui| ui.set_setup_status(stage.into()));
+                            }).map(|account| Startup::Registered(account.void_id))
+                        }
+                    }),
+                };
                 let save_only = setup.pending_save.is_some();
-                let on_registered = on_registered.clone();
                 let _ = weak.upgrade_in_event_loop(move |ui| {
                     let registered = matches!(result, Ok(Startup::Registered(_)));
                     finish(&ui, checking, save_only, result);
                     if registered {
-                        on_registered(&ui);
+                        ui.invoke_account_registered();
                     }
                 });
                 match receive.recv() {
@@ -456,6 +505,7 @@ pub(crate) fn bind(
         })?;
 
     let weak = ui.as_weak();
+    let sender = send.clone();
     ui.on_submit_setup(move || {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -471,7 +521,7 @@ pub(crate) fn bind(
         ui.set_setup_busy(true);
         ui.set_setup_error("".into());
         ui.set_setup_status("Opening protected local storage…".into());
-        if send.send(command).is_err() {
+        if sender.send(command).is_err() {
             finish(
                 &ui,
                 false,
@@ -482,10 +532,27 @@ pub(crate) fn bind(
             );
         }
     });
-    Ok(())
+    Ok(Worker {
+        sender: send,
+        thread,
+    })
+}
+
+fn resume_or_remove(store: &Store, expected_id: Option<&str>) -> Result<Startup, SetupError> {
+    match removal::remove(store, expected_id) {
+        Ok(true) => Ok(Startup::Removed),
+        Ok(false) => inspect(store),
+        Err(error) => Ok(Startup::RemovalIncomplete {
+            message: error.message(),
+            can_go_back: removal::pending(store).is_ok_and(|pending| !pending),
+        }),
+    }
 }
 
 fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startup, SetupError>) {
+    ui.set_local_removal_busy(false);
+    ui.set_local_removal_error("".into());
+    ui.set_local_removal_can_go_back(false);
     ui.set_setup_busy(false);
     ui.set_setup_status("".into());
     ui.set_setup_retry_storage(checking && result.is_err());
@@ -495,6 +562,47 @@ fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startu
         Ok(Startup::Welcome) => {
             ui.set_setup_error("".into());
             ui.set_setup_page(1);
+        }
+        Ok(Startup::Removed) => {
+            ui.set_account_void_id("".into());
+            ui.set_setup_error("".into());
+            ui.set_storage_ready(false);
+            ui.set_storage_retryable(false);
+            ui.set_storage_loading(true);
+            ui.set_storage_error("".into());
+            ui.set_messaging_ready(false);
+            ui.set_publishing_keys(false);
+            ui.set_messaging_notice("".into());
+            ui.set_publication_error("".into());
+            ui.set_publication_retryable(false);
+            ui.set_connection_status("Disconnected".into());
+            ui.set_stored_chats(Default::default());
+            ui.set_stored_requests(Default::default());
+            ui.set_stored_contacts(Default::default());
+            ui.set_stored_messages(Default::default());
+            ui.set_selected_conversation("".into());
+            ui.set_conversation_title("".into());
+            ui.set_conversation_is_request(false);
+            ui.set_conversation_peer_deleted(false);
+            ui.set_conversation_loading(false);
+            ui.set_creating_conversation(false);
+            ui.set_conversation_error("".into());
+            ui.set_stored_draft("".into());
+            ui.set_draft_status("".into());
+            ui.set_draft_save_failed(false);
+            ui.set_unsaved_draft_failure(false);
+            ui.set_send_busy(false);
+            ui.set_section("Chats".into());
+            ui.invoke_cancel_local_removal();
+            ui.invoke_cancel_permanent_deletion();
+            ui.set_setup_page(1);
+        }
+        Ok(Startup::RemovalIncomplete {
+            message,
+            can_go_back,
+        }) => {
+            ui.set_local_removal_error(message.into());
+            ui.set_local_removal_can_go_back(can_go_back && !ui.get_account_void_id().is_empty());
         }
         Ok(Startup::Registered(id)) => {
             ui.set_account_void_id(id.into());
@@ -542,6 +650,126 @@ mod tests {
     use storage::tests::TestDir;
 
     const CHALLENGE_ID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[test]
+    fn interrupted_local_removal_resumes_before_allowing_fresh_registration() {
+        let dir = crate::storage::tests::TestDir::new();
+        let store = Store::from_test_path(dir.0.clone());
+        let original = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let (db, _) = enrollment::open_fixture(&dir.0, "123", &original).unwrap();
+        let conversation = db.create_conversation("456", 100).unwrap();
+        db.save_draft(conversation, "Isolated draft").unwrap();
+        let unrelated = dir.0.join("keep.txt");
+        fs::write(&unrelated, b"unrelated").unwrap();
+        let account = dir.0.join("account.dpapi");
+        assert!(matches!(
+            removal::remove(&store, Some("123")),
+            Err(removal::Error::Busy)
+        ));
+        assert!(!removal::pending(&store).unwrap());
+        db.close().unwrap();
+
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0x3)
+            .open(&account)
+            .unwrap();
+        assert!(matches!(
+            resume_or_remove(&store, Some("123")).ok(),
+            Some(Startup::RemovalIncomplete {
+                can_go_back: false,
+                ..
+            })
+        ));
+        assert!(removal::pending(&store).unwrap());
+        assert!(store.load().is_err());
+        assert!(!dir.0.join("messages").exists());
+        assert!(account.exists());
+        drop(held);
+
+        let reopened = Store::from_test_path(dir.0.clone());
+        assert!(matches!(
+            resume_or_remove(&reopened, None).ok(),
+            Some(Startup::Removed)
+        ));
+        assert!(!removal::pending(&reopened).unwrap());
+        assert!(matches!(
+            resume_or_remove(&reopened, None).ok(),
+            Some(Startup::Welcome)
+        ));
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+        assert!(!account.exists());
+
+        let submitted = Cell::new(0);
+        let result = Setup::default()
+            .run(
+                &reopened,
+                || {
+                    let identity = reopened.load().unwrap().unwrap();
+                    let expected_key = identity.key.verifying_key().to_bytes();
+                    assert_ne!(expected_key, original.verifying_key().to_bytes());
+                    Ok(LocalApi {
+                        store: &reopened,
+                        expected_key,
+                        submitted: &submitted,
+                        answer: Cell::new(Some(Ok(Registration {
+                            void_id: "789".into(),
+                            created_at: "2026-11-16T00:00:00Z".into(),
+                        }))),
+                        hold_record: None,
+                    })
+                },
+                |_| {},
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(result.void_id, "789");
+        assert_eq!(submitted.get(), 1);
+        let (db, published) = enrollment::open_store(&reopened, "789", &|_| {}).unwrap();
+        assert!(!published);
+        assert!(db.conversations(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removal_preserves_a_database_owned_by_another_account() {
+        let dir = crate::storage::tests::TestDir::new();
+        let store = Store::from_test_path(dir.0.clone());
+        let local = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[8; 32]).verifying_key();
+        let lock = store.lock().unwrap();
+        store
+            .save(&Identity {
+                key: local,
+                state: State::Registered(Registration {
+                    void_id: "123".into(),
+                    created_at: "2026-11-16T00:00:00Z".into(),
+                }),
+            })
+            .unwrap();
+        drop(lock);
+        let owner = crate::storage::Owner {
+            void_id: "456",
+            public_key: other.as_bytes(),
+        };
+        let db = crate::storage::Database::open(&dir.0, owner).unwrap();
+        let conversation = db.create_conversation("789", 100).unwrap();
+        db.save_draft(conversation, "Other account’s draft")
+            .unwrap();
+        db.close().unwrap();
+        let account_path = dir.0.join("account.dpapi");
+        let before = fs::read(&account_path).unwrap();
+        assert!(matches!(
+            removal::remove(&store, Some("123")),
+            Err(removal::Error::UnverifiedStorage)
+        ));
+        assert!(!removal::pending(&store).unwrap());
+        assert!(fs::read(account_path).unwrap() == before);
+        let db = crate::storage::Database::open_existing(&dir.0, owner).unwrap();
+        assert_eq!(
+            db.draft(conversation).unwrap().as_deref(),
+            Some("Other account’s draft")
+        );
+    }
 
     #[test]
     fn signal_setup_preserves_the_protected_account_record() {

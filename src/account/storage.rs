@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"VOID-ACCOUNT\x01";
 const CONFIRMATION_MAGIC: &[u8] = b"VOID-REGISTRATION\x01";
-const CONFIRMATION_FILE: &str = "account-confirmation.dpapi";
+pub(super) const CONFIRMATION_FILE: &str = "account-confirmation.dpapi";
 const MAX_RECORD: u64 = 16_384;
 
 pub(super) struct Identity {
@@ -111,6 +111,13 @@ impl Store {
     }
 
     pub fn load(&self) -> io::Result<Option<Identity>> {
+        if super::removal::pending(self)? {
+            return Err(io::Error::other("Local account removal is pending"));
+        }
+        self.load_for_removal()
+    }
+
+    pub(super) fn load_for_removal(&self) -> io::Result<Option<Identity>> {
         let Some(plaintext) = read_protected(&self.0.join("account.dpapi"))? else {
             return Ok(None);
         };
@@ -206,7 +213,29 @@ impl Store {
         let _ = fs::remove_file(self.0.join(CONFIRMATION_FILE));
     }
 
-    fn write_protected(&self, name: &str, plaintext: &[u8]) -> io::Result<()> {
+    pub(super) fn verify_removal_confirmation(
+        &self,
+        void_id: &str,
+        public_key: &[u8; 32],
+    ) -> io::Result<()> {
+        let Some(plaintext) = read_protected(&self.0.join(CONFIRMATION_FILE))? else {
+            return Ok(());
+        };
+        let record = plaintext
+            .strip_prefix(CONFIRMATION_MAGIC)
+            .ok_or_else(invalid_record)?;
+        let receipt: Confirmation = serde_json::from_slice(record).map_err(|_| invalid_record())?;
+        if receipt.api_base != API_BASE
+            || receipt.account.void_id != void_id
+            || &receipt.public_key != public_key
+            || !valid_registration(&receipt.account)
+        {
+            return Err(invalid_record());
+        }
+        Ok(())
+    }
+
+    pub(super) fn write_protected(&self, name: &str, plaintext: &[u8]) -> io::Result<()> {
         let encrypted = dpapi(plaintext, true)?;
         let mut random = [0; 8];
         getrandom::fill(&mut random).map_err(io::Error::other)?;
@@ -227,7 +256,7 @@ impl Store {
     }
 }
 
-fn read_protected(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+pub(super) fn read_protected(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),

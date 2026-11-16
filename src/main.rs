@@ -9,6 +9,7 @@ mod storage_ui;
 mod relay_ui_tests;
 
 use relay::{Connection, ConnectionStatus};
+use std::{cell::RefCell, rc::Rc};
 
 slint::include_modules!();
 
@@ -17,6 +18,8 @@ fn connect_relay(ui: &AppWindow, relay: &Connection) {
     if !matches!(ui.get_setup_page(), 0 | account::ENROLLMENT_PAGE)
         || !ui.get_storage_ready()
         || !account::valid_void_id(&void_id)
+        || ui.get_local_removal_busy()
+        || !ui.get_local_removal_error().is_empty()
     {
         return;
     }
@@ -28,6 +31,51 @@ fn connect_relay(ui: &AppWindow, relay: &Connection) {
     }
     if relay.connect(void_id.to_string()) {
         ui.set_connection_status(ConnectionStatus::Connecting.label().into());
+    }
+}
+
+struct MessagingWorkers {
+    relay: Option<relay::Worker>,
+    storage: Option<storage_ui::Worker>,
+}
+
+impl MessagingWorkers {
+    fn start(ui: &AppWindow) -> Self {
+        let storage = storage_ui::bind(ui).ok();
+        let activity = storage.as_ref().map(|worker| worker.relay_activity());
+        let relay = match Connection::start(report_relay_status(ui), move |event| {
+            if let Some(report) = &activity {
+                report(event);
+            }
+        }) {
+            Ok((relay, worker)) => {
+                bind_reconnect(ui, relay);
+                Some(worker)
+            }
+            Err(_) => {
+                ui.set_publication_error(
+                    "The relay worker could not start. Close and reopen VOID.".into(),
+                );
+                None
+            }
+        };
+        if let Some(storage) = &storage {
+            storage.opener()(ui);
+        } else {
+            ui.set_storage_retryable(false);
+            ui.set_storage_loading(false);
+            ui.set_storage_error("Local storage could not start. Close and reopen VOID.".into());
+        }
+        Self { relay, storage }
+    }
+
+    fn finish(self) {
+        if let Some(worker) = self.relay {
+            worker.finish();
+        }
+        if let Some(worker) = self.storage {
+            worker.finish();
+        }
     }
 }
 
@@ -105,47 +153,91 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     let ui = AppWindow::new()?;
-    let local_storage = storage_ui::bind(&ui).ok();
-    let open_storage = local_storage.as_ref().map(|worker| worker.opener());
-    let activity = local_storage.as_ref().map(|worker| worker.relay_activity());
-    let (relay, relay_worker) = match Connection::start(report_relay_status(&ui), move |event| {
-        if let Some(report) = &activity {
-            report(event);
+    let messaging = Rc::new(RefCell::new(None::<MessagingWorkers>));
+    let runtime = messaging.clone();
+    let weak = ui.as_weak();
+    ui.on_account_registered(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let mut runtime = runtime.borrow_mut();
+        if runtime.is_none() {
+            *runtime = Some(MessagingWorkers::start(&ui));
         }
-    }) {
-        Ok((relay, worker)) => (Some(relay), Some(worker)),
+    });
+    let account = match account::bind(&ui) {
+        Ok(worker) => {
+            let remove = worker.remover();
+            let runtime = messaging.clone();
+            let weak = ui.as_weak();
+            ui.on_request_local_removal(move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if ui.get_local_removal_busy() {
+                    return;
+                }
+                let continuing = !ui.get_local_removal_error().is_empty();
+                let id = ui.get_account_void_id();
+                let expected_id = account::valid_void_id(&id).then(|| id.to_string());
+                if !continuing && (!ui.get_local_removal_confirmed() || expected_id.is_none()) {
+                    return;
+                }
+                ui.set_local_removal_busy(true);
+                ui.set_local_removal_error("".into());
+                ui.set_local_removal_can_go_back(false);
+                ui.invoke_cancel_local_removal();
+                let messaging = runtime.borrow_mut().take();
+                if !remove(
+                    expected_id,
+                    Box::new(move || {
+                        if let Some(workers) = messaging {
+                            workers.finish();
+                        }
+                    }),
+                ) {
+                    ui.set_local_removal_busy(false);
+                    ui.set_local_removal_error(
+                        "Local account management stopped. Close and reopen VOID.".into(),
+                    );
+                }
+            });
+            let weak = ui.as_weak();
+            ui.on_leave_failed_removal(move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if !ui.get_local_removal_can_go_back() || ui.get_local_removal_busy() {
+                    return;
+                }
+                ui.set_local_removal_can_go_back(false);
+                ui.set_local_removal_error("".into());
+                ui.set_setup_page(account::ENROLLMENT_PAGE);
+                ui.set_storage_ready(false);
+                ui.set_messaging_ready(false);
+                ui.set_publishing_keys(false);
+                ui.set_publication_error("".into());
+                ui.set_publication_retryable(false);
+                ui.set_connection_status(ConnectionStatus::Disconnected.label().into());
+                ui.invoke_account_registered();
+            });
+            Some(worker)
+        }
         Err(_) => {
-            ui.set_publication_error(
-                "The relay worker could not start. Close and reopen VOID.".into(),
-            );
-            (None, None)
+            ui.set_setup_busy(false);
+            ui.set_setup_status("".into());
+            ui.set_setup_can_retry(false);
+            ui.set_setup_error("Could not start account setup. Close and reopen VOID.".into());
+            ui.set_setup_page(5);
+            None
         }
     };
-    if let Some(relay) = relay.clone() {
-        bind_reconnect(&ui, relay);
-    }
-    if account::bind(&ui, move |ui| {
-        if let Some(open) = &open_storage {
-            open(ui);
-        } else {
-            ui.set_storage_loading(false);
-            ui.set_storage_error("Local storage could not start. Close and reopen VOID.".into());
-        }
-    })
-    .is_err()
-    {
-        ui.set_setup_busy(false);
-        ui.set_setup_status("".into());
-        ui.set_setup_can_retry(false);
-        ui.set_setup_error("Could not start account setup. Close and reopen VOID.".into());
-        ui.set_setup_page(5);
-    }
     let result = ui.run();
     drop(ui);
-    if let Some(worker) = relay_worker {
-        worker.finish();
+    if let Some(workers) = messaging.borrow_mut().take() {
+        workers.finish();
     }
-    if let Some(worker) = local_storage {
+    if let Some(worker) = account {
         worker.finish();
     }
     result

@@ -146,16 +146,7 @@ impl Database {
     }
 
     fn open_local(root: &Path, owner: Owner<'_>, allow_create: bool) -> Result<Self> {
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(root.join("messages.lock"))?;
-        lock.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => Error::Busy,
-            std::fs::TryLockError::Error(_) => Error::Unavailable,
-        })?;
+        let lock = lock_messages(root)?;
 
         let directory = root.join("messages");
         if !entry_exists(&directory)? {
@@ -219,6 +210,42 @@ impl Database {
         tx.commit()?;
         Ok(result)
     }
+}
+
+pub(crate) fn lock_messages(root: &Path) -> Result<File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("messages.lock"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => Error::Busy,
+        std::fs::TryLockError::Error(_) => Error::Unavailable,
+    })?;
+    Ok(lock)
+}
+
+pub(crate) fn verify_removal_owner(
+    directory: &Path,
+    owner: Owner<'_>,
+    staging: bool,
+) -> Result<()> {
+    let key = read_key(&directory.join(KEY_FILE))?;
+    let connection = open_keyed(
+        &directory.join(DATABASE),
+        &key,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    if staging
+        && schema_version(&connection, MIGRATIONS.len())? == 0
+        && connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
+            row.get::<_, i64>(0)
+        })? == 0
+    {
+        return Ok(());
+    }
+    verify_owner(&connection, owner)
 }
 
 #[derive(Debug, PartialEq, Eq)]

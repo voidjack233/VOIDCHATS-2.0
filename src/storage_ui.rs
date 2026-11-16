@@ -564,7 +564,10 @@ fn initialize_messaging(
 }
 
 fn finish_enrollment(ui: &AppWindow) {
-    if ui.get_setup_page() == account::ENROLLMENT_PAGE {
+    if ui.get_setup_page() == account::ENROLLMENT_PAGE
+        && !ui.get_local_removal_busy()
+        && ui.get_local_removal_error().is_empty()
+    {
         ui.set_setup_status("Messaging ready".into());
         ui.set_section("Chats".into());
         ui.set_setup_page(0);
@@ -1156,6 +1159,69 @@ mod tests {
         assert_eq!(ui.get_stored_draft(), "Untouched draft");
         ui.invoke_open_permanent_deletion();
         assert!(!ui.get_permanent_deletion_confirmed());
+    }
+
+    #[test]
+    fn blocked_enrollment_exposes_separate_account_actions_and_cancel_preserves_data() {
+        if !in_test_process(
+            "storage_ui::tests::blocked_enrollment_exposes_separate_account_actions_and_cancel_preserves_data",
+        ) {
+            return;
+        }
+        let temp = TestDir::new();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let (db, _) = account::open_enrollment_fixture(&temp.0, "41", &key).unwrap();
+        let conversation = db.create_conversation("123", 100).unwrap();
+        db.save_draft(conversation, "Isolated draft").unwrap();
+        db.close().unwrap();
+        let file = temp.0.join("account.dpapi");
+        let identity = std::fs::read(&file).unwrap();
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_account_void_id("41".into());
+        ui.set_setup_page(account::ENROLLMENT_PAGE);
+        ui.set_storage_loading(false);
+        ui.set_storage_ready(true);
+        ui.set_connection_status("Connected".into());
+        let conflict = messaging::Error::Relay(crate::relay::RequestError::Rejected {
+            command: "prekeys_publish",
+            code: "prekeys_conflict".into(),
+        });
+        let (notice, retryable) = messaging::publication_failure(&conflict);
+        ui.set_publication_error(notice.into());
+        ui.set_publication_retryable(retryable);
+        assert!(ui.get_can_manage_enrollment_account());
+        assert!(!ui.get_enrollment_can_retry());
+
+        ui.invoke_open_local_removal();
+        assert!(ui.get_local_removal_open());
+        for invalid in ["delete", "DELETE ", " DELETE", "DELETE\n"] {
+            ui.set_local_removal_phrase(invalid.into());
+            assert!(!ui.get_local_removal_confirmed());
+        }
+        ui.set_local_removal_phrase("DELETE".into());
+        assert!(ui.get_local_removal_confirmed());
+        assert!(!ui.get_permanent_deletion_confirmed());
+        ui.invoke_cancel_local_removal();
+        assert!(ui.get_local_removal_phrase().is_empty());
+        assert_eq!(ui.get_setup_page(), account::ENROLLMENT_PAGE);
+        assert_eq!(ui.get_publication_error(), notice);
+
+        ui.set_connection_status("Reconnecting".into());
+        assert!(ui.get_can_manage_enrollment_account());
+        ui.invoke_open_permanent_deletion();
+        ui.set_permanent_deletion_phrase("DELETE".into());
+        assert!(ui.get_permanent_deletion_confirmed());
+        assert!(!ui.get_can_permanently_delete());
+        assert!(!ui.get_local_removal_confirmed());
+        ui.invoke_cancel_permanent_deletion();
+        assert!(std::fs::read(&file).unwrap() == identity);
+        let (db, _) = account::open_enrollment_fixture(&temp.0, "41", &key).unwrap();
+        assert_eq!(
+            db.draft(conversation).unwrap().as_deref(),
+            Some("Isolated draft")
+        );
     }
 
     #[test]
