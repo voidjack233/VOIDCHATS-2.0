@@ -26,7 +26,7 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 rusqlite = { version = "0.42", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [build-dependencies]
 slint-build = "1"

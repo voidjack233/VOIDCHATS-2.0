@@ -18,6 +18,7 @@ const PEER_STATUS_INTERVAL: Duration = Duration::from_millis(600);
 enum Command {
     Open(String),
     Select(i64, i32),
+    MarkRead(i64, i64),
     Create(String, i32),
     SaveDraft(i64, String, i32),
     SendDraft(i64, String, i32),
@@ -161,6 +162,18 @@ fn bind_with(
                         if let Some(db) = &database {
                             selected = Some(id);
                             show_conversation(&weak, selection, load_conversation(db, id));
+                        }
+                    }
+                    Command::MarkRead(id, through) => {
+                        if let Some(db) = &database
+                            && db.mark_read(id, through).is_ok_and(|changed| changed)
+                        {
+                            let lists = load_lists(db);
+                            let _ = weak.upgrade_in_event_loop(move |ui| {
+                                if let Ok(lists) = lists {
+                                    lists.show(&ui);
+                                }
+                            });
                         }
                     }
                     Command::Create(peer, selection) => {
@@ -348,6 +361,13 @@ fn bind_with(
         }
     });
 
+    let sender = worker.sender.clone();
+    ui.on_read_visible_conversation(move |id, through| {
+        if let (Ok(id), Ok(through)) = (id.parse(), through.parse()) {
+            let _ = sender.send(Command::MarkRead(id, through));
+        }
+    });
+
     let weak = ui.as_weak();
     let sender = worker.sender.clone();
     ui.on_create_stored_conversation(move |peer| {
@@ -496,7 +516,12 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_storage_ready() || ui.get_send_busy() || ui.get_conversation_peer_deleted() {
+        if !ui.get_storage_ready()
+            || !ui.get_conversation_can_compose()
+            || ui.get_conversation_loading()
+            || ui.get_send_busy()
+            || ui.get_stored_draft().trim().is_empty()
+        {
             return;
         }
         let Ok(id) = ui.get_selected_conversation().parse() else {
@@ -602,9 +627,9 @@ fn refresh_messages(
     show_selected_peer_status(weak, db, selected);
     let lists = load_lists(db);
     let timeline = selected.and_then(|id| {
-        db.conversation_timeline(id)
-            .ok()
-            .map(|messages| (id, messages))
+        let conversation = db.conversation(id).ok()?;
+        let messages = db.conversation_timeline(id).ok()?;
+        Some((id, messages, conversation.unread_through))
     });
     let _ = weak.upgrade_in_event_loop(move |ui| {
         if let Ok(lists) = lists {
@@ -616,10 +641,11 @@ fn refresh_messages(
                 ui.set_section("Chats".into());
             }
         }
-        if let Some((id, messages)) = timeline
+        if let Some((id, messages, unread_through)) = timeline
             && ui.get_selected_conversation().as_str() == id.to_string()
         {
             show_messages(&ui, messages);
+            ui.set_conversation_read_through(read_through_label(unread_through).into());
         }
     });
 }
@@ -669,6 +695,8 @@ struct Lists {
 
 impl Lists {
     fn show(self, ui: &AppWindow) {
+        ui.set_chats_unread(self.chats.iter().any(|row| row.unread_through.is_some()));
+        ui.set_requests_unread(self.requests.iter().any(|row| row.unread_through.is_some()));
         ui.set_stored_chats(conversation_model(self.chats));
         ui.set_stored_requests(conversation_model(self.requests));
         let contacts: Vec<_> = self
@@ -677,7 +705,7 @@ impl Lists {
             .map(|contact| StoredContact {
                 title: contact
                     .display_name
-                    .unwrap_or_else(|| format!("VOID-ID {}", contact.void_id))
+                    .unwrap_or_else(|| "Contact".into())
                     .into(),
                 void_id: contact.void_id.into(),
             })
@@ -704,13 +732,26 @@ fn conversation_model(list: Vec<storage::Conversation>) -> ModelRc<StoredConvers
             } else {
                 time
             };
+            let activity = if row.display_name.is_none() {
+                let short_id = row.peer_void_id.char_indices().rev().nth(5).map_or(
+                    row.peer_void_id.clone(),
+                    |(start, _)| {
+                        if start == 0 {
+                            row.peer_void_id.clone()
+                        } else {
+                            format!("…{}", &row.peer_void_id[start..])
+                        }
+                    },
+                );
+                format!("{short_id} · {activity}")
+            } else {
+                activity
+            };
             StoredConversation {
                 id: row.id.to_string().into(),
-                title: row
-                    .display_name
-                    .unwrap_or_else(|| format!("VOID-ID {}", row.peer_void_id))
-                    .into(),
+                title: row.display_name.unwrap_or_else(|| "Contact".into()).into(),
                 activity: activity.into(),
+                unread: row.unread_through.is_some(),
             }
         })
         .collect();
@@ -732,16 +773,19 @@ impl Detail {
             messages,
             draft,
         } = self;
+        ui.set_conversation_read_through("".into());
         ui.set_selected_conversation(conversation.id.to_string().into());
         ui.set_conversation_title(
             conversation
                 .display_name
-                .unwrap_or_else(|| format!("VOID-ID {}", conversation.peer_void_id))
+                .unwrap_or_else(|| "Contact".into())
                 .into(),
         );
+        ui.set_conversation_peer_id(conversation.peer_void_id.into());
         ui.set_conversation_is_request(conversation.is_request);
         ui.set_conversation_peer_deleted(account_status == AccountStatus::Deleted);
         show_messages(ui, messages);
+        ui.set_conversation_read_through(read_through_label(conversation.unread_through).into());
         ui.invoke_load_stored_draft(ui.get_selected_conversation(), draft.into());
     }
 }
@@ -756,17 +800,37 @@ fn load_conversation(db: &storage::Database, id: i64) -> storage::Result<Detail>
 }
 
 fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessage>) {
+    let mut previous_day = None;
     let messages: Vec<_> = messages
         .into_iter()
-        .map(|message| StoredMessage {
-            body: message.body.into(),
-            time: display_time(message.created_at).into(),
-            outgoing: message.outgoing,
-            status: message.status.into(),
-            retry_event: message.retry_event.into(),
+        .map(|message| {
+            let date = chrono::DateTime::from_timestamp_millis(message.created_at);
+            let day = date.map(|date| date.date_naive());
+            let heading = day
+                .filter(|day| Some(*day) != previous_day)
+                .map(|day| day.format("%b %-d, %Y · UTC").to_string())
+                .unwrap_or_default();
+            previous_day = day;
+            StoredMessage {
+                body: message.body.into(),
+                day: heading.into(),
+                time: date
+                    .map(|date| date.format("%H:%M").to_string())
+                    .unwrap_or_default()
+                    .into(),
+                outgoing: message.outgoing,
+                status: message.status.into(),
+                retry_event: message.retry_event.into(),
+            }
         })
         .collect();
     ui.set_stored_messages(ModelRc::new(VecModel::from(messages)));
+}
+
+fn read_through_label(through: Option<i64>) -> String {
+    through
+        .map(|sequence| sequence.to_string())
+        .unwrap_or_default()
 }
 
 fn show_conversation(weak: &Weak<AppWindow>, selection: i32, detail: storage::Result<Detail>) {
@@ -900,6 +964,8 @@ pub(crate) mod tests {
                 assert_eq!(ui.get_setup_page(), 0);
                 assert_eq!(ui.get_connection_status(), "Disconnected");
                 assert_eq!(ui.get_stored_chats().row_count(), 1);
+                assert!(ui.get_chats_unread());
+                assert!(ui.get_stored_chats().row_data(0).unwrap().unread);
                 ui.invoke_select_stored_conversation(id.to_string().into());
             } else if ui.get_selected_conversation() == id.to_string()
                 && !ui.get_conversation_loading()
@@ -909,10 +975,18 @@ pub(crate) mod tests {
                     "Stored test message"
                 );
                 assert_eq!(ui.get_stored_draft(), "Earlier draft");
+                if !ui.get_window_foreground() {
+                    assert!(ui.get_chats_unread());
+                    ui.set_window_foreground(true);
+                    return;
+                }
+                if ui.get_chats_unread() {
+                    return;
+                }
                 ui.invoke_save_stored_draft("Intermediate edit".into());
                 ui.invoke_save_stored_draft("Latest edit".into());
                 ui.invoke_create_stored_conversation("456".into());
-            } else if ui.get_conversation_title() == "VOID-ID 456" {
+            } else if ui.get_conversation_peer_id() == "456" {
                 assert!(ui.get_stored_draft().is_empty());
                 assert_eq!(ui.get_stored_chats().row_count(), 2);
                 slint::quit_event_loop().unwrap();
@@ -924,7 +998,8 @@ pub(crate) mod tests {
         });
         slint::run_event_loop_until_quit().unwrap();
         poll.stop();
-        assert_eq!(ui.get_conversation_title(), "VOID-ID 456");
+        assert_eq!(ui.get_conversation_title(), "Contact");
+        assert_eq!(ui.get_conversation_peer_id(), "456");
         assert!(ui.get_storage_error().is_empty());
         drop(ui);
         worker.finish();

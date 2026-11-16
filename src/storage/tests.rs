@@ -49,6 +49,41 @@ fn sample_message(conversation_id: i64) -> Message {
 }
 
 #[test]
+fn unread_messages_survive_reopen_and_a_read_snapshot_leaves_later_messages_unread() {
+    let root = TestDir::new();
+    let mut db = Database::open(&root.0, OWNER).unwrap();
+    let request = db.create_conversation("123", 100).unwrap();
+    db.set_request(request, true).unwrap();
+    let mut message = sample_message(request);
+    db.save_message(&message).unwrap();
+    let through = db.conversations(true).unwrap()[0].unread_through.unwrap();
+
+    message.id = "message-2".into();
+    // Relay timestamps need not arrive in order.
+    message.created_at -= 1;
+    db.save_message(&message).unwrap();
+    assert!(db.save_message(&message).is_err());
+    message.id = "outgoing".into();
+    message.direction = Direction::Outgoing;
+    db.save_message(&message).unwrap();
+    db.close().unwrap();
+
+    let db = Database::open(&root.0, OWNER).unwrap();
+    let latest = db.conversation(request).unwrap().unread_through.unwrap();
+    assert_eq!(latest, through + 1);
+    assert!(db.mark_read(request, through).unwrap());
+    assert_eq!(
+        db.conversation(request).unwrap().unread_through,
+        Some(latest)
+    );
+    assert!(db.mark_read(request, latest).unwrap());
+    let row = &db.conversations(true).unwrap()[0];
+    assert!(row.is_request);
+    assert_eq!(row.unread_through, None);
+    assert_eq!(db.messages(request).unwrap().len(), 3);
+}
+
+#[test]
 fn encrypted_records_survive_reopen_and_require_the_same_key_and_owner() {
     let root = TestDir::new();
     let mut db = Database::open(&root.0, OWNER).unwrap();
@@ -199,7 +234,7 @@ fn migrations_and_message_transactions_roll_back_and_enforce_foreign_keys() {
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap()
     };
-    assert_eq!(version(&db.connection), 7);
+    assert_eq!(version(&db.connection), 8);
     assert!(db.save_draft(999, "missing conversation").is_err());
     assert!(db.set_request(999, true).is_err());
     assert!(db.save_message(&sample_message(999)).is_err());
@@ -343,8 +378,9 @@ fn existing_v1_history_survives_current_migrations_and_fk_diagnostics_detect_orp
     connection.close().unwrap();
 
     let db = Database::open(&root.0, OWNER).unwrap();
-    assert_eq!(schema_version(&db.connection, 7).unwrap(), 7);
+    assert_eq!(schema_version(&db.connection, 8).unwrap(), 8);
     assert_eq!(db.messages(1).unwrap()[0].body, "Existing body");
+    assert_eq!(db.conversation(1).unwrap().unread_through, None);
     assert_eq!(db.draft(1).unwrap().as_deref(), Some("Existing draft"));
     db.connection
         .pragma_update(None, "foreign_keys", false)

@@ -1,8 +1,8 @@
 import { CheckBox, LineEdit, ScrollView, Spinner, TextEdit } from "std-widgets.slint";
 
-export struct StoredConversation { id: string, title: string, activity: string }
+export struct StoredConversation { id: string, title: string, activity: string, unread: bool }
 export struct StoredContact { title: string, void-id: string }
-export struct StoredMessage { body: string, time: string, outgoing: bool, status: string, retry-event: string }
+export struct StoredMessage { body: string, day: string, time: string, outgoing: bool, status: string, retry-event: string }
 
 global Theme {
     out property <color> background: #0c1118;
@@ -93,6 +93,8 @@ enum NavIcon { chats, requests, contacts, settings }
 component NavItem inherits Clickable {
     in property <NavIcon> icon;
     in property <float> label-opacity;
+    in property <bool> unread;
+    accessible-label: root.label + (root.unread ? ", unread messages" : "");
     height: 44px;
     clip: true;
 
@@ -115,6 +117,14 @@ component NavItem inherits Clickable {
         width: 3px;
         height: 16px;
         border-radius: 2px;
+        background: Theme.accent;
+    }
+    if root.unread: Rectangle {
+        x: 29px;
+        y: 8px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
         background: Theme.accent;
     }
 
@@ -237,29 +247,64 @@ component AccountRemovalPage inherits Rectangle {
     }
 }
 
+component UserAvatar inherits Rectangle {
+    width: 34px;
+    height: 34px;
+    border-radius: 17px;
+    background: Theme.selected;
+    accessible-role: none;
+
+    Image {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 19px;
+        height: 19px;
+        source: @image-url("icons/user.svg");
+        colorize: Theme.accent;
+    }
+}
+
 component StorageRow inherits Clickable {
     in property <string> detail;
-    accessible-label: root.label + ", " + root.detail;
+    in property <bool> unread;
+    accessible-label: root.label + ", " + root.detail + (root.unread ? ", unread messages" : "");
     min-height: 58px;
     vertical-stretch: 0;
 
-    VerticalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 4px;
-        alignment: center;
-        Text {
-            text: root.label;
-            color: Theme.primary;
-            font-size: 14px;
-            font-weight: 600;
-            overflow: elide;
+    HorizontalLayout {
+        padding: 10px;
+        spacing: 10px;
+        Rectangle {
+            width: 34px;
+            UserAvatar { y: (parent.height - self.height) / 2; }
         }
-        Text {
-            text: root.detail;
-            color: Theme.secondary;
-            font-size: 12px;
-            overflow: elide;
+        VerticalLayout {
+            spacing: 4px;
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.label;
+                color: Theme.primary;
+                font-size: 14px;
+                font-weight: root.unread ? 700 : 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.detail;
+                color: Theme.secondary;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+        if root.unread: Rectangle {
+            width: 8px;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Theme.accent;
+            }
         }
     }
 }
@@ -270,7 +315,7 @@ component MessageBubble inherits Rectangle {
     in property <bool> show-retry;
     in property <bool> retry-enabled;
     callback retry();
-    private property <length> inset: 10px;
+    private property <length> inset: 9px;
 
     width: min(root.width-limit,
         max(body.preferred-width, metadata.preferred-width, root.show-retry ? 84px : 0px) + 2 * root.inset);
@@ -278,19 +323,27 @@ component MessageBubble inherits Rectangle {
     preferred-height: content.min-height;
     vertical-stretch: 0;
     background: root.message.outgoing ? Theme.outgoing : Theme.elevated;
-    border-radius: 12px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: root.message.outgoing ? Theme.selected : Theme.divider;
 
     content := VerticalLayout {
         alignment: start;
         padding: root.inset;
-        spacing: 4px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 2px;
         body := WrappingText {
             text: root.message.body;
             color: Theme.primary;
             font-size: 14px;
         }
         metadata := WrappingText {
-            text: root.message.time + (root.message.status != "" ? " · " + root.message.status : "");
+            private property <string> short-status: root.message.status == "Sent to relay" ? "Relayed"
+                : root.message.status == "Acceptance unconfirmed" ? "Unconfirmed"
+                : root.message.status == "Send failed" ? "Failed" : root.message.status;
+            text: root.message.time + (self.short-status != "" ? " · " + self.short-status : "");
+            accessible-label: root.message.time + " UTC" + (root.message.status != "" ? ", " + root.message.status : "");
             color: Theme.secondary;
             font-size: 11px;
             horizontal-alignment: right;
@@ -654,6 +707,7 @@ export component AppWindow inherits Window {
     callback retry-messaging();
     callback send-message();
     callback resend-message(string);
+    callback read-visible-conversation(string, string);
     callback draft-queued(string, string, int);
 
     in-out property <string> section: "Chats";
@@ -663,11 +717,16 @@ export component AppWindow inherits Window {
     in property <bool> storage-retryable;
     in property <string> storage-error;
     in property <[StoredConversation]> stored-chats;
+    in property <bool> chats-unread;
+    in property <bool> requests-unread;
+    in property <bool> window-foreground;
     in property <[StoredConversation]> stored-requests;
     in property <[StoredContact]> stored-contacts;
     in property <[StoredMessage]> stored-messages;
     in property <string> selected-conversation;
     in property <string> conversation-title;
+    in property <string> conversation-peer-id;
+    in property <string> conversation-read-through;
     in property <bool> conversation-is-request;
     in property <bool> conversation-peer-deleted;
     in-out property <bool> conversation-loading;
@@ -739,6 +798,16 @@ export component AppWindow inherits Window {
         && ((root.section == "Requests" && root.conversation-is-request)
             || (root.section == "Chats" && !root.conversation-is-request));
     out property <bool> conversation-can-compose: root.show-conversation && !root.conversation-peer-deleted;
+    private property <bool> timeline-at-end: true;
+    private property <string> visible-read-through:
+        root.window-foreground && root.show-conversation && !root.conversation-loading
+            && root.setup-page == 0 && !root.showing-account-removal && root.timeline-at-end
+        ? root.conversation-read-through : "";
+    changed visible-read-through => {
+        if root.visible-read-through != "" {
+            root.read-visible-conversation(root.selected-conversation, root.visible-read-through);
+        }
+    }
     out property <string> conversation-account-notice: root.show-conversation && root.conversation-peer-deleted
         ? "This user account has been deleted." : "";
 
@@ -909,6 +978,7 @@ export component AppWindow inherits Window {
                         NavItem {
                             label: "Chats";
                             icon: NavIcon.chats;
+                            unread: root.chats-unread;
                             label-opacity: sidebar.label-opacity;
                             selected: root.section == "Chats";
                             clicked => { root.navigate("Chats"); }
@@ -916,6 +986,7 @@ export component AppWindow inherits Window {
                         NavItem {
                             label: "Requests";
                             icon: NavIcon.requests;
+                            unread: root.requests-unread;
                             label-opacity: sidebar.label-opacity;
                             selected: root.section == "Requests";
                             clicked => { root.navigate("Requests"); }
@@ -1053,7 +1124,7 @@ export component AppWindow inherits Window {
                                 spacing: 4px;
                                 for contact in root.stored-contacts: StorageRow {
                                     label: contact.title;
-                                    detail: "VOID-ID " + contact.void-id;
+                                    detail: contact.void-id;
                                     enabled: !root.conversation-loading;
                                     clicked => { root.create-stored-conversation(contact.void-id); }
                                 }
@@ -1064,6 +1135,7 @@ export component AppWindow inherits Window {
                                 for chat in root.visible-conversations: StorageRow {
                                     label: chat.title;
                                     detail: chat.activity;
+                                    unread: chat.unread;
                                     selected: root.show-conversation && root.selected-conversation == chat.id;
                                     enabled: !root.conversation-loading;
                                     clicked => {
@@ -1302,19 +1374,33 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: root.header-height;
                     background: Theme.surface;
-                    VerticalLayout {
+                    HorizontalLayout {
                         padding-left: root.chat-gutter;
                         padding-right: root.chat-gutter;
-                        spacing: 4px;
-                        alignment: center;
-                        Text {
-                            text: root.conversation-title;
-                            color: Theme.primary;
-                            font-size: 16px;
-                            font-weight: 700;
-                            overflow: elide;
+                        spacing: 10px;
+                        Rectangle {
+                            width: 34px;
+                            UserAvatar { y: (parent.height - self.height) / 2; }
                         }
-                        Text { text: "Local history"; color: Theme.secondary; font-size: 12px; }
+                        VerticalLayout {
+                            spacing: 4px;
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.conversation-title;
+                                color: Theme.primary;
+                                font-size: 16px;
+                                font-weight: 700;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.conversation-peer-id;
+                                accessible-label: "Peer VOID-ID " + root.conversation-peer-id;
+                                color: Theme.secondary;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                        }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
@@ -1340,11 +1426,14 @@ export component AppWindow inherits Window {
                     private property <length> end-offset: min(0px, self.visible-height - self.content-height);
                     private property <string> conversation: root.selected-conversation;
 
+                    init => { root.timeline-at-end = true; }
+                    changed follow-latest => { root.timeline-at-end = self.follow-latest; }
                     changed conversation => {
                         self.follow-latest = true;
                         self.content-y = self.end-offset;
                     }
                     changed end-offset => {
+                        if self.end-offset == 0px { self.follow-latest = true; }
                         self.content-y = self.follow-latest ? self.end-offset
                             : clamp(self.content-y, self.end-offset, 0px);
                     }
@@ -1360,21 +1449,31 @@ export component AppWindow inherits Window {
                         padding-right: chat-pane.thread-gutter;
                         padding-top: root.chat-gutter;
                         padding-bottom: root.chat-gutter;
-                        spacing: 8px;
+                        spacing: 6px;
                         if root.stored-messages.length == 0: Text {
                             text: "No saved messages";
                             color: Theme.secondary;
                             font-size: 14px;
                             horizontal-alignment: center;
                         }
-                        for message in root.stored-messages: HorizontalLayout {
-                            alignment: message.outgoing ? end : start;
-                            MessageBubble {
-                                message: message;
-                                width-limit: min(440px, (chat-pane.width - 2 * chat-pane.thread-gutter) * 0.86);
-                                show-retry: !root.conversation-peer-deleted && message.retry-event != "";
-                                retry-enabled: root.messaging-ready && !root.send-busy;
-                                retry => { root.resend-message(message.retry-event); }
+                        for message in root.stored-messages: VerticalLayout {
+                            alignment: start;
+                            spacing: 6px;
+                            if message.day != "": Text {
+                                text: message.day;
+                                color: Theme.secondary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                            }
+                            HorizontalLayout {
+                                alignment: message.outgoing ? end : start;
+                                MessageBubble {
+                                    message: message;
+                                    width-limit: min(440px, (chat-pane.width - 2 * chat-pane.thread-gutter) * 0.86);
+                                    show-retry: !root.conversation-peer-deleted && message.retry-event != "";
+                                    retry-enabled: root.messaging-ready && !root.send-busy;
+                                    retry => { root.resend-message(message.retry-event); }
+                                }
                             }
                         }
                     }
@@ -1400,14 +1499,21 @@ export component AppWindow inherits Window {
                     Text { text: "Message"; color: Theme.primary; font-size: 13px; font-weight: 600; }
                     TextEdit {
                         accessible-label: "Local message draft";
-                        preferred-height: clamp(root.height * 0.12, 56px, 100px);
-                        min-height: 56px;
-                        max-height: 100px;
+                        preferred-height: clamp(root.height * 0.08, 48px, 68px);
+                        min-height: 48px;
+                        max-height: 68px;
                         vertical-stretch: 0;
                         wrap: word-wrap;
                         enabled: !root.conversation-loading;
                         text <=> root.stored-draft;
                         edited(text) => { root.save-stored-draft(text); }
+                        key-pressed(event) => {
+                            if event.text == Key.Return && !event.modifiers.shift {
+                                root.send-message();
+                                return accept;
+                            }
+                            return reject;
+                        }
                     }
                     if root.draft-save-failed: WrappingText {
                         text: root.draft-status;
@@ -1417,7 +1523,8 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         if !root.draft-save-failed: WrappingText {
-                            text: root.draft-status != "" ? root.draft-status : "Drafts stay on this device";
+                            text: root.draft-status != "" && root.draft-status != "Drafts stay on this device"
+                                ? root.draft-status : "Enter to send · Shift+Enter for a new line";
                             color: Theme.secondary;
                             font-size: 12px;
                             vertical-alignment: center;

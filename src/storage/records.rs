@@ -8,6 +8,7 @@ pub(crate) struct Conversation {
     pub created_at: i64,
     pub last_activity_at: i64,
     pub is_request: bool,
+    pub unread_through: Option<i64>,
 }
 
 pub(crate) struct Contact {
@@ -108,7 +109,8 @@ impl Database {
     pub(crate) fn conversations(&self, requests: bool) -> Result<Vec<Conversation>> {
         let mut query = self.connection.prepare(
             "SELECT c.id, c.peer_void_id, coalesce(c.display_name, contact.display_name),
-                    c.created_at, c.last_activity_at, r.conversation_id IS NOT NULL
+                    c.created_at, c.last_activity_at, r.conversation_id IS NOT NULL,
+                    (SELECT max(sequence) FROM unread_messages WHERE conversation_id = c.id)
              FROM conversations c
              LEFT JOIN contacts contact ON contact.void_id = c.peer_void_id
              LEFT JOIN requests r ON r.conversation_id = c.id
@@ -123,7 +125,8 @@ impl Database {
     pub(crate) fn conversation(&self, id: i64) -> Result<Conversation> {
         Ok(self.connection.query_row(
             "SELECT c.id, c.peer_void_id, coalesce(c.display_name, contact.display_name),
-                    c.created_at, c.last_activity_at, r.conversation_id IS NOT NULL
+                    c.created_at, c.last_activity_at, r.conversation_id IS NOT NULL,
+                    (SELECT max(sequence) FROM unread_messages WHERE conversation_id = c.id)
              FROM conversations c
              LEFT JOIN contacts contact ON contact.void_id = c.peer_void_id
              LEFT JOIN requests r ON r.conversation_id = c.id
@@ -145,6 +148,13 @@ impl Database {
             )?;
         }
         Ok(())
+    }
+
+    pub(crate) fn mark_read(&self, conversation_id: i64, through: i64) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM unread_messages WHERE conversation_id = ?1 AND sequence <= ?2",
+            params![conversation_id, through],
+        )? != 0)
     }
 
     pub(crate) fn save_message(&mut self, message: &Message) -> Result<()> {
@@ -261,5 +271,6 @@ fn conversation_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
         created_at: row.get(3)?,
         last_activity_at: row.get(4)?,
         is_request: row.get(5)?,
+        unread_through: row.get(6)?,
     })
 }

@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod account;
 mod local_data;
 mod messaging;
@@ -191,6 +193,12 @@ fn main() -> Result<(), slint::PlatformError> {
         .next()
         .is_some_and(|argument| argument == "--check-storage")
     {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+            // Only the command-line diagnostic needs the parent's console.
+            unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+        }
         let Some(void_id) = args
             .next()
             .and_then(|id| id.into_string().ok())
@@ -257,7 +265,29 @@ fn main() -> Result<(), slint::PlatformError> {
             None
         }
     };
+    #[cfg(windows)]
+    let focus_timer = {
+        use slint::ComponentHandle;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+
+        let timer = slint::Timer::default();
+        let weak = ui.as_weak();
+        // The Slint UI thread owns only this window. GetActiveWindow only
+        // checks the calling thread, including when another VOID is in front.
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(150),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_window_foreground(!unsafe { GetActiveWindow() }.is_null());
+                }
+            },
+        );
+        timer
+    };
     let result = ui.run();
+    #[cfg(windows)]
+    focus_timer.stop();
     drop(ui);
     if let Some(workers) = messaging.borrow_mut().take() {
         workers.finish();
