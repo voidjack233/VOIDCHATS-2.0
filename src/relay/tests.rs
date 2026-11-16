@@ -191,7 +191,7 @@ async fn mismatched_prekey_error_interrupts_the_session() {
         },
     )
     .unwrap();
-    assert!(relay.connect_messaging(VOID_ID.into()));
+    assert!(relay.connect(VOID_ID.into()));
     let Some(Activity::Online(session)) = timeout(WAIT, rx.recv()).await.unwrap() else {
         panic!("missing authenticated session");
     };
@@ -212,7 +212,7 @@ async fn mismatched_prekey_error_interrupts_the_session() {
     server.await.unwrap();
 }
 
-async fn next_attempt(listener: &TcpListener) -> Socket {
+pub(crate) async fn next_attempt(listener: &TcpListener) -> Socket {
     timeout(Duration::from_secs(8), async {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut socket = accept_async(tcp).await.unwrap();
@@ -247,7 +247,7 @@ async fn manual_reconnect_severs_in_flight_requests_before_the_next_session() {
         },
     )
     .unwrap();
-    assert!(relay.connect_messaging(VOID_ID.into()));
+    assert!(relay.connect(VOID_ID.into()));
     let mut old_socket = next_attempt(&listener).await;
     verify_proof(&mut old_socket, &identity().key.verifying_key()).await;
     send_json(
@@ -268,7 +268,7 @@ async fn manual_reconnect_severs_in_flight_requests_before_the_next_session() {
         receive_json(&mut old_socket).await,
         json!({"type":"lookup", "void_id":"456"})
     );
-    assert!(relay.connect_messaging(VOID_ID.into()));
+    assert!(relay.connect(VOID_ID.into()));
     assert!(matches!(
         timeout(WAIT, pending).await.unwrap().unwrap(),
         Err(RequestError::Interrupted)
@@ -334,7 +334,7 @@ async fn reauthenticates_after_disconnect_with_backoff_and_stops_during_the_next
         },
     )
     .unwrap();
-    assert!(relay.connect_messaging(VOID_ID.into()));
+    assert!(relay.connect(VOID_ID.into()));
 
     let mut disconnected_at = tokio::time::Instant::now();
     for minimum in [0, 2, 4] {
@@ -356,7 +356,7 @@ async fn reauthenticates_after_disconnect_with_backoff_and_stops_during_the_next
     .await
     .unwrap()
     .unwrap();
-    assert!(!relay.connect_messaging(VOID_ID.into()));
+    assert!(!relay.connect(VOID_ID.into()));
     assert_eq!(changes.recv().await, None);
 }
 
@@ -373,7 +373,7 @@ async fn transient_auth_unavailability_retries_but_rejected_proof_waits_for_manu
         },
     )
     .unwrap();
-    assert!(relay.connect_messaging(VOID_ID.into()));
+    assert!(relay.connect(VOID_ID.into()));
     let mut first = next_attempt(&listener).await;
     assert_status(&mut changes, ConnectionStatus::Connecting).await;
     send_json(&mut first, json!({"type":"error", "code":"unavailable"})).await;
@@ -396,7 +396,7 @@ async fn transient_auth_unavailability_retries_but_rejected_proof_waits_for_manu
             .is_err()
     );
 
-    assert!(relay.connect_messaging(VOID_ID.into()));
+    assert!(relay.connect(VOID_ID.into()));
     let mut manual = next_attempt(&listener).await;
     assert_status(&mut changes, ConnectionStatus::Connecting).await;
     verify_proof(&mut manual, &identity().key.verifying_key()).await;
@@ -407,7 +407,7 @@ async fn transient_auth_unavailability_retries_but_rejected_proof_waits_for_manu
 }
 
 #[tokio::test]
-async fn passive_connection_stays_disconnected_until_requested() {
+async fn relay_worker_stays_idle_until_given_a_registered_account() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
     let (status, mut changes) = tokio::sync::mpsc::unbounded_channel();
@@ -419,20 +419,14 @@ async fn passive_connection_stays_disconnected_until_requested() {
         },
     )
     .unwrap();
-    assert!(relay.connect(VOID_ID.into()));
-    let mut socket = next_attempt(&listener).await;
-    assert_status(&mut changes, ConnectionStatus::Connecting).await;
-    verify_proof(&mut socket, &identity().key.verifying_key()).await;
-    send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
-    assert_status(&mut changes, ConnectionStatus::Connected).await;
-    drop(socket);
-    assert_status(&mut changes, ConnectionStatus::Disconnected).await;
     assert!(
-        timeout(Duration::from_secs(3), listener.accept())
+        timeout(Duration::from_millis(150), listener.accept())
             .await
             .is_err()
     );
+    assert!(changes.try_recv().is_err());
     worker.finish();
+    assert!(!relay.connect(VOID_ID.into()));
 }
 
 #[tokio::test]

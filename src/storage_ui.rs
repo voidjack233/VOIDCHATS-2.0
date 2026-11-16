@@ -22,6 +22,7 @@ enum Command {
     SaveDraft(i64, String, i32),
     SendDraft(i64, String, i32),
     Resend(String),
+    RetryMessaging,
     Relay(Activity),
     Close,
 }
@@ -86,6 +87,7 @@ fn bind_with(
             let mut database = None;
             let mut queued = None;
             let mut relay: Option<Session> = None;
+            let mut messaging_ready = false;
             let mut selected = None;
             while let Some(mut command) = queued.take().or_else(|| receiver.recv().ok()) {
                 if let Command::SaveDraft(id, _, _) = command {
@@ -121,20 +123,13 @@ fn bind_with(
                             })
                             .and_then(|db| load_lists(&db).map(|lists| (db, lists)));
                         match opened {
-                            Ok((mut db, lists)) => {
-                                if let Some(session) =
-                                    relay.as_ref().filter(|session| session.is_active())
-                                {
-                                    show_messaging_result(
-                                        &weak,
-                                        messaging::publish(&mut db, session),
-                                    );
-                                }
+                            Ok((db, lists)) => {
                                 database = Some(db);
                                 let _ = weak.upgrade_in_event_loop(move |ui| {
                                     lists.show(&ui);
                                     ui.set_storage_loading(false);
                                     ui.set_storage_ready(true);
+                                    ui.invoke_storage_opened();
                                 });
                             }
                             Err(error) => {
@@ -203,7 +198,7 @@ fn bind_with(
                     }
                     Command::Relay(Activity::Online(session)) if session.is_active() => {
                         if let Some(db) = &mut database {
-                            show_messaging_result(&weak, messaging::publish(db, &session));
+                            messaging_ready = initialize_messaging(&weak, db, &session);
                         }
                         relay = Some(session);
                     }
@@ -214,6 +209,15 @@ fn bind_with(
                             .is_some_and(|session| session.generation == generation)
                         {
                             relay = None;
+                            messaging_ready = false;
+                        }
+                    }
+                    Command::RetryMessaging => {
+                        if let (Some(db), Some(session)) = (&mut database, &relay)
+                            && !messaging_ready
+                            && session.is_active()
+                        {
+                            messaging_ready = initialize_messaging(&weak, db, session);
                         }
                     }
                     Command::Relay(Activity::Delivery {
@@ -247,7 +251,11 @@ fn bind_with(
                                         );
                                     });
                                     refresh_messages(&weak, db, selected, promoted.then_some(id));
-                                    let result = messaging::send(db, relay.as_ref(), &event_id);
+                                    let result = messaging::send(
+                                        db,
+                                        relay.as_ref().filter(|_| messaging_ready),
+                                        &event_id,
+                                    );
                                     refresh_messages(&weak, db, selected, None);
                                     result
                                 }
@@ -260,7 +268,11 @@ fn bind_with(
                     }
                     Command::Resend(event_id) => {
                         let result = if let Some(db) = &mut database {
-                            let result = messaging::send(db, relay.as_ref(), &event_id);
+                            let result = messaging::send(
+                                db,
+                                relay.as_ref().filter(|_| messaging_ready),
+                                &event_id,
+                            );
                             refresh_messages(&weak, db, selected, None);
                             result
                         } else {
@@ -324,6 +336,19 @@ fn bind_with(
 
     bind_drafts(ui, worker.sender.clone());
     bind_sending(ui, worker.sender.clone());
+    let weak = ui.as_weak();
+    let sender = worker.sender.clone();
+    ui.on_retry_messaging(move || {
+        if let Some(ui) = weak.upgrade()
+            && ui.get_publication_retryable()
+            && ui.get_connection_status() == "Connected"
+        {
+            ui.set_publication_retryable(false);
+            if sender.send(Command::RetryMessaging).is_err() {
+                worker_stopped(&ui);
+            }
+        }
+    });
     Ok(worker)
 }
 
@@ -432,7 +457,7 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_relay_messaging_enabled() || ui.get_send_busy() {
+        if !ui.get_storage_ready() || ui.get_send_busy() {
             return;
         }
         let Ok(id) = ui.get_selected_conversation().parse() else {
@@ -457,7 +482,7 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_relay_messaging_enabled() || ui.get_send_busy() || event_id.is_empty() {
+        if !ui.get_messaging_ready() || ui.get_send_busy() || event_id.is_empty() {
             return;
         }
         ui.set_send_busy(true);
@@ -466,6 +491,37 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
             ui.set_send_busy(false);
         }
     });
+}
+
+fn initialize_messaging(
+    weak: &Weak<AppWindow>,
+    db: &mut storage::Database,
+    session: &Session,
+) -> bool {
+    let result = messaging::publish(db, session);
+    let ready = result.is_ok();
+    let interrupted = matches!(
+        &result,
+        Err(messaging::Error::Relay(
+            crate::relay::RequestError::Interrupted
+        ))
+    );
+    let (notice, retryable) = result
+        .as_ref()
+        .err()
+        .map_or(("", false), messaging::publication_failure);
+    let session = session.clone();
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        if ready && !session.is_active() {
+            return;
+        }
+        ui.set_messaging_ready(ready);
+        if !interrupted || ui.get_publication_error().is_empty() {
+            ui.set_publication_error(notice.into());
+            ui.set_publication_retryable(retryable);
+        }
+    });
+    ready
 }
 
 fn show_messaging_result(weak: &Weak<AppWindow>, result: Result<(), messaging::Error>) {
@@ -808,7 +864,6 @@ mod tests {
         ui.set_account_void_id(owner.void_id.into());
         ui.set_setup_page(0);
         ui.set_section("Requests".into());
-        ui.set_relay_messaging_enabled(true);
         let worker = bind_with(&ui, move |_| Ok((temp.0.clone(), account_key.clone()))).unwrap();
         worker.opener()(&ui);
 
@@ -857,5 +912,198 @@ mod tests {
         assert!(!ui.get_send_busy());
         drop(ui);
         worker.finish();
+    }
+
+    #[test]
+    fn registered_startup_publishes_automatically_and_keeps_the_rejection_until_success() {
+        if !in_test_process(
+            "storage_ui::tests::registered_startup_publishes_automatically_and_keeps_the_rejection_until_success",
+        ) {
+            return;
+        }
+        use crate::{
+            bind_reconnect,
+            relay::{
+                Connection, ConnectionStatus,
+                tests::{next_attempt, receive_json, send_json, verify_account_proof},
+            },
+            report_relay_status,
+        };
+        use ed25519_dalek::SigningKey;
+        use futures_util::StreamExt;
+        use serde_json::json;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use tokio::{net::TcpListener, sync::Notify, time::timeout};
+
+        let account_key = SigningKey::from_bytes(&[7; 32]);
+        let public_key = account_key.verifying_key();
+        let owner = Owner {
+            void_id: "123",
+            public_key: public_key.as_bytes(),
+        };
+        let temp = TestDir::new();
+        let mut db = Database::open(&temp.0, owner).unwrap();
+        let conversation = db.create_conversation("456", 100).unwrap();
+        let (event, _) = db
+            .queue_outgoing(conversation, "Saved outgoing operation", 120)
+            .unwrap();
+        db.close().unwrap();
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let saw_error = Arc::new(Notify::new());
+        let saw_reconnect = Arc::new(Notify::new());
+        let saw_ready = Arc::new(Notify::new());
+        let second_attempt = Arc::new(AtomicBool::new(false));
+        let checked_no_resend = Arc::new(AtomicBool::new(false));
+        let mock = {
+            let (saw_error, saw_reconnect, saw_ready) =
+                (saw_error.clone(), saw_reconnect.clone(), saw_ready.clone());
+            let (second_attempt, checked_no_resend) =
+                (second_attempt.clone(), checked_no_resend.clone());
+            thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        timeout(Duration::from_secs(18), async {
+                            let listener = TcpListener::from_std(listener).unwrap();
+                            let mut first = next_attempt(&listener).await;
+                            verify_account_proof(&mut first, &public_key, "123").await;
+                            send_json(&mut first, json!({"type":"auth_ok", "void_id":"123"})).await;
+                            let sent = receive_json(&mut first).await;
+                            assert_eq!(sent["type"], "prekeys_publish");
+                            send_json(
+                                &mut first,
+                                json!({"type":"prekeys_error",
+                                "request_id":sent["publication_id"], "code":"prekeys_invalid"}),
+                            )
+                            .await;
+                            saw_error.notified().await;
+                            drop(first);
+
+                            let mut second = next_attempt(&listener).await;
+                            verify_account_proof(&mut second, &public_key, "123").await;
+                            send_json(&mut second, json!({"type":"auth_ok", "void_id":"123"}))
+                                .await;
+                            assert!(receive_json(&mut second).await == sent);
+                            second_attempt.store(true, Ordering::Release);
+                            saw_reconnect.notified().await;
+                            send_json(
+                                &mut second,
+                                json!({"type":"prekeys_error",
+                                "request_id":sent["publication_id"], "code":"prekeys_capacity"}),
+                            )
+                            .await;
+                            assert!(receive_json(&mut second).await == sent);
+                            send_json(
+                                &mut second,
+                                json!({"type":"prekeys_published",
+                                "publication_id":sent["publication_id"],
+                                "ec_remaining":"20", "kyber_remaining":"20"}),
+                            )
+                            .await;
+                            assert!(
+                                timeout(Duration::from_millis(200), second.next())
+                                    .await
+                                    .is_err()
+                            );
+                            checked_no_resend.store(true, Ordering::Release);
+                            saw_ready.notified().await;
+                        })
+                        .await
+                        .unwrap();
+                    });
+            })
+        };
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_account_void_id(owner.void_id.into());
+        ui.set_setup_page(0);
+        let root = temp.0.clone();
+        let worker = bind_with(&ui, move |_| Ok((root.clone(), account_key.clone()))).unwrap();
+        let (relay, relay_worker) = Connection::spawn_with_activity(
+            endpoint,
+            |id| {
+                Ok(account::RegisteredIdentity {
+                    void_id: id.into(),
+                    key: SigningKey::from_bytes(&[7; 32]),
+                })
+            },
+            report_relay_status(&ui),
+            worker.relay_activity(),
+        )
+        .unwrap();
+        bind_reconnect(&ui, relay);
+        assert!(!ui.get_can_reconnect());
+        ui.set_messaging_notice("A saved send still requires attention.".into());
+        worker.opener()(&ui);
+
+        let weak = ui.as_weak();
+        let stage = Cell::new(0);
+        let poll = Timer::default();
+        poll.start(TimerMode::Repeated, Duration::from_millis(10), move || {
+            let ui = weak.upgrade().unwrap();
+            if ui.get_connection_status() != ConnectionStatus::Connected.label() {
+                return;
+            }
+            if stage.get() <= 1
+                && ui
+                    .get_publication_error()
+                    .contains("public Signal keys as invalid")
+            {
+                assert!(ui.get_storage_ready());
+                assert!(!ui.get_messaging_ready());
+                assert!(!ui.get_can_reconnect());
+                assert!(!ui.get_publication_retryable());
+                if stage.get() == 0 {
+                    stage.set(1);
+                    saw_error.notify_one();
+                }
+                if second_attempt.load(Ordering::Acquire) {
+                    stage.set(2);
+                    saw_reconnect.notify_one();
+                }
+            }
+            if stage.get() == 2 && ui.get_publication_error().contains("at capacity") {
+                assert!(!ui.get_messaging_ready());
+                assert!(!ui.get_can_reconnect());
+                assert!(ui.get_publication_retryable());
+                ui.invoke_retry_messaging();
+                stage.set(3);
+            }
+            if checked_no_resend.load(Ordering::Acquire) {
+                assert_eq!(stage.get(), 3);
+                assert!(ui.get_messaging_ready());
+                assert!(ui.get_publication_error().is_empty());
+                assert!(!ui.get_can_reconnect());
+                assert_eq!(
+                    ui.get_messaging_notice(),
+                    "A saved send still requires attention."
+                );
+                slint::quit_event_loop().unwrap();
+            }
+        });
+        let watchdog = Timer::default();
+        watchdog.start(TimerMode::SingleShot, Duration::from_secs(14), || {
+            slint::quit_event_loop().unwrap()
+        });
+        slint::run_event_loop_until_quit().unwrap();
+        poll.stop();
+        assert!(ui.get_messaging_ready());
+        saw_ready.notify_one();
+        mock.join().unwrap();
+        drop(ui);
+        relay_worker.finish();
+        worker.finish();
+        let mut db = Database::open(&temp.0, owner).unwrap();
+        assert!(db.prepare_publication().unwrap().is_none());
+        assert_eq!(db.outgoing_operation(&event).unwrap().state, "failed");
     }
 }

@@ -459,11 +459,17 @@ export component AppWindow inherits Window {
     in property <string> setup-action: "Create account";
     callback submit-setup();
     in property <string> connection-status: "Disconnected";
+    out property <bool> can-reconnect: root.storage-ready
+        && (root.connection-status == "Disconnected" || root.connection-status == "Reconnecting"
+            || root.connection-status == "Authentication failed");
     callback reconnect();
-    in property <bool> relay-messaging-enabled;
+    in property <bool> messaging-ready;
+    in property <string> publication-error;
+    in property <bool> publication-retryable;
     in property <bool> send-busy;
     in property <string> messaging-notice;
-    callback enable-relay-messaging();
+    callback storage-opened();
+    callback retry-messaging();
     callback send-message();
     callback resend-message(string);
     callback draft-queued(string, string, int);
@@ -770,13 +776,21 @@ export component AppWindow inherits Window {
                     padding-bottom: 8px;
                     Text { text: root.messaging-notice; color: Theme.error; font-size: 12px; wrap: word-wrap; }
                 }
-                if root.storage-ready && !root.relay-messaging-enabled: HorizontalLayout {
+                if root.publication-error != "" || root.connection-status == "Connected": VerticalLayout {
                     padding-left: root.list-gutter;
                     padding-right: root.list-gutter;
                     padding-bottom: 8px;
-                    Action {
-                        label: "Enable messaging";
-                        clicked => { root.enable-relay-messaging(); }
+                    spacing: 6px;
+                    Text {
+                        text: root.publication-error != "" ? root.publication-error
+                            : root.messaging-ready ? "Messaging ready" : "Preparing messaging…";
+                        color: root.publication-error != "" ? Theme.error : Theme.secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if root.publication-retryable && root.connection-status == "Connected": Action {
+                        label: "Retry messaging";
+                        clicked => { root.retry-messaging(); }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
@@ -789,8 +803,8 @@ export component AppWindow inherits Window {
                     spacing: 8px;
 
                     Text {
-                        text: root.connection-status;
-                        accessible-label: "Relay connection: " + root.connection-status;
+                        text: root.connection-status == "Connected" ? "Relay authenticated" : root.connection-status;
+                        accessible-label: "Relay connection: " + self.text;
                         color: root.connection-status == "Authentication failed" ? Theme.error
                             : root.connection-status == "Connected" ? Theme.accent : Theme.secondary;
                         font-size: 12px;
@@ -798,9 +812,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         wrap: word-wrap;
                     }
-                    if root.connection-status == "Disconnected" || root.connection-status == "Reconnecting"
-                        || root.connection-status == "Authentication failed"
-                        || (root.relay-messaging-enabled && root.connection-status == "Connected" && root.messaging-notice != ""): Action {
+                    if root.can-reconnect: Action {
                         label: "Reconnect";
                         enabled: !root.send-busy;
                         clicked => { root.reconnect(); }
@@ -994,11 +1006,11 @@ export component AppWindow inherits Window {
                                         horizontal-alignment: right;
                                         wrap: word-wrap;
                                     }
-                                    if root.relay-messaging-enabled && message.retry-event != "": HorizontalLayout {
+                                    if message.retry-event != "": HorizontalLayout {
                                         Rectangle { horizontal-stretch: 1; }
                                         Action {
                                             label: "Resend";
-                                            enabled: !root.send-busy;
+                                            enabled: root.messaging-ready && !root.send-busy;
                                             clicked => { root.resend-message(message.retry-event); }
                                         }
                                     }
@@ -1008,13 +1020,13 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if !root.conversation-is-request || root.relay-messaging-enabled: Rectangle { height: 1px; background: Theme.divider; }
-                if !root.conversation-is-request || root.relay-messaging-enabled: VerticalLayout {
+                Rectangle { height: 1px; background: Theme.divider; }
+                VerticalLayout {
                     padding: 12px;
                     padding-left: root.chat-gutter;
                     padding-right: root.chat-gutter;
                     spacing: 6px;
-                    Text { text: root.relay-messaging-enabled ? "Message" : "Draft"; color: Theme.primary; font-size: 13px; font-weight: 600; }
+                    Text { text: "Message"; color: Theme.primary; font-size: 13px; font-weight: 600; }
                     TextEdit {
                         accessible-label: "Local message draft";
                         height: 72px;
@@ -1036,7 +1048,7 @@ export component AppWindow inherits Window {
                             enabled: !root.conversation-loading;
                             clicked => { root.save-stored-draft(root.stored-draft); }
                         }
-                        if root.relay-messaging-enabled: Action {
+                        Action {
                             label: root.send-busy ? "Sending…" : "Send";
                             primary: true;
                             enabled: !root.send-busy && !root.conversation-loading && root.stored-draft != "";

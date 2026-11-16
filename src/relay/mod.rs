@@ -63,7 +63,7 @@ impl ConnectionStatus {
 /// handles stops the worker even while a socket is open.
 #[derive(Clone)]
 pub(crate) struct Connection {
-    requests: mpsc::Sender<ConnectRequest>,
+    requests: mpsc::Sender<String>,
 }
 
 pub(crate) struct Worker {
@@ -78,21 +78,47 @@ impl Worker {
     }
 }
 
-struct ConnectRequest {
-    void_id: String,
-    messaging: bool,
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RequestError {
     Interrupted,
-    Rejected(String),
+    Rejected { command: &'static str, code: String },
 }
 
 struct PendingRequest {
     generation: u64,
     request: Request,
     reply: blocking::Sender<Result<Reply, RequestError>>,
+}
+
+impl PendingRequest {
+    fn reject(self, code: String) {
+        let command = self.request.name();
+        report_rejection(command, &code);
+        let _ = self
+            .reply
+            .send(Err(RequestError::Rejected { command, code }));
+    }
+}
+
+fn report_rejection(command: &str, code: &str) {
+    let code = match code {
+        "authentication_failed"
+        | "unauthorized"
+        | "invalid_frame"
+        | "not_found"
+        | "duplicate_event"
+        | "queue_full"
+        | "rate_limited"
+        | "overloaded"
+        | "unavailable"
+        | "prekeys_invalid"
+        | "prekeys_conflict"
+        | "prekeys_capacity"
+        | "prekeys_unavailable"
+        | "prekey_claim_expired" => code,
+        _ => "unknown_code",
+    };
+    eprintln!("command={command} code={code}");
 }
 
 #[derive(Clone)]
@@ -187,26 +213,12 @@ impl Connection {
     }
 
     pub(crate) fn connect(&self, void_id: String) -> bool {
-        self.requests
-            .try_send(ConnectRequest {
-                void_id,
-                messaging: false,
-            })
-            .is_ok()
-    }
-
-    pub(crate) fn connect_messaging(&self, void_id: String) -> bool {
-        self.requests
-            .try_send(ConnectRequest {
-                void_id,
-                messaging: true,
-            })
-            .is_ok()
+        self.requests.try_send(void_id).is_ok()
     }
 }
 
 async fn run_worker(
-    mut requests: mpsc::Receiver<ConnectRequest>,
+    mut requests: mpsc::Receiver<String>,
     endpoint: &str,
     load_identity: impl Fn(&str) -> io::Result<SessionIdentity>,
     report: &impl Fn(ConnectionStatus),
@@ -217,7 +229,7 @@ async fn run_worker(
     let mut retry_step = 0_u32;
     let mut generation = 0;
     let mut next = requests.recv().await;
-    while let Some(ConnectRequest { void_id, messaging }) = &next {
+    while let Some(void_id) = &next {
         tokio::select! {
             biased;
             request = requests.recv() => {
@@ -229,7 +241,6 @@ async fn run_worker(
             }
             _ = sleep_until(next_attempt) => {}
         }
-        let messaging = *messaging;
         generation += 1;
         // Each connection has a fresh command queue. An old handle cannot target a new socket.
         let (commands, mut command_receiver) = mpsc::channel(2);
@@ -251,7 +262,7 @@ async fn run_worker(
             if result.is_ok() {
                 connected_at = Some(Instant::now());
             }
-            let messaging = messaging.then_some(Messaging {
+            let messaging = Some(Messaging {
                 session,
                 commands: &mut command_receiver,
                 activity,
@@ -267,9 +278,7 @@ async fn run_worker(
             status = attempt => (Some(status), None),
         };
         drop(command_receiver);
-        if messaging {
-            activity(Activity::Offline(generation));
-        }
+        activity(Activity::Offline(generation));
         let ended = Instant::now();
         manual_attempt = ended + MIN_RECONNECT_DELAY;
         next_attempt = manual_attempt;
@@ -278,7 +287,7 @@ async fn run_worker(
             retry_step = 0;
         }
         match terminal {
-            Some(ConnectionStatus::Disconnected) if messaging => {
+            Some(ConnectionStatus::Disconnected) => {
                 report(ConnectionStatus::Reconnecting);
                 let delay = reconnect_delay(retry_step, rand::random_range(0..=25));
                 retry_step = retry_step.saturating_add(1);
@@ -350,7 +359,7 @@ async fn authenticate(
         json!({"type": "auth_begin", "void_id": identity.void_id}),
     )
     .await?;
-    let ServerFrame::Challenge(challenge) = read_auth_frame(socket).await? else {
+    let ServerFrame::Challenge(challenge) = read_auth_frame(socket, "auth_begin").await? else {
         return Err(ConnectionStatus::AuthenticationFailed);
     };
     let public_key = STANDARD.encode(identity.key.verifying_key().as_bytes());
@@ -371,7 +380,7 @@ async fn authenticate(
     )
     .await?;
 
-    match read_auth_frame(socket).await? {
+    match read_auth_frame(socket, "auth_proof").await? {
         ServerFrame::AuthOk(id) if id == identity.void_id => Ok(()),
         _ => Err(ConnectionStatus::AuthenticationFailed),
     }
@@ -384,13 +393,21 @@ async fn send_json(socket: &mut Socket, frame: serde_json::Value) -> Result<(), 
         .map_err(|_| ConnectionStatus::Disconnected)
 }
 
-async fn read_auth_frame(socket: &mut Socket) -> Result<ServerFrame, ConnectionStatus> {
+async fn read_auth_frame(
+    socket: &mut Socket,
+    command: &str,
+) -> Result<ServerFrame, ConnectionStatus> {
     loop {
         match socket.next().await {
             Some(Ok(Message::Text(text))) if text.len() <= 8 * 1024 => {
                 return match protocol::decode(&text) {
-                    Some(ServerFrame::Error(code)) if code == "unavailable" => {
-                        Err(ConnectionStatus::Disconnected)
+                    Some(ServerFrame::Error(code)) => {
+                        report_rejection(command, &code);
+                        if code == "unavailable" {
+                            Err(ConnectionStatus::Disconnected)
+                        } else {
+                            Err(ConnectionStatus::AuthenticationFailed)
+                        }
                     }
                     Some(frame) => Ok(frame),
                     None => Err(ConnectionStatus::AuthenticationFailed),
@@ -520,13 +537,16 @@ async fn monitor_authenticated<F: Fn(Activity)>(
                     }
                     Some(ServerFrame::PrekeyError { request_id, code })
                         if pending.as_ref().and_then(|request| request.request.prekey_id()) == Some(request_id.as_str()) => {
-                        let _ = pending.take().unwrap().reply.send(Err(RequestError::Rejected(code)));
+                        pending.take().unwrap().reject(code);
                     }
                     Some(ServerFrame::Error(code)) if matches!(code.as_str(), "authentication_failed" | "unauthorized") => {
+                        if let Some(request) = pending.take() {
+                            request.reject(code);
+                        }
                         return ConnectionStatus::AuthenticationFailed;
                     }
                     Some(ServerFrame::Error(code)) if pending.is_some() => {
-                        let _ = pending.take().unwrap().reply.send(Err(RequestError::Rejected(code)));
+                        pending.take().unwrap().reject(code);
                     }
                     _ => break,
                 },

@@ -30,23 +30,53 @@ impl From<RequestError> for Error {
 impl Error {
     pub(crate) fn message(&self) -> &'static str {
         match self {
-            Self::Offline => "Connect to the relay, then choose Resend.",
+            Self::Offline => "The message is saved locally. Choose Resend when messaging is ready.",
             Self::Relay(RequestError::Interrupted) => {
                 "The relay response was interrupted. Check the connection and try again."
             }
-            Self::Relay(RequestError::Rejected(code)) => match code.as_str() {
-                "not_found" => "The peer’s VOID-ID was not found.",
-                "duplicate_event" => "The relay already has this event. Acceptance is unconfirmed.",
-                "prekeys_unavailable" => "The peer’s public Signal prekeys are unavailable.",
-                "prekey_claim_expired" => {
-                    "The prekey claim expired. Choose Resend to request a new claim."
+            Self::Relay(RequestError::Rejected { command, code }) => {
+                match (*command, code.as_str()) {
+                    (_, "authentication_failed" | "unauthorized") => {
+                        "Relay authentication failed. Use Reconnect to try signing in again."
+                    }
+                    (_, "not_found") => "The peer’s VOID-ID was not found.",
+                    ("send", "duplicate_event") => {
+                        "The relay already has this event. Acceptance is unconfirmed."
+                    }
+                    ("prekeys_claim", "prekeys_invalid") => {
+                        "The relay rejected the peer’s Signal prekey claim. Check the recipient’s VOID-ID."
+                    }
+                    ("prekeys_claim", "prekeys_conflict") => {
+                        "The saved prekey claim conflicts with the relay’s record. Keep your VOID data."
+                    }
+                    ("prekeys_claim", "prekeys_unavailable") => {
+                        "The peer’s public Signal prekeys are unavailable. Try again when they have set up messaging."
+                    }
+                    ("prekeys_claim", "prekey_claim_expired") => {
+                        "The prekey claim expired. Choose Resend to request a new claim."
+                    }
+                    ("send", "queue_full") => {
+                        "The relay’s encrypted queue is full. Choose Resend later."
+                    }
+                    (_, "prekeys_capacity" | "rate_limited" | "overloaded") => {
+                        "The relay is at capacity. Try again later."
+                    }
+                    ("send", "invalid_frame") => {
+                        "The relay rejected the encrypted message format. Check for a VOID update."
+                    }
+                    ("send", _) => {
+                        "The relay could not accept the encrypted message. Choose Resend later."
+                    }
+                    ("lookup", _) => "The relay could not look up this VOID-ID. Try again later.",
+                    ("prekeys_claim", _) => {
+                        "The relay could not provide the peer’s Signal prekeys. Try again later."
+                    }
+                    ("ack", _) => {
+                        "The relay could not confirm acknowledgement of the locally saved message."
+                    }
+                    _ => "The relay could not complete the operation.",
                 }
-                "queue_full" => "The relay’s encrypted queue is full. Try again later.",
-                "prekeys_capacity" | "rate_limited" | "overloaded" => {
-                    "The relay is at capacity. Try again later."
-                }
-                _ => "The relay rejected the request.",
-            },
+            }
             Self::Storage(
                 StorageError::Database | StorageError::Unavailable | StorageError::Busy,
             ) => {
@@ -138,7 +168,7 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
                         )?;
                     }
                     Err(error) => {
-                        if matches!(&error, RequestError::Rejected(code) if code == "prekey_claim_expired")
+                        if matches!(&error, RequestError::Rejected { code, .. } if code == "prekey_claim_expired")
                         {
                             db.clear_expired_claim(event_id)?;
                         }
@@ -181,6 +211,51 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         db.set_send_state(event_id, outcome)?;
     }
     attempt
+}
+
+pub(crate) fn publication_failure(error: &Error) -> (&'static str, bool) {
+    match error {
+        Error::Relay(RequestError::Rejected { code, .. }) => match code.as_str() {
+            "prekeys_conflict" => (
+                "The relay’s Signal keys conflict with this device’s keys. Keep your VOID data. Messaging requires the original Signal store for this account.",
+                false,
+            ),
+            "prekeys_invalid" | "invalid_frame" => (
+                "The relay rejected this device’s public Signal keys as invalid. Keep your VOID data and check for a VOID update.",
+                false,
+            ),
+            "prekeys_capacity" | "rate_limited" | "overloaded" => (
+                "The relay is at capacity for public Signal key publication. Try again later.",
+                true,
+            ),
+            "prekeys_unavailable" | "unavailable" => (
+                "The relay’s public Signal key service is unavailable. Try again later.",
+                true,
+            ),
+            "authentication_failed" | "unauthorized" => (
+                "Relay authentication failed during Signal key publication. Use Reconnect to try again.",
+                false,
+            ),
+            _ => (
+                "The relay could not publish this device’s public Signal keys.",
+                false,
+            ),
+        },
+        Error::Relay(RequestError::Interrupted) | Error::Offline => (
+            "Signal key publication was interrupted. VOID will retry when it reconnects.",
+            false,
+        ),
+        Error::Storage(StorageError::Database | StorageError::Unavailable | StorageError::Busy) => {
+            (
+                "VOID could not save the Signal key publication in local storage. Keep your VOID data and retry messaging.",
+                true,
+            )
+        }
+        Error::Storage(_) => (
+            "VOID could not verify the local Signal keys for publication. Keep your VOID data and check your local storage.",
+            false,
+        ),
+    }
 }
 
 pub(crate) fn receive(

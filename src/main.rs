@@ -14,20 +14,17 @@ slint::include_modules!();
 
 fn connect_relay(ui: &AppWindow, relay: &Connection) {
     let void_id = ui.get_account_void_id();
-    if ui.get_setup_page() != 0 || void_id.is_empty() {
+    if ui.get_setup_page() != 0 || !ui.get_storage_ready() || void_id.is_empty() {
         return;
     }
     let status = ui.get_connection_status();
-    let messaging = ui.get_relay_messaging_enabled();
     if status == ConnectionStatus::Connecting.label()
-        || (!messaging && status == ConnectionStatus::Connected.label())
+        || status == ConnectionStatus::Connected.label()
     {
         return;
     }
-    if messaging {
-        relay.connect_messaging(void_id.to_string());
-    } else {
-        relay.connect(void_id.to_string());
+    if relay.connect(void_id.to_string()) {
+        ui.set_connection_status(ConnectionStatus::Connecting.label().into());
     }
 }
 
@@ -40,15 +37,9 @@ fn bind_reconnect(ui: &AppWindow, relay: Connection) {
         }
     });
     let weak = ui.as_weak();
-    ui.on_enable_relay_messaging(move || {
-        if let Some(ui) = weak.upgrade()
-            && ui.get_storage_ready()
-            && ui.get_setup_page() == 0
-            && !ui.get_relay_messaging_enabled()
-            && !ui.get_account_void_id().is_empty()
-            && relay.connect_messaging(ui.get_account_void_id().to_string())
-        {
-            ui.set_relay_messaging_enabled(true);
+    ui.on_storage_opened(move || {
+        if let Some(ui) = weak.upgrade() {
+            connect_relay(&ui, &relay);
         }
     });
 }
@@ -56,8 +47,12 @@ fn bind_reconnect(ui: &AppWindow, relay: Connection) {
 fn report_relay_status(ui: &AppWindow) -> impl Fn(ConnectionStatus) + Send + 'static {
     let weak = ui.as_weak();
     move |status| {
-        let _ =
-            weak.upgrade_in_event_loop(move |ui| ui.set_connection_status(status.label().into()));
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if status != ConnectionStatus::Connected {
+                ui.set_messaging_ready(false);
+            }
+            ui.set_connection_status(status.label().into());
+        });
     }
 }
 
@@ -127,9 +122,6 @@ fn main() -> Result<(), slint::PlatformError> {
         } else {
             ui.set_storage_loading(false);
             ui.set_storage_error("Local storage could not start. Close and reopen VOID.".into());
-        }
-        if let Some(relay) = &relay {
-            connect_relay(ui, relay);
         }
     })
     .is_err()

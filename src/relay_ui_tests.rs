@@ -99,6 +99,12 @@ fn slint_keeps_running_while_the_local_relay_withholds_its_challenge() {
         slint::quit_event_loop().unwrap();
     });
     ui.invoke_reconnect();
+    assert_eq!(
+        ui.get_connection_status(),
+        ConnectionStatus::Disconnected.label()
+    );
+    ui.set_storage_ready(true);
+    ui.invoke_storage_opened();
     slint::run_event_loop_until_quit().unwrap();
     assert!(observed.get());
     assert_eq!(ui.get_section(), "Settings");

@@ -8,10 +8,11 @@ use crate::{
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, SigningKey};
 use futures_util::StreamExt;
+use libsignal_protocol::IdentityKey;
 use serde_json::{Value, json};
-use std::{sync::mpsc, thread, time::Duration};
+use std::{collections::HashSet, future::Future, sync::mpsc, thread, time::Duration};
 use tokio::{net::TcpListener, time::timeout};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
@@ -72,7 +73,7 @@ impl Client {
     }
 
     fn connect(&self, who: &str) -> Session {
-        assert!(self.relay.connect_messaging(who.into()));
+        assert!(self.relay.connect(who.into()));
         self.next_session()
     }
 
@@ -131,47 +132,86 @@ async fn person(socket: &mut Socket, who: &str, substitute_key: bool) {
     .await;
 }
 
-async fn publication(socket: &mut Socket) -> (Value, Value) {
+fn canonical_base64(value: &Value) -> Vec<u8> {
+    let value = value.as_str().unwrap();
+    let bytes = STANDARD.decode(value).unwrap();
+    assert!(STANDARD.encode(&bytes) == value);
+    bytes
+}
+
+async fn publication(socket: &mut Socket, who: &str) -> (Value, Value) {
     let frame = receive_json(socket).await;
-    let bytes = STANDARD
-        .decode(frame["payload_base64"].as_str().unwrap())
-        .unwrap();
+    let bytes = canonical_base64(&frame["payload_base64"]);
+    assert!(!bytes.is_empty() && bytes.len() <= 256 * 1024);
     let upload: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        frame,
-        json!({"type":"prekeys_publish", "publication_id":frame["publication_id"],
+    assert!(
+        frame
+            == json!({"type":"prekeys_publish", "publication_id":frame["publication_id"],
         "payload_base64":STANDARD.encode(bytes)})
     );
     assert_eq!(upload.as_object().unwrap().len(), 9);
     assert_eq!(upload["v"], 1);
     assert_eq!(upload["device_id"], 1);
+    let registration_id = upload["registration_id"].as_u64().unwrap();
+    assert!((1..=16_380).contains(&registration_id));
+    let identity = canonical_base64(&upload["identity_key"]);
+    assert_eq!(identity.len(), 33);
+    assert_eq!(identity[0], 5);
+    let signer = IdentityKey::decode(&identity).unwrap();
+    // The pinned Go service's IdentityMessage transcript, independent of the Rust signer.
+    let transcript = format!(
+        "VOID:signal-identity:v1\nhttps://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz\n{who}\n1\n{registration_id}\n{}\n",
+        upload["identity_key"].as_str().unwrap(),
+    );
+    let signature = Signature::from_slice(&canonical_base64(&upload["account_signature"])).unwrap();
+    assert!(
+        account_key(who)
+            .verifying_key()
+            .verify_strict(transcript.as_bytes(), &signature)
+            .is_ok()
+    );
     for field in ["one_time_prekeys", "one_time_kyber_prekeys"] {
         assert_eq!(upload[field].as_array().unwrap().len(), 20);
     }
+    let key_id = |key: &Value| {
+        let id = key["key_id"].as_u64().unwrap();
+        assert!((1..=16_777_214).contains(&id));
+        id
+    };
+    let mut ec_ids = HashSet::new();
     for key in upload["one_time_prekeys"].as_array().unwrap() {
         assert_eq!(key.as_object().unwrap().len(), 2);
-        assert_eq!(
-            STANDARD
-                .decode(key["public_key"].as_str().unwrap())
-                .unwrap()
-                .len(),
-            33
-        );
+        assert!(ec_ids.insert(key_id(key)));
+        let public_key = canonical_base64(&key["public_key"]);
+        assert_eq!(public_key.len(), 33);
+        assert_eq!(public_key[0], 5);
     }
+    let verify_signed = |key: &Value| {
+        assert_eq!(key.as_object().unwrap().len(), 3);
+        let public_key = canonical_base64(&key["public_key"]);
+        let signature = canonical_base64(&key["signature"]);
+        assert_eq!(signature.len(), 64);
+        assert!(
+            signer
+                .public_key()
+                .verify_signature(&public_key, &signature)
+        );
+        public_key
+    };
+    let signed = &upload["signed_prekey"];
+    key_id(signed);
+    let signed_ec = verify_signed(signed);
+    assert_eq!(signed_ec.len(), 33);
+    assert_eq!(signed_ec[0], 5);
+    let mut kyber_ids = HashSet::new();
     for key in upload["one_time_kyber_prekeys"]
         .as_array()
         .unwrap()
         .iter()
-        .chain([&upload["signed_prekey"], &upload["kyber_last_resort"]])
+        .chain([&upload["kyber_last_resort"]])
     {
-        assert_eq!(key.as_object().unwrap().len(), 3);
-        assert_eq!(
-            STANDARD
-                .decode(key["signature"].as_str().unwrap())
-                .unwrap()
-                .len(),
-            64
-        );
+        assert!(kyber_ids.insert(key_id(key)));
+        assert!((1..=2048).contains(&verify_signed(key).len()));
     }
     (frame, upload)
 }
@@ -232,18 +272,18 @@ async fn no_ack_until_close(socket: &mut Socket) {
 
 async fn relay_script(listener: TcpListener) {
     let mut bob = authenticate(&listener, BOB).await;
-    let (publication_frame, upload) = publication(&mut bob).await;
+    let (publication_frame, upload) = publication(&mut bob, BOB).await;
     drop(bob); // Inventory committed, response lost.
 
     let mut bob = authenticate(&listener, BOB).await;
-    let (retry, _) = publication(&mut bob).await;
-    assert_eq!(retry, publication_frame);
+    let (retry, _) = publication(&mut bob, BOB).await;
+    assert!(retry == publication_frame);
     published(&mut bob, &retry).await;
     bob.close(None).await.unwrap();
     drop(bob);
 
     let mut alice = authenticate(&listener, ALICE).await;
-    let (alice_upload, _) = publication(&mut alice).await;
+    let (alice_upload, _) = publication(&mut alice, ALICE).await;
     published(&mut alice, &alice_upload).await;
     person(&mut alice, BOB, false).await;
     let claim = receive_json(&mut alice).await;
@@ -347,7 +387,9 @@ async fn relay_script(listener: TcpListener) {
     ack(&mut bob, &next_event, ALICE, true).await;
 }
 
-fn mock_relay() -> (String, thread::JoinHandle<()>) {
+fn mock_relay<F: Future<Output = ()> + 'static>(
+    script: impl FnOnce(TcpListener) -> F + Send + 'static,
+) -> (String, thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -359,7 +401,7 @@ fn mock_relay() -> (String, thread::JoinHandle<()>) {
             .block_on(async {
                 timeout(
                     Duration::from_secs(45),
-                    relay_script(TcpListener::from_std(listener).unwrap()),
+                    script(TcpListener::from_std(listener).unwrap()),
                 )
                 .await
                 .expect("mock messaging relay timed out");
@@ -383,8 +425,61 @@ fn session_record(db: &Database, peer: &str) -> Vec<u8> {
 }
 
 #[test]
+fn replacing_the_signal_store_for_an_existing_account_reproduces_a_publication_conflict() {
+    let (endpoint, mock) = mock_relay(|listener| async move {
+        let mut first = authenticate(&listener, BOB).await;
+        let (frame, original) = publication(&mut first, BOB).await;
+        published(&mut first, &frame).await;
+
+        let mut replacement = authenticate(&listener, BOB).await;
+        let (frame, new_upload) = publication(&mut replacement, BOB).await;
+        // The pinned Go inventory rejects a changed immutable identity, even with
+        // a valid account signature and a fresh publication UUID.
+        assert!(original["identity_key"] != new_upload["identity_key"]);
+        send_json(&mut replacement, json!({
+            "type":"prekeys_error", "request_id":frame["publication_id"], "code":"prekeys_conflict"
+        })).await;
+    });
+    let original = TestDir::new();
+    let mut db = open(&original, BOB);
+    let client = Client::new(&endpoint);
+    messaging::publish(&mut db, &client.connect(BOB)).unwrap();
+    drop(client);
+    db.close().unwrap();
+    let mut db = open(&original, BOB);
+    assert!(db.prepare_publication().unwrap().is_none());
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM signal_prekeys WHERE published"),
+        42
+    );
+
+    let replacement = TestDir::new();
+    let mut db = open(&replacement, BOB);
+    let saved = db.prepare_publication().unwrap().unwrap();
+    let client = Client::new(&endpoint);
+    let error = messaging::publish(&mut db, &client.connect(BOB)).unwrap_err();
+    assert!(
+        matches!(&error, messaging::Error::Relay(RequestError::Rejected {
+        command: "prekeys_publish", code
+    }) if code == "prekeys_conflict")
+    );
+    let (notice, retryable) = messaging::publication_failure(&error);
+    assert!(notice.contains("original Signal store"));
+    assert!(!retryable);
+    db.close().unwrap();
+    let mut db = open(&replacement, BOB);
+    let persisted = db.prepare_publication().unwrap().unwrap();
+    assert!(saved.id == persisted.id && saved.payload_base64 == persisted.payload_base64);
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM signal_prekeys WHERE published"),
+        0
+    );
+    mock.join().unwrap();
+}
+
+#[test]
 fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committed_events() {
-    let (endpoint, mock) = mock_relay();
+    let (endpoint, mock) = mock_relay(relay_script);
     let alice_dir = TestDir::new();
     let bob_dir = TestDir::new();
     let mut bob = open(&bob_dir, BOB);
@@ -454,7 +549,7 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     );
     assert!(
         matches!(messaging::send(&mut alice, Some(&replacement), &event_id),
-        Err(messaging::Error::Relay(RequestError::Rejected(code))) if code == "duplicate_event")
+        Err(messaging::Error::Relay(RequestError::Rejected { command: "send", code })) if code == "duplicate_event")
     );
     assert_eq!(
         alice.outgoing_operation(&event_id).unwrap().state,

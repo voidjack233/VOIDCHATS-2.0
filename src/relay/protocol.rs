@@ -74,6 +74,16 @@ pub(crate) enum Reply {
 }
 
 impl Request {
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            Self::Lookup { .. } => "lookup",
+            Self::PrekeysPublish { .. } => "prekeys_publish",
+            Self::PrekeysClaim { .. } => "prekeys_claim",
+            Self::Send { .. } => "send",
+            Self::Ack { .. } => "ack",
+        }
+    }
+
     pub(super) fn matches(&self, reply: &Reply) -> bool {
         match (self, reply) {
             (Self::Lookup { void_id }, Reply::Person { void_id: id, .. }) => void_id == id,
