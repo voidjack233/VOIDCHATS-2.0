@@ -47,7 +47,11 @@ impl Database {
                     "SELECT 1 FROM signal_prekeys UNION ALL SELECT 1 FROM signal_sessions
                      UNION ALL SELECT 1 FROM signal_identities UNION ALL SELECT 1 FROM signal_kyber_uses LIMIT 1",
                 )?.exists([])?;
-                if has_records {
+                // Publication receipts were added in schema v5.
+                let version: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                let has_publication = version >= 5
+                    && tx.prepare("SELECT 1 FROM signal_publication LIMIT 1")?.exists([])?;
+                if has_records || has_publication {
                     return Err(Error::SignalState);
                 }
                 generate_initial_state(tx, void_id, account_key)?;

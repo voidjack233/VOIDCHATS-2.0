@@ -14,7 +14,10 @@ slint::include_modules!();
 
 fn connect_relay(ui: &AppWindow, relay: &Connection) {
     let void_id = ui.get_account_void_id();
-    if ui.get_setup_page() != 0 || !ui.get_storage_ready() || void_id.is_empty() {
+    if !matches!(ui.get_setup_page(), 0 | account::ENROLLMENT_PAGE)
+        || !ui.get_storage_ready()
+        || !account::valid_void_id(&void_id)
+    {
         return;
     }
     let status = ui.get_connection_status();
@@ -111,7 +114,12 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }) {
         Ok((relay, worker)) => (Some(relay), Some(worker)),
-        Err(_) => (None, None),
+        Err(_) => {
+            ui.set_publication_error(
+                "The relay worker could not start. Close and reopen VOID.".into(),
+            );
+            (None, None)
+        }
     };
     if let Some(relay) = relay.clone() {
         bind_reconnect(&ui, relay);

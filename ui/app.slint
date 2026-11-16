@@ -237,6 +237,7 @@ component SetupPage inherits Rectangle {
                             : root.page == 2 ? "How VOID works"
                             : root.page == 3 ? "Security notice"
                             : root.page == 4 ? "Terms of service"
+                            : root.page == 6 ? "Set up encrypted messaging"
                             : root.retry-storage ? "Open your local identity"
                             : !root.can-retry ? "Account setup needs attention"
                             : "Create your VOID account";
@@ -252,6 +253,12 @@ component SetupPage inherits Rectangle {
                             : root.page == 3 ? "Windows protects your private key under your Windows user profile. Keep your local VOID data. Account recovery is unavailable in this release."
                             : root.page == 4 ? "The final Terms of Service are unavailable in this preview. The next step lets you choose whether to register a real VOID account."
                             : "VOID receives your public key and proof of ownership. Your private key stays on this device.";
+                        color: Theme.secondary;
+                        font-size: 16px;
+                        wrap: word-wrap;
+                    }
+                    if root.page == 6: Text {
+                        text: "Your VOID-ID is saved. Messaging starts once your public encryption keys are confirmed.";
                         color: Theme.secondary;
                         font-size: 16px;
                         wrap: word-wrap;
@@ -305,7 +312,7 @@ component AccountSetup inherits Rectangle {
 
     private property <bool> security-acknowledged;
     private property <bool> terms-acknowledged;
-    private property <bool> show-steps: root.page > 0 && !root.retry-storage && root.can-retry;
+    private property <bool> show-steps: root.page > 0 && root.page <= 5 && !root.retry-storage && root.can-retry;
     private property <length> gutter: max(40px, (root.width - root.reading-width) / 2);
     private property <length> reading-width: 600px;
     private property <float> slide-position: max(0, root.page);
@@ -360,7 +367,7 @@ component AccountSetup inherits Rectangle {
                 clip: true;
 
                 // Move all pages together so outgoing and incoming content cannot overlap.
-                for step in [-1, 1, 2, 3, 4, 5]: SetupPage {
+                for step in [-1, 1, 2, 3, 4, 5, 6]: SetupPage {
                     x: (max(0, step) - root.slide-position) * self.width;
                     visible: self.x > -self.width && self.x < self.width;
                     width: parent.width;
@@ -418,7 +425,7 @@ component AccountSetup inherits Rectangle {
                     padding-bottom: 20px;
                     spacing: 12px;
 
-                    if root.page > 1 && (root.page < 5 || (root.error == "" && !root.retry-storage)): Action {
+                    if root.page > 1 && root.page <= 5 && (root.page < 5 || (root.error == "" && !root.retry-storage)): Action {
                         label: "Back";
                         enabled: !root.busy;
                         clicked => { root.page -= 1; }
@@ -431,7 +438,7 @@ component AccountSetup inherits Rectangle {
                             && (root.page != 4 || root.terms-acknowledged);
                         clicked => { root.page += 1; }
                     }
-                    if root.page == 5: Action {
+                    if root.page >= 5: Action {
                         label: root.action;
                         primary: true;
                         enabled: !root.busy;
@@ -464,6 +471,7 @@ export component AppWindow inherits Window {
             || root.connection-status == "Authentication failed");
     callback reconnect();
     in property <bool> messaging-ready;
+    in property <bool> publishing-keys;
     in property <string> publication-error;
     in property <bool> publication-retryable;
     in property <bool> send-busy;
@@ -478,6 +486,7 @@ export component AppWindow inherits Window {
 
     in property <bool> storage-ready;
     in property <bool> storage-loading: true;
+    in property <bool> storage-retryable;
     in property <string> storage-error;
     in property <[StoredConversation]> stored-chats;
     in property <[StoredConversation]> stored-requests;
@@ -529,16 +538,42 @@ export component AppWindow inherits Window {
     private property <length> header-height: 72px;
     private property <length> list-gutter: 16px;
     private property <length> chat-gutter: root.compact ? 20px : 28px;
+    private property <bool> enrolling: root.setup-page == 6;
+    out property <bool> enrollment-can-retry: root.enrolling && !root.storage-loading
+        && ((root.storage-error != "" && root.storage-retryable)
+            || root.connection-status == "Authentication failed"
+            || (root.connection-status == "Connected" && root.publication-retryable));
+    private property <bool> enrollment-busy: root.storage-loading || root.publishing-keys
+        || root.connection-status == "Connecting" || root.connection-status == "Reconnecting";
+    private property <string> enrollment-status: root.storage-loading ? root.setup-status
+        : root.publishing-keys ? "Publishing encryption keys…"
+        : root.connection-status == "Reconnecting" ? "Waiting for the relay to reconnect…"
+        : "Connecting to the relay…";
+    private property <string> enrollment-error: root.storage-error != "" ? root.storage-error
+        : root.connection-status == "Authentication failed" ? "VOID could not authenticate with the relay. Retry to continue enrollment."
+        : root.publication-error;
 
     if root.setup-page != 0: AccountSetup {
         page <=> root.setup-page;
-        busy: root.setup-busy;
-        can-retry: root.setup-can-retry;
+        busy: root.enrolling ? root.enrollment-busy : root.setup-busy;
+        can-retry: root.enrolling ? root.enrollment-can-retry : root.setup-can-retry;
         retry-storage: root.setup-retry-storage;
-        status: root.setup-status;
-        error: root.setup-error;
-        action: root.setup-action;
-        submit => { root.submit-setup(); }
+        status: root.enrolling ? root.enrollment-status : root.setup-status;
+        error: root.enrolling ? root.enrollment-error : root.setup-error;
+        action: root.enrolling ? "Retry" : root.setup-action;
+        submit => {
+            if !root.enrolling {
+                root.submit-setup();
+            } else if root.enrollment-can-retry {
+                if root.storage-error != "" {
+                    root.retry-storage();
+                } else if root.connection-status == "Authentication failed" {
+                    root.reconnect();
+                } else {
+                    root.retry-messaging();
+                }
+            }
+        }
     }
 
     if root.setup-page == 0: Rectangle {

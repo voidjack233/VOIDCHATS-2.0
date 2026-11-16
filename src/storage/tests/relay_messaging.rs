@@ -1,4 +1,4 @@
-use super::{Database, Owner, TestDir};
+use super::{Database, TestDir};
 use crate::{
     account::RegisteredIdentity,
     messaging,
@@ -28,18 +28,9 @@ fn account_key(id: &str) -> SigningKey {
 }
 
 fn open(dir: &TestDir, id: &str) -> Database {
-    let key = account_key(id);
-    let mut db = Database::open(
-        &dir.0,
-        Owner {
-            void_id: id,
-            public_key: key.verifying_key().as_bytes(),
-        },
-    )
-    .unwrap();
-    db.initialize_signal(id, &key).unwrap();
-    db.recover_interrupted_sends().unwrap();
-    db
+    crate::account::open_enrollment_fixture(&dir.0, id, &account_key(id))
+        .unwrap()
+        .0
 }
 
 struct Client {

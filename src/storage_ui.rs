@@ -1,6 +1,4 @@
-use crate::{
-    AppWindow, StoredContact, StoredConversation, StoredMessage, account, local_data, storage,
-};
+use crate::{AppWindow, StoredContact, StoredConversation, StoredMessage, account, storage};
 use crate::{
     messaging,
     relay::{Activity, Session},
@@ -9,7 +7,6 @@ use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 use std::{
     collections::HashMap,
     io,
-    path::PathBuf,
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
@@ -45,6 +42,9 @@ impl Worker {
         move |ui| {
             ui.set_storage_loading(true);
             ui.set_storage_error("".into());
+            if ui.get_setup_page() == account::ENROLLMENT_PAGE {
+                ui.set_setup_status("Securing local storage…".into());
+            }
             if sender
                 .send(Command::Open(ui.get_account_void_id().to_string()))
                 .is_err()
@@ -64,20 +64,19 @@ impl Worker {
 fn worker_stopped(ui: &AppWindow) {
     ui.set_storage_loading(false);
     ui.set_storage_ready(false);
+    ui.set_storage_retryable(false);
     ui.set_storage_error("Local storage stopped. Close and reopen VOID.".into());
 }
 
 pub(crate) fn bind(ui: &AppWindow) -> io::Result<Worker> {
-    bind_with(ui, |id| {
-        let account =
-            account::load_registered_identity(id).map_err(|_| storage::Error::WrongAccount)?;
-        Ok((local_data::user_data_dir()?, account.key))
-    })
+    bind_with(ui, account::open_enrollment)
 }
 
 fn bind_with(
     ui: &AppWindow,
-    owner: impl Fn(&str) -> storage::Result<(PathBuf, ed25519_dalek::SigningKey)> + Send + 'static,
+    open: impl Fn(&str, &dyn Fn(&'static str)) -> storage::Result<(storage::Database, bool)>
+    + Send
+    + 'static,
 ) -> io::Result<Worker> {
     let (sender, receiver) = mpsc::channel();
     let weak = ui.as_weak();
@@ -107,28 +106,24 @@ fn bind_with(
                         if database.is_some() {
                             continue;
                         }
-                        let opened = owner(&id)
-                            .and_then(|(root, key)| {
-                                let public_key = key.verifying_key();
-                                let mut db = storage::Database::open(
-                                    &root,
-                                    storage::Owner {
-                                        void_id: &id,
-                                        public_key: public_key.as_bytes(),
-                                    },
-                                )?;
-                                db.initialize_signal(&id, &key)?;
-                                db.recover_interrupted_sends()?;
-                                Ok(db)
-                            })
-                            .and_then(|db| load_lists(&db).map(|lists| (db, lists)));
+                        let opened = open(&id, &|stage| {
+                            let _ = weak.upgrade_in_event_loop(move |ui| {
+                                ui.set_setup_status(stage.into());
+                            });
+                        })
+                        .and_then(|(db, confirmed)| {
+                            load_lists(&db).map(|lists| (db, lists, confirmed))
+                        });
                         match opened {
-                            Ok((db, lists)) => {
+                            Ok((db, lists, confirmed)) => {
                                 database = Some(db);
                                 let _ = weak.upgrade_in_event_loop(move |ui| {
                                     lists.show(&ui);
                                     ui.set_storage_loading(false);
                                     ui.set_storage_ready(true);
+                                    if confirmed {
+                                        finish_enrollment(&ui);
+                                    }
                                     ui.invoke_storage_opened();
                                 });
                             }
@@ -289,6 +284,7 @@ fn bind_with(
         })?;
 
     let worker = Worker { sender, thread };
+    ui.set_storage_retryable(true);
     let weak = ui.as_weak();
     let open = worker.opener();
     ui.on_retry_storage(move || {
@@ -344,7 +340,9 @@ fn bind_with(
             && ui.get_connection_status() == "Connected"
         {
             ui.set_publication_retryable(false);
+            ui.set_publishing_keys(true);
             if sender.send(Command::RetryMessaging).is_err() {
+                ui.set_publishing_keys(false);
                 worker_stopped(&ui);
             }
         }
@@ -498,6 +496,7 @@ fn initialize_messaging(
     db: &mut storage::Database,
     session: &Session,
 ) -> bool {
+    let _ = weak.upgrade_in_event_loop(|ui| ui.set_publishing_keys(true));
     let result = messaging::publish(db, session);
     let ready = result.is_ok();
     let interrupted = matches!(
@@ -512,16 +511,25 @@ fn initialize_messaging(
         .map_or(("", false), messaging::publication_failure);
     let session = session.clone();
     let _ = weak.upgrade_in_event_loop(move |ui| {
-        if ready && !session.is_active() {
-            return;
-        }
-        ui.set_messaging_ready(ready);
+        ui.set_publishing_keys(false);
+        ui.set_messaging_ready(ready && session.is_active());
         if !interrupted || ui.get_publication_error().is_empty() {
             ui.set_publication_error(notice.into());
             ui.set_publication_retryable(retryable);
         }
+        if ready {
+            finish_enrollment(&ui);
+        }
     });
     ready
+}
+
+fn finish_enrollment(ui: &AppWindow) {
+    if ui.get_setup_page() == account::ENROLLMENT_PAGE {
+        ui.set_setup_status("Messaging ready".into());
+        ui.set_section("Chats".into());
+        ui.set_setup_page(0);
+    }
 }
 
 fn show_messaging_result(weak: &Weak<AppWindow>, result: Result<(), messaging::Error>) {
@@ -725,6 +733,27 @@ mod tests {
     use slint::{Model, Timer, TimerMode};
     use std::{cell::Cell, process::Command, time::Duration};
 
+    fn bind_fixture(
+        ui: &AppWindow,
+        owner: impl Fn(&str) -> (std::path::PathBuf, ed25519_dalek::SigningKey) + Send + 'static,
+    ) -> io::Result<Worker> {
+        bind_with(ui, move |id, _| {
+            let (root, key) = owner(id);
+            let public = key.verifying_key();
+            let mut db = Database::open(
+                &root,
+                Owner {
+                    void_id: id,
+                    public_key: public.as_bytes(),
+                },
+            )?;
+            db.initialize_signal(id, &key)?;
+            let confirmed = db.prepare_publication()?.is_none();
+            db.recover_interrupted_sends()?;
+            Ok((db, confirmed))
+        })
+    }
+
     fn in_test_process(test: &str) -> bool {
         const CHILD: &str = "VOID_STORAGE_UI_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -760,6 +789,9 @@ mod tests {
         };
         let temp = TestDir::new();
         let mut db = Database::open(&temp.0, owner).unwrap();
+        db.initialize_signal(owner.void_id, &account_key).unwrap();
+        let publication = db.prepare_publication().unwrap().unwrap();
+        db.confirm_publication(&publication.id).unwrap();
         let id = db.create_conversation("123", 100).unwrap();
         db.save_message(&Message {
             id: "test-1".into(),
@@ -776,13 +808,13 @@ mod tests {
         i_slint_backend_testing::init_integration_test_with_system_time();
         let ui = AppWindow::new().unwrap();
         ui.set_account_void_id(owner.void_id.into());
-        ui.set_setup_page(0);
+        ui.set_setup_page(account::ENROLLMENT_PAGE);
         let this_thread = thread::current().id();
         let root = temp.0.clone();
-        let worker = bind_with(&ui, move |id| {
+        let worker = bind_fixture(&ui, move |id| {
             assert_ne!(this_thread, thread::current().id());
             assert_eq!(id, "41");
-            Ok((root.clone(), account_key.clone()))
+            (root.clone(), account_key.clone())
         })
         .unwrap();
 
@@ -795,6 +827,8 @@ mod tests {
                 && ui.get_selected_conversation().is_empty()
                 && !ui.get_conversation_loading()
             {
+                assert_eq!(ui.get_setup_page(), 0);
+                assert_eq!(ui.get_connection_status(), "Disconnected");
                 assert_eq!(ui.get_stored_chats().row_count(), 1);
                 ui.invoke_select_stored_conversation(id.to_string().into());
             } else if ui.get_selected_conversation() == id.to_string()
@@ -864,7 +898,7 @@ mod tests {
         ui.set_account_void_id(owner.void_id.into());
         ui.set_setup_page(0);
         ui.set_section("Requests".into());
-        let worker = bind_with(&ui, move |_| Ok((temp.0.clone(), account_key.clone()))).unwrap();
+        let worker = bind_fixture(&ui, move |_| (temp.0.clone(), account_key.clone())).unwrap();
         worker.opener()(&ui);
 
         let poll = Timer::default();
@@ -1025,9 +1059,9 @@ mod tests {
         i_slint_backend_testing::init_integration_test_with_system_time();
         let ui = AppWindow::new().unwrap();
         ui.set_account_void_id(owner.void_id.into());
-        ui.set_setup_page(0);
+        ui.set_setup_page(account::ENROLLMENT_PAGE);
         let root = temp.0.clone();
-        let worker = bind_with(&ui, move |_| Ok((root.clone(), account_key.clone()))).unwrap();
+        let worker = bind_fixture(&ui, move |_| (root.clone(), account_key.clone())).unwrap();
         let (relay, relay_worker) = Connection::spawn_with_activity(
             endpoint,
             |id| {
@@ -1060,6 +1094,8 @@ mod tests {
             {
                 assert!(ui.get_storage_ready());
                 assert!(!ui.get_messaging_ready());
+                assert_eq!(ui.get_setup_page(), account::ENROLLMENT_PAGE);
+                assert!(!ui.get_enrollment_can_retry());
                 assert!(!ui.get_can_reconnect());
                 assert!(!ui.get_publication_retryable());
                 if stage.get() == 0 {
@@ -1075,12 +1111,15 @@ mod tests {
                 assert!(!ui.get_messaging_ready());
                 assert!(!ui.get_can_reconnect());
                 assert!(ui.get_publication_retryable());
+                assert!(ui.get_enrollment_can_retry());
                 ui.invoke_retry_messaging();
                 stage.set(3);
             }
             if checked_no_resend.load(Ordering::Acquire) {
                 assert_eq!(stage.get(), 3);
                 assert!(ui.get_messaging_ready());
+                assert_eq!(ui.get_setup_page(), 0);
+                assert_eq!(ui.get_section(), "Chats");
                 assert!(ui.get_publication_error().is_empty());
                 assert!(!ui.get_can_reconnect());
                 assert_eq!(

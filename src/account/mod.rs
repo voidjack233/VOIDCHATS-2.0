@@ -1,6 +1,10 @@
+mod enrollment;
 mod protocol;
 mod storage;
 
+pub(crate) use enrollment::open as open_enrollment;
+#[cfg(all(test, windows))]
+pub(crate) use enrollment::open_fixture as open_enrollment_fixture;
 pub(crate) use protocol::{API_BASE, timestamp_ms, valid_token, valid_void_id};
 
 use crate::AppWindow;
@@ -8,13 +12,20 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::Signer;
 use protocol::{AccountApi, Failure, HttpAccountApi, Registration, Rejection, valid_registration};
 use slint::ComponentHandle;
-use std::{sync::mpsc, thread, time::{Duration, Instant}};
+use std::{
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 use storage::{Identity, State, Store};
+
+pub(crate) const ENROLLMENT_PAGE: i32 = 6;
 
 const UNRESOLVED: &str = "VOID may have created your account, but setup did not receive or save a confirmed VOID-ID. Keep this Windows profile’s VOID data. Account recovery is not available yet.";
 const KEY_REGISTERED: &str = "This device key is already registered. Keep this Windows profile’s VOID data. Account recovery is not available yet.";
 const INVALID_CONFIRMATION: &str = "The saved registration confirmation could not be verified against this device’s identity and setup request. Keep this Windows profile’s VOID data.";
-const STORAGE_LOCK: &str = "Could not open local account storage for writing. Close other VOID windows, then try again.";
+const STORAGE_LOCK: &str =
+    "Could not open local account storage for writing. Close other VOID windows, then try again.";
 
 struct SetupError {
     message: String,
@@ -25,15 +36,28 @@ struct SetupError {
 
 impl SetupError {
     fn retry(message: &str) -> Self {
-        Self { message: message.into(), retry: true, wait: None, saving: false }
+        Self {
+            message: message.into(),
+            retry: true,
+            wait: None,
+            saving: false,
+        }
     }
 
     fn blocked(message: &str) -> Self {
-        Self { message: message.into(), retry: false, wait: None, saving: false }
+        Self {
+            message: message.into(),
+            retry: false,
+            wait: None,
+            saving: false,
+        }
     }
 
     fn retry_saving(message: &str) -> Self {
-        Self { saving: true, ..Self::retry(message) }
+        Self {
+            saving: true,
+            ..Self::retry(message)
+        }
     }
 }
 
@@ -61,12 +85,17 @@ enum Startup {
 }
 
 fn inspect(store: &Store) -> Result<Startup, SetupError> {
-    let load = || store.load().map_err(|_| SetupError::retry(
+    let load = || {
+        store.load().map_err(|_| SetupError::retry(
         "Could not open the saved identity. Check that this is the same Windows user, then retry opening local storage."
-    ));
+    ))
+    };
     let mut identity = load()?;
     let mut lock = None;
-    if identity.as_ref().is_some_and(|id| id.state.submission_pending()) {
+    if identity
+        .as_ref()
+        .is_some_and(|id| id.state.submission_pending())
+    {
         // Another process may still be waiting for the server. Re-read once we own the lock.
         lock = Some(store.lock().map_err(|_| SetupError::retry(STORAGE_LOCK))?);
         identity = load()?;
@@ -79,8 +108,14 @@ fn inspect(store: &Store) -> Result<Startup, SetupError> {
                 None => Ok(Startup::Blocked(UNRESOLVED)),
             }
         }
-        Some(Identity { state: State::Registered(account), .. }) => Ok(Startup::Registered(account.void_id)),
-        Some(Identity { state: State::AlreadyRegistered, .. }) => Ok(Startup::Blocked(KEY_REGISTERED)),
+        Some(Identity {
+            state: State::Registered(account) | State::RegisteredPendingStorage(account),
+            ..
+        }) => Ok(Startup::Registered(account.void_id)),
+        Some(Identity {
+            state: State::AlreadyRegistered,
+            ..
+        }) => Ok(Startup::Blocked(KEY_REGISTERED)),
         _ => {
             reject_unexpected_confirmation(store)?;
             Ok(Startup::Welcome)
@@ -95,12 +130,15 @@ fn reject_unexpected_confirmation(store: &Store) -> Result<(), SetupError> {
         Ok(false) => Ok(()),
         Ok(true) => Err(SetupError::blocked(INVALID_CONFIRMATION)),
         Err(_) => Err(SetupError::retry(
-            "Could not check for a saved registration confirmation. Check local storage and try again."
+            "Could not check for a saved registration confirmation. Check local storage and try again.",
         )),
     }
 }
 
-fn load_confirmation(store: &Store, identity: &Identity) -> Result<Option<Registration>, SetupError> {
+fn load_confirmation(
+    store: &Store,
+    identity: &Identity,
+) -> Result<Option<Registration>, SetupError> {
     store.load_confirmation(identity).map_err(|error| {
         if error.kind() == std::io::ErrorKind::InvalidData {
             SetupError::blocked(INVALID_CONFIRMATION)
@@ -117,7 +155,7 @@ fn finalize_registration(
     mut identity: Identity,
     account: Registration,
 ) -> Result<Registration, SetupError> {
-    identity.state = State::Registered(account.clone());
+    identity.state = State::RegisteredPendingStorage(account.clone());
     store.save(&identity).map_err(|_| SetupError::retry_saving(
         "Your registration confirmation is saved, but VOID could not finish saving your account. Try again now or reopen VOID to finish."
     ))?;
@@ -136,7 +174,10 @@ impl Setup {
             let remaining = wait.saturating_sub(start.elapsed());
             if !remaining.is_zero() {
                 return Err(SetupError::retry(&format!(
-                    "Please wait {} seconds before trying again.", remaining.as_secs().saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                    "Please wait {} seconds before trying again.",
+                    remaining
+                        .as_secs()
+                        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
                 )));
             }
             self.retry_after = None;
@@ -150,15 +191,19 @@ impl Setup {
 
         let mut identity = match existing {
             Some(identity) => identity,
-            None if self.pending_save.is_some() => return Err(SetupError::blocked(
-                "The original identity file is missing. Keep any existing VOID data. Account recovery is not available yet."
-            )),
+            None if self.pending_save.is_some() => {
+                return Err(SetupError::blocked(
+                    "The original identity file is missing. Keep any existing VOID data. Account recovery is not available yet.",
+                ));
+            }
             None => {
                 reject_unexpected_confirmation(store)?;
                 stage("Creating your protected device identity…");
-                let identity = Identity::generate().map_err(|_| SetupError::retry(
-                    "Could not prepare a secure device identity. Please try again."
-                ))?;
+                let identity = Identity::generate().map_err(|_| {
+                    SetupError::retry(
+                        "Could not prepare a secure device identity. Please try again.",
+                    )
+                })?;
                 store.save(&identity).map_err(|_| SetupError::retry(
                     "Could not save the protected identity. Check that local storage is writable and try again."
                 ))?;
@@ -167,12 +212,16 @@ impl Setup {
         };
 
         match &identity.state {
-            State::Registered(account) => return Ok(account.clone()),
+            State::Registered(account) | State::RegisteredPendingStorage(account) => {
+                return Ok(account.clone());
+            }
             State::AlreadyRegistered => return Err(SetupError::blocked(KEY_REGISTERED)),
             State::SubmissionPending | State::SubmissionPendingFor { .. } => {
                 return self.save_registration(store, identity, stage);
             }
-            State::Prepared if self.pending_save.is_some() => return Err(SetupError::blocked(UNRESOLVED)),
+            State::Prepared if self.pending_save.is_some() => {
+                return Err(SetupError::blocked(UNRESOLVED));
+            }
             State::Prepared => reject_unexpected_confirmation(store)?,
         }
 
@@ -194,14 +243,21 @@ impl Setup {
         let signature = STANDARD.encode(signature.to_bytes());
 
         // A crash, timeout or malformed reply after this point must never cause a second POST.
-        identity.state = State::SubmissionPendingFor { challenge_id: challenge.id.clone() };
+        identity.state = State::SubmissionPendingFor {
+            challenge_id: challenge.id.clone(),
+        };
         store.save(&identity).map_err(|_| SetupError::retry(
             "Could not save setup progress locally. No account request was sent. Check local storage and try again."
         ))?;
         if challenge.is_expired() {
-            return Err(self.handle_rejection(store, &mut identity, Failure::ExpiredChallenge, true));
+            return Err(self.handle_rejection(
+                store,
+                &mut identity,
+                Failure::ExpiredChallenge,
+                true,
+            ));
         }
-        stage("Creating your VOID account…");
+        stage("Registering your VOID account…");
         match api.register(&challenge.id, &signature) {
             Ok(account) if valid_registration(&account) => {
                 self.pending_save = Some(PendingSave {
@@ -225,10 +281,14 @@ impl Setup {
         let account = match load_confirmation(store, &identity)? {
             Some(account) => account,
             None => {
-                let pending = self.pending_save.as_ref().filter(|pending|
-                    pending.public_key == identity.key.verifying_key().to_bytes()
-                        && Some(pending.challenge_id.as_str()) == identity.state.challenge_id()
-                ).ok_or_else(|| SetupError::blocked(UNRESOLVED))?;
+                let pending = self
+                    .pending_save
+                    .as_ref()
+                    .filter(|pending| {
+                        pending.public_key == identity.key.verifying_key().to_bytes()
+                            && Some(pending.challenge_id.as_str()) == identity.state.challenge_id()
+                    })
+                    .ok_or_else(|| SetupError::blocked(UNRESOLVED))?;
 
                 stage("Saving your VOID-ID on this device…");
                 store.save_confirmation(&identity, &pending.account).map_err(|_| SetupError::retry_saving(
@@ -237,7 +297,7 @@ impl Setup {
                 pending.account.clone()
             }
         };
-        stage("Finishing account setup on this device…");
+        stage("Saving your registered identity…");
         let account = finalize_registration(store, identity, account)?;
         self.pending_save = None;
         Ok(account)
@@ -256,7 +316,7 @@ impl Setup {
                 SetupError::blocked(KEY_REGISTERED)
             } else {
                 SetupError::blocked(
-                    "VOID says this key is already registered, but local storage could not save that status. Keep this Windows profile’s VOID data."
+                    "VOID says this key is already registered, but local storage could not save that status. Keep this Windows profile’s VOID data.",
                 )
             };
         }
@@ -267,7 +327,7 @@ impl Setup {
             identity.state = State::Prepared;
             if store.save(identity).is_err() {
                 return SetupError::blocked(
-                    "The account request was rejected, but setup could not save that result locally. Keep this Windows profile’s VOID data."
+                    "The account request was rejected, but setup could not save that result locally. Keep this Windows profile’s VOID data.",
                 );
             }
         }
@@ -276,27 +336,63 @@ impl Setup {
 
     fn failure(&mut self, error: Failure, submitted: bool) -> SetupError {
         let (message, wait) = match error {
-            Failure::Network => ("Could not reach VOID. Check your connection and try again. Your device identity is saved.", None),
-            Failure::Timeout => ("VOID did not respond in time. Check your connection and try again. Your device identity is saved.", None),
-            Failure::InvalidResponse => ("VOID returned an unexpected setup response. Your device identity is saved.", None),
-            Failure::InvalidChallenge => ("VOID returned an invalid setup challenge. Try again to request a fresh one.", None),
-            Failure::ExpiredChallenge =>
-                ("The setup challenge expired or was rejected. Try again to request a fresh one.", None),
-            Failure::Rejected(Rejection::InvalidProof, wait) =>
-                ("The setup challenge expired or was rejected. Try again to request a fresh one.", wait),
-            Failure::Rejected(Rejection::InvalidInput, wait) => (
-                if submitted { "VOID rejected the account request. Try again with the saved identity." }
-                else { "VOID rejected the challenge request. Try again with the saved identity." }, wait
+            Failure::Network => (
+                "Could not reach VOID. Check your connection and try again. Your device identity is saved.",
+                None,
             ),
-            Failure::Rejected(Rejection::RateLimited, wait) => ("Too many setup attempts. Please wait before trying again.", wait),
-            Failure::Rejected(Rejection::CapacityReached, wait) => ("VOID is handling too many setup requests. Please wait and try again.", wait),
-            Failure::Rejected(Rejection::KeyRegistered, _) => return SetupError::blocked(KEY_REGISTERED),
-            Failure::Unavailable => ("VOID is temporarily unavailable. Your device identity is saved. Try again later.", None),
+            Failure::Timeout => (
+                "VOID did not respond in time. Check your connection and try again. Your device identity is saved.",
+                None,
+            ),
+            Failure::InvalidResponse => (
+                "VOID returned an unexpected setup response. Your device identity is saved.",
+                None,
+            ),
+            Failure::InvalidChallenge => (
+                "VOID returned an invalid setup challenge. Try again to request a fresh one.",
+                None,
+            ),
+            Failure::ExpiredChallenge => (
+                "The setup challenge expired or was rejected. Try again to request a fresh one.",
+                None,
+            ),
+            Failure::Rejected(Rejection::InvalidProof, wait) => (
+                "The setup challenge expired or was rejected. Try again to request a fresh one.",
+                wait,
+            ),
+            Failure::Rejected(Rejection::InvalidInput, wait) => (
+                if submitted {
+                    "VOID rejected the account request. Try again with the saved identity."
+                } else {
+                    "VOID rejected the challenge request. Try again with the saved identity."
+                },
+                wait,
+            ),
+            Failure::Rejected(Rejection::RateLimited, wait) => (
+                "Too many setup attempts. Please wait before trying again.",
+                wait,
+            ),
+            Failure::Rejected(Rejection::CapacityReached, wait) => (
+                "VOID is handling too many setup requests. Please wait and try again.",
+                wait,
+            ),
+            Failure::Rejected(Rejection::KeyRegistered, _) => {
+                return SetupError::blocked(KEY_REGISTERED);
+            }
+            Failure::Unavailable => (
+                "VOID is temporarily unavailable. Your device identity is saved. Try again later.",
+                None,
+            ),
         };
         if let Some(seconds) = wait {
             self.retry_after = Some((Instant::now(), Duration::from_secs(seconds)));
         }
-        SetupError { message: message.into(), retry: true, wait, saving: false }
+        SetupError {
+            message: message.into(),
+            retry: true,
+            wait,
+            saving: false,
+        }
     }
 }
 
@@ -308,10 +404,17 @@ pub(crate) struct RegisteredIdentity {
 pub(crate) fn load_registered_identity(expected_id: &str) -> std::io::Result<RegisteredIdentity> {
     let identity = Store::for_user()?.load()?;
     match identity {
-        Some(Identity { key, state: State::Registered(account) }) if account.void_id == expected_id => {
-            Ok(RegisteredIdentity { void_id: account.void_id, key })
-        }
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Registered identity unavailable")),
+        Some(Identity {
+            key,
+            state: State::Registered(account) | State::RegisteredPendingStorage(account),
+        }) if account.void_id == expected_id => Ok(RegisteredIdentity {
+            void_id: account.void_id,
+            key,
+        }),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Registered identity unavailable",
+        )),
     }
 }
 
@@ -321,12 +424,14 @@ pub(crate) fn bind(
 ) -> std::io::Result<()> {
     let (send, receive) = mpsc::channel();
     let weak = ui.as_weak();
-    thread::Builder::new().name("void-account".into()).spawn(move || {
-        let mut setup = Setup::default();
-        let mut command = Command::CheckStorage;
-        loop {
-            let checking = matches!(command, Command::CheckStorage);
-            let result = Store::for_user().map_err(|_| SetupError::retry(
+    thread::Builder::new()
+        .name("void-account".into())
+        .spawn(move || {
+            let mut setup = Setup::default();
+            let mut command = Command::CheckStorage;
+            loop {
+                let checking = matches!(command, Command::CheckStorage);
+                let result = Store::for_user().map_err(|_| SetupError::retry(
                 "The Windows local app data directory is unavailable. Retry opening local storage."
             )).and_then(|store| match command {
                 Command::CheckStorage => inspect(&store),
@@ -334,25 +439,27 @@ pub(crate) fn bind(
                     let _ = weak.upgrade_in_event_loop(move |ui| ui.set_setup_status(stage.into()));
                 }).map(|account| Startup::Registered(account.void_id)),
             });
-            let save_only = setup.pending_save.is_some();
-            let on_registered = on_registered.clone();
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                let registered = matches!(result, Ok(Startup::Registered(_)));
-                finish(&ui, checking, save_only, result);
-                if registered {
-                    on_registered(&ui);
+                let save_only = setup.pending_save.is_some();
+                let on_registered = on_registered.clone();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    let registered = matches!(result, Ok(Startup::Registered(_)));
+                    finish(&ui, checking, save_only, result);
+                    if registered {
+                        on_registered(&ui);
+                    }
+                });
+                match receive.recv() {
+                    Ok(next) => command = next,
+                    Err(_) => break,
                 }
-            });
-            match receive.recv() {
-                Ok(next) => command = next,
-                Err(_) => break,
             }
-        }
-    })?;
+        })?;
 
     let weak = ui.as_weak();
     ui.on_submit_setup(move || {
-        let Some(ui) = weak.upgrade() else { return; };
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
         if ui.get_setup_busy() || !ui.get_setup_can_retry() || ui.get_setup_page() != 5 {
             return;
         }
@@ -365,7 +472,14 @@ pub(crate) fn bind(
         ui.set_setup_error("".into());
         ui.set_setup_status("Opening protected local storage…".into());
         if send.send(command).is_err() {
-            finish(&ui, false, false, Err(SetupError::blocked("Account setup stopped. Close and reopen VOID.")));
+            finish(
+                &ui,
+                false,
+                false,
+                Err(SetupError::blocked(
+                    "Account setup stopped. Close and reopen VOID.",
+                )),
+            );
         }
     });
     Ok(())
@@ -384,7 +498,8 @@ fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startu
         }
         Ok(Startup::Registered(id)) => {
             ui.set_account_void_id(id.into());
-            ui.set_setup_page(0);
+            ui.set_setup_error("".into());
+            ui.set_setup_page(ENROLLMENT_PAGE);
         }
         Ok(Startup::Blocked(message)) => {
             ui.set_setup_error(message.into());
@@ -398,8 +513,16 @@ fn finish(ui: &AppWindow, checking: bool, save_only: bool, result: Result<Startu
             };
             ui.set_setup_error(message.into());
             ui.set_setup_can_retry(error.retry);
-            ui.set_setup_action(if error.saving || save_only { "Retry saving VOID-ID" }
-                else if checking { "Retry opening local storage" } else { "Retry account setup" }.into());
+            ui.set_setup_action(
+                if error.saving || save_only {
+                    "Retry saving VOID-ID"
+                } else if checking {
+                    "Retry opening local storage"
+                } else {
+                    "Retry account setup"
+                }
+                .into(),
+            );
             ui.set_setup_page(5);
         }
     }
@@ -410,7 +533,12 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signature, VerifyingKey};
     use protocol::{Challenge, valid_token};
-    use std::{cell::Cell, fs::{self, File, OpenOptions}, os::windows::fs::OpenOptionsExt, process::Command};
+    use std::{
+        cell::Cell,
+        fs::{self, File, OpenOptions},
+        os::windows::fs::OpenOptionsExt,
+        process::Command,
+    };
     use storage::tests::TestDir;
 
     const CHALLENGE_ID: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -431,17 +559,203 @@ mod tests {
         let record = dir.record_path();
         let protected = fs::read(&record).unwrap();
         let public_key = identity.key.verifying_key();
-        let mut db = crate::storage::Database::open(record.parent().unwrap(), crate::storage::Owner {
-            void_id: "123", public_key: public_key.as_bytes(),
-        }).unwrap();
-        db.initialize_signal("123", &store.load().unwrap().unwrap().key).unwrap();
+        let mut db = crate::storage::Database::open(
+            record.parent().unwrap(),
+            crate::storage::Owner {
+                void_id: "123",
+                public_key: public_key.as_bytes(),
+            },
+        )
+        .unwrap();
+        db.initialize_signal("123", &store.load().unwrap().unwrap().key)
+            .unwrap();
         db.close().unwrap();
 
         assert!(fs::read(&record).unwrap() == protected);
         let loaded = store.load().unwrap().unwrap();
         assert!(matches!(loaded.state, State::Registered(account) if account.void_id == "123"));
         let challenge = b"local account proof test";
-        assert!(public_key.verify_strict(challenge, &loaded.key.sign(challenge)).is_ok());
+        assert!(
+            public_key
+                .verify_strict(challenge, &loaded.key.sign(challenge))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn saved_registration_resumes_signal_enrollment_after_a_lost_acknowledgement() {
+        use crate::{
+            messaging,
+            relay::{
+                Activity, Connection,
+                tests::{next_attempt, receive_json, send_json, verify_account_proof},
+            },
+        };
+        use serde_json::json;
+        use tokio::{net::TcpListener, time::timeout};
+
+        let dir = crate::storage::tests::TestDir::new();
+        let store = Store::from_test_path(dir.0.clone());
+        let identity = Identity::generate().unwrap();
+        let key = identity.key.clone();
+        let verifying_key = identity.key.verifying_key();
+        let lock = store.lock().unwrap();
+        store.save(&identity).unwrap();
+        drop(lock);
+
+        let submitted = Cell::new(0);
+        let mut setup = Setup::default();
+        let registration = setup
+            .run(
+                &store,
+                || {
+                    Ok(LocalApi {
+                        store: &store,
+                        expected_key: verifying_key.to_bytes(),
+                        submitted: &submitted,
+                        answer: Cell::new(Some(Ok(Registration {
+                            void_id: "123".into(),
+                            created_at: "2026-11-16T00:00:00Z".into(),
+                        }))),
+                        hold_record: None,
+                    })
+                },
+                |_| {},
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(registration.void_id, "123");
+        assert!(matches!(
+            store.load().unwrap().unwrap().state,
+            State::RegisteredPendingStorage(_)
+        ));
+        let account_path = dir.0.join("account.dpapi");
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0x3)
+            .open(&account_path)
+            .unwrap();
+        assert!(matches!(
+            enrollment::open_store(&store, "123", &|_| {}),
+            Err(crate::storage::Error::EnrollmentCheckpoint)
+        ));
+        assert!(matches!(
+            store.load().unwrap().unwrap().state,
+            State::RegisteredPendingStorage(_)
+        ));
+        let mut prepared = crate::storage::Database::open_existing(
+            &dir.0,
+            crate::storage::Owner {
+                void_id: "123",
+                public_key: verifying_key.as_bytes(),
+            },
+        )
+        .unwrap();
+        let initial = prepared.prepare_publication().unwrap().unwrap();
+        prepared.close().unwrap();
+        drop(held);
+
+        let (mut db, confirmed) = enrollment::open_store(&store, "123", &|_| {}).unwrap();
+        assert!(!confirmed);
+        let saved = db.prepare_publication().unwrap().unwrap();
+        assert!(saved.id == initial.id && saved.payload_base64 == initial.payload_base64);
+        let encrypted_account = fs::read(dir.0.join("account.dpapi")).unwrap();
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+                .block_on(async {
+                    timeout(Duration::from_secs(15), async {
+                        let listener = TcpListener::from_std(listener).unwrap();
+                        let mut before_restart = next_attempt(&listener).await;
+                        verify_account_proof(&mut before_restart, &verifying_key, "123").await;
+                        send_json(&mut before_restart, json!({"type":"auth_ok", "void_id":"123"})).await;
+                        let first = receive_json(&mut before_restart).await;
+                        assert_eq!(first["type"], "prekeys_publish");
+                        drop(before_restart); // The relay stored the publication and lost the acknowledgement.
+
+                        let mut after_restart = next_attempt(&listener).await;
+                        verify_account_proof(&mut after_restart, &verifying_key, "123").await;
+                        send_json(&mut after_restart, json!({"type":"auth_ok", "void_id":"123"})).await;
+                        assert!(receive_json(&mut after_restart).await == first);
+                        send_json(&mut after_restart, json!({"type":"prekeys_published",
+                            "publication_id":first["publication_id"], "ec_remaining":"20", "kyber_remaining":"20"})).await;
+                    }).await.unwrap();
+                });
+        });
+
+        let connect = || {
+            let (tx, rx) = mpsc::channel();
+            let key = key.clone();
+            let (relay, worker) = Connection::spawn_with_activity(
+                endpoint.clone(),
+                move |id| {
+                    Ok(RegisteredIdentity {
+                        void_id: id.into(),
+                        key: key.clone(),
+                    })
+                },
+                |_| {},
+                move |activity| {
+                    let _ = tx.send(activity);
+                },
+            )
+            .unwrap();
+            assert!(relay.connect("123".into()));
+            let Activity::Online(session) = rx.recv_timeout(Duration::from_secs(6)).unwrap() else {
+                panic!("mock relay did not authenticate the registration");
+            };
+            (relay, worker, session)
+        };
+        let (relay, worker, session) = connect();
+        assert!(matches!(
+            messaging::publish(&mut db, &session),
+            Err(messaging::Error::Relay(
+                crate::relay::RequestError::Interrupted
+            ))
+        ));
+        worker.finish();
+        drop(relay);
+        db.close().unwrap();
+        drop(setup);
+
+        assert!(matches!(inspect(&store).ok(), Some(Startup::Registered(id)) if id == "123"));
+        let registration = Setup::default()
+            .run::<LocalApi<'_>>(
+                &store,
+                || panic!("resumed enrollment must not register again"),
+                |_| {},
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(registration.void_id, "123");
+        let (mut db, confirmed) = enrollment::open_store(&store, "123", &|_| {}).unwrap();
+        assert!(!confirmed);
+        let saved = db.prepare_publication().unwrap().unwrap();
+        assert!(saved.id == initial.id && saved.payload_base64 == initial.payload_base64);
+        let (relay, worker, session) = connect();
+        messaging::publish(&mut db, &session).unwrap();
+        db.close().unwrap();
+        worker.finish();
+        drop(relay);
+        server.join().unwrap();
+
+        let (db, confirmed) = enrollment::open_store(&store, "123", &|_| {}).unwrap();
+        assert!(confirmed);
+        db.close().unwrap();
+        assert_eq!(submitted.get(), 1);
+        assert!(fs::read(dir.0.join("account.dpapi")).unwrap() == encrypted_account);
+
+        let missing = crate::storage::tests::TestDir::new();
+        fs::write(missing.0.join("account.dpapi"), &encrypted_account).unwrap();
+        let missing = Store::from_test_path(missing.0.clone());
+        assert!(matches!(
+            enrollment::open_store(&missing, "123", &|_| {}),
+            Err(crate::storage::Error::MissingSignalStore)
+        ));
+        assert!(!missing.path().join("messages").exists());
     }
 
     struct LocalApi<'a> {
@@ -467,13 +781,20 @@ mod tests {
             let identity = self.store.load().unwrap().unwrap();
             assert_eq!(identity.state.challenge_id(), Some(challenge_id));
             assert!(!self.store.has_confirmation().unwrap());
-            VerifyingKey::from_bytes(&self.expected_key).unwrap().verify_strict(
-                b"validated test challenge",
-                &Signature::from_slice(&STANDARD.decode(signature).unwrap()).unwrap(),
-            ).unwrap();
+            VerifyingKey::from_bytes(&self.expected_key)
+                .unwrap()
+                .verify_strict(
+                    b"validated test challenge",
+                    &Signature::from_slice(&STANDARD.decode(signature).unwrap()).unwrap(),
+                )
+                .unwrap();
             self.submitted.set(self.submitted.get() + 1);
             if let Some((path, held)) = self.hold_record {
-                let handle = OpenOptions::new().read(true).share_mode(0x3).open(path).unwrap();
+                let handle = OpenOptions::new()
+                    .read(true)
+                    .share_mode(0x3)
+                    .open(path)
+                    .unwrap();
                 held.set(Some(handle));
             }
             self.answer.take().unwrap()
@@ -491,26 +812,51 @@ mod tests {
         drop(lock);
 
         let submitted = Cell::new(0);
-        let api = |answer| Ok(LocalApi {
-            store: &store, expected_key, submitted: &submitted, answer: Cell::new(Some(answer)),
-            hold_record: None,
-        });
+        let api = |answer| {
+            Ok(LocalApi {
+                store: &store,
+                expected_key,
+                submitted: &submitted,
+                answer: Cell::new(Some(answer)),
+                hold_record: None,
+            })
+        };
         let mut setup = Setup::default();
-        let rejected = setup.run(&store, || api(Err(Failure::Rejected(Rejection::InvalidProof, None))), |_| {})
-            .err().unwrap();
+        let rejected = setup
+            .run(
+                &store,
+                || api(Err(Failure::Rejected(Rejection::InvalidProof, None))),
+                |_| {},
+            )
+            .err()
+            .unwrap();
         assert!(rejected.retry);
-        assert!(matches!(store.load().unwrap().unwrap().state, State::Prepared));
-        let lost = setup.run(&store, || api(Err(Failure::Timeout)), |_| {}).err().unwrap();
+        assert!(matches!(
+            store.load().unwrap().unwrap().state,
+            State::Prepared
+        ));
+        let lost = setup
+            .run(&store, || api(Err(Failure::Timeout)), |_| {})
+            .err()
+            .unwrap();
         assert!(!lost.retry);
         assert_eq!(submitted.get(), 2);
 
         let reopened = dir.store();
         let saved = reopened.load().unwrap().unwrap();
         assert_eq!(saved.key.verifying_key().to_bytes(), expected_key);
-        assert!(matches!(inspect(&reopened).ok().unwrap(), Startup::Blocked(UNRESOLVED)));
+        assert!(matches!(
+            inspect(&reopened).ok().unwrap(),
+            Startup::Blocked(UNRESOLVED)
+        ));
         let retry = Setup::default()
-            .run::<LocalApi<'_>>(&reopened, || panic!("a pending registration must not reach the API"), |_| {})
-            .err().unwrap();
+            .run::<LocalApi<'_>>(
+                &reopened,
+                || panic!("a pending registration must not reach the API"),
+                |_| {},
+            )
+            .err()
+            .unwrap();
         assert!(!retry.retry);
     }
 
@@ -522,9 +868,14 @@ mod tests {
             let store = Store::from_test_path(path.into());
             assert!(matches!(inspect(&store).ok(), Some(Startup::Registered(id)) if id == "300"));
             let identity = store.load().unwrap().unwrap();
-            assert_eq!(STANDARD.encode(identity.key.verifying_key().as_bytes()), std::env::var(PUBLIC_KEY).unwrap());
-            assert!(matches!(identity.state, State::Registered(account)
-                if account.void_id == "300" && account.created_at == "2026-11-14T00:00:00Z"));
+            assert_eq!(
+                STANDARD.encode(identity.key.verifying_key().as_bytes()),
+                std::env::var(PUBLIC_KEY).unwrap()
+            );
+            assert!(
+                matches!(identity.state, State::RegisteredPendingStorage(account)
+                if account.void_id == "300" && account.created_at == "2026-11-14T00:00:00Z")
+            );
             assert!(!store.has_confirmation().unwrap());
             return;
         }
@@ -541,21 +892,33 @@ mod tests {
         let held = Cell::new(None);
         let record_path = dir.record_path();
         let mut setup = Setup::default();
-        let error = setup.run(&store, || Ok(LocalApi {
-            store: &store,
-            expected_key,
-            submitted: &submitted,
-            answer: Cell::new(Some(Ok(Registration {
-                void_id: "300".into(),
-                created_at: "2026-11-14T00:00:00Z".into(),
-            }))),
-            hold_record: Some((&record_path, &held)),
-        }), |_| {}).err().unwrap();
+        let error = setup
+            .run(
+                &store,
+                || {
+                    Ok(LocalApi {
+                        store: &store,
+                        expected_key,
+                        submitted: &submitted,
+                        answer: Cell::new(Some(Ok(Registration {
+                            void_id: "300".into(),
+                            created_at: "2026-11-14T00:00:00Z".into(),
+                        }))),
+                        hold_record: Some((&record_path, &held)),
+                    })
+                },
+                |_| {},
+            )
+            .err()
+            .unwrap();
         assert!(error.retry && error.saving);
         assert!(store.has_confirmation().unwrap());
         let pending = store.load().unwrap().unwrap();
         assert_eq!(pending.state.challenge_id(), Some(CHALLENGE_ID));
-        assert_eq!(store.load_confirmation(&pending).unwrap().unwrap().void_id, "300");
+        assert_eq!(
+            store.load_confirmation(&pending).unwrap().unwrap().void_id,
+            "300"
+        );
 
         // Lose all in-memory state and retry while the final file is still locked.
         drop(setup);
@@ -565,12 +928,20 @@ mod tests {
         drop(held.take());
 
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "account::tests::confirmed_registration_finishes_after_process_restart"])
+            .args([
+                "--exact",
+                "account::tests::confirmed_registration_finishes_after_process_restart",
+            ])
             .env(DIRECTORY, dir.path())
             .env(PUBLIC_KEY, STANDARD.encode(expected_key))
-            .output().unwrap();
-        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr));
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
         assert_eq!(submitted.get(), 1);
         assert!(matches!(inspect(&store).ok().unwrap(), Startup::Registered(id) if id == "300"));
@@ -582,22 +953,33 @@ mod tests {
         let store = dir.store();
         let lock = store.lock().unwrap();
         let mut identity = Identity::generate().unwrap();
-        identity.state = State::SubmissionPendingFor { challenge_id: CHALLENGE_ID.into() };
+        identity.state = State::SubmissionPendingFor {
+            challenge_id: CHALLENGE_ID.into(),
+        };
         store.save(&identity).unwrap();
-        store.save_confirmation(&identity, &Registration {
-            void_id: "300".into(),
-            created_at: "2026-11-14T00:00:00Z".into(),
-        }).unwrap();
+        store
+            .save_confirmation(
+                &identity,
+                &Registration {
+                    void_id: "300".into(),
+                    created_at: "2026-11-14T00:00:00Z".into(),
+                },
+            )
+            .unwrap();
         let different_challenge = format!("B{}", &CHALLENGE_ID[1..]);
         assert!(valid_token(&different_challenge));
-        identity.state = State::SubmissionPendingFor { challenge_id: different_challenge };
+        identity.state = State::SubmissionPendingFor {
+            challenge_id: different_challenge,
+        };
         store.save(&identity).unwrap();
         drop(lock);
 
         let assert_blocked = || {
             assert!(!inspect(&store).err().unwrap().retry);
             let result = Setup::default().run::<LocalApi<'_>>(
-                &store, || panic!("unverified confirmation must not reach the API"), |_| {},
+                &store,
+                || panic!("unverified confirmation must not reach the API"),
+                |_| {},
             );
             assert!(!result.err().unwrap().retry);
         };

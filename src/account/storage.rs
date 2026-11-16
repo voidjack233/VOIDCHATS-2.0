@@ -41,11 +41,23 @@ pub(super) enum State {
     SubmissionPendingFor { challenge_id: String },
     AlreadyRegistered,
     Registered(Registration),
+    // A new registration can create its first store until its private Signal keys are durable.
+    RegisteredPendingStorage(Registration),
 }
 
 impl State {
+    pub fn registration(&self) -> Option<&Registration> {
+        match self {
+            Self::Registered(account) | Self::RegisteredPendingStorage(account) => Some(account),
+            _ => None,
+        }
+    }
+
     pub fn submission_pending(&self) -> bool {
-        matches!(self, Self::SubmissionPending | Self::SubmissionPendingFor { .. })
+        matches!(
+            self,
+            Self::SubmissionPending | Self::SubmissionPendingFor { .. }
+        )
     }
 
     pub fn challenge_id(&self) -> Option<&str> {
@@ -60,13 +72,20 @@ impl Identity {
     pub fn generate() -> io::Result<Self> {
         let mut seed = Zeroizing::new([0u8; 32]);
         getrandom::fill(seed.as_mut()).map_err(io::Error::other)?;
-        Ok(Self { key: SigningKey::from_bytes(&seed), state: State::Prepared })
+        Ok(Self {
+            key: SigningKey::from_bytes(&seed),
+            state: State::Prepared,
+        })
     }
 }
 
 pub(super) struct Store(PathBuf);
 
 impl Store {
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
     #[cfg(all(test, windows))]
     pub fn from_test_path(path: PathBuf) -> Self {
         Self(path)
@@ -78,9 +97,16 @@ impl Store {
 
     pub fn lock(&self) -> io::Result<File> {
         fs::create_dir_all(&self.0)?;
-        let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
             .open(self.0.join("account.lock"))?;
-        lock.try_lock().map_err(io::Error::other)?;
+        lock.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
         Ok(lock)
     }
 
@@ -89,27 +115,46 @@ impl Store {
             return Ok(None);
         };
         let record = plaintext.strip_prefix(MAGIC).ok_or_else(invalid_record)?;
-        let seed: &[u8; 32] = record.get(..32).and_then(|seed| seed.try_into().ok())
+        let seed: &[u8; 32] = record
+            .get(..32)
+            .and_then(|seed| seed.try_into().ok())
             .ok_or_else(invalid_record)?;
-        let metadata: Metadata = serde_json::from_slice(&record[32..])
-            .map_err(|_| invalid_record())?;
+        let metadata: Metadata =
+            serde_json::from_slice(&record[32..]).map_err(|_| invalid_record())?;
         if metadata.api_base != API_BASE
-            || metadata.state.challenge_id().is_some_and(|id| !valid_token(id))
-            || matches!(&metadata.state, State::Registered(account) if !valid_registration(account))
+            || metadata
+                .state
+                .challenge_id()
+                .is_some_and(|id| !valid_token(id))
+            || metadata
+                .state
+                .registration()
+                .is_some_and(|account| !valid_registration(account))
         {
             return Err(invalid_record());
         }
-        Ok(Some(Identity { key: SigningKey::from_bytes(seed), state: metadata.state }))
+        Ok(Some(Identity {
+            key: SigningKey::from_bytes(seed),
+            state: metadata.state,
+        }))
     }
 
     // Callers hold the account lock when creating or replacing a record.
     pub fn save(&self, identity: &Identity) -> io::Result<()> {
         #[derive(Serialize)]
-        struct Record<'a> { api_base: &'static str, state: &'a State }
+        struct Record<'a> {
+            api_base: &'static str,
+            state: &'a State,
+        }
         // Keep serialization allocations limited to public metadata.
-        let metadata = serde_json::to_vec(&Record { api_base: API_BASE, state: &identity.state })?;
+        let metadata = serde_json::to_vec(&Record {
+            api_base: API_BASE,
+            state: &identity.state,
+        })?;
         let seed = identity.key.as_bytes();
-        let mut plaintext = Zeroizing::new(Vec::with_capacity(MAGIC.len() + seed.len() + metadata.len()));
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(
+            MAGIC.len() + seed.len() + metadata.len(),
+        ));
         plaintext.extend_from_slice(MAGIC);
         plaintext.extend_from_slice(seed);
         plaintext.extend_from_slice(&metadata);
@@ -142,7 +187,9 @@ impl Store {
         let Some(plaintext) = read_protected(&self.0.join(CONFIRMATION_FILE))? else {
             return Ok(None);
         };
-        let record = plaintext.strip_prefix(CONFIRMATION_MAGIC).ok_or_else(invalid_record)?;
+        let record = plaintext
+            .strip_prefix(CONFIRMATION_MAGIC)
+            .ok_or_else(invalid_record)?;
         let receipt: Confirmation = serde_json::from_slice(record).map_err(|_| invalid_record())?;
         if receipt.api_base != API_BASE
             || Some(receipt.challenge_id.as_str()) != identity.state.challenge_id()
@@ -163,8 +210,13 @@ impl Store {
         let encrypted = dpapi(plaintext, true)?;
         let mut random = [0; 8];
         getrandom::fill(&mut random).map_err(io::Error::other)?;
-        let temp = self.0.join(format!("account-{:016x}.tmp", u64::from_ne_bytes(random)));
-        let mut file = OpenOptions::new().create_new(true).write(true).open(&temp)?;
+        let temp = self
+            .0
+            .join(format!("account-{:016x}.tmp", u64::from_ne_bytes(random)));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
         let write = file.write_all(&encrypted).and_then(|()| file.sync_all());
         drop(file);
         let save = write.and_then(|()| move_file(&temp, &self.0.join(name), true));
@@ -190,7 +242,10 @@ fn read_protected(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
 }
 
 fn invalid_record() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "Invalid account identity record")
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Invalid account identity record",
+    )
 }
 
 #[cfg(all(test, windows))]
@@ -204,7 +259,10 @@ pub(super) mod tests {
         pub fn new() -> Self {
             let mut random = [0; 16];
             getrandom::fill(&mut random).unwrap();
-            let path = std::env::temp_dir().join(format!("void-native-test-{:032x}", u128::from_ne_bytes(random)));
+            let path = std::env::temp_dir().join(format!(
+                "void-native-test-{:032x}",
+                u128::from_ne_bytes(random)
+            ));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
@@ -238,8 +296,13 @@ pub(super) mod tests {
         const KEY: &str = "VOID_NATIVE_TEST_RESTART_PUBLIC";
         if let Some(directory) = std::env::var_os(DIR) {
             let identity = Store(directory.into()).load().unwrap().unwrap();
-            assert_eq!(STANDARD.encode(identity.key.verifying_key().as_bytes()), std::env::var(KEY).unwrap());
-            assert!(matches!(identity.state, State::Registered(account) if account.void_id == "300"));
+            assert_eq!(
+                STANDARD.encode(identity.key.verifying_key().as_bytes()),
+                std::env::var(KEY).unwrap()
+            );
+            assert!(
+                matches!(identity.state, State::Registered(account) if account.void_id == "300")
+            );
             return;
         }
 
@@ -249,15 +312,29 @@ pub(super) mod tests {
         assert!(store.lock().is_err());
         let mut identity = Identity::generate().unwrap();
         store.save(&identity).unwrap();
-        identity.state = State::Registered(Registration { void_id: "300".into(), created_at: "2026-11-14T00:00:00Z".into() });
+        identity.state = State::Registered(Registration {
+            void_id: "300".into(),
+            created_at: "2026-11-14T00:00:00Z".into(),
+        });
         store.save(&identity).unwrap();
         drop(lock);
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "account::storage::tests::isolated_identity_survives_a_process_restart"])
+            .args([
+                "--exact",
+                "account::storage::tests::isolated_identity_survives_a_process_restart",
+            ])
             .env(DIR, &dir.0)
-            .env(KEY, STANDARD.encode(identity.key.verifying_key().as_bytes()))
-            .output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            .env(
+                KEY,
+                STANDARD.encode(identity.key.verifying_key().as_bytes()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
     }
 }

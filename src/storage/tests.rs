@@ -438,6 +438,41 @@ fn v4_ciphertext_history_and_account_binding_survive_v5_migration() {
 }
 
 #[test]
+fn publication_receipt_prevents_recreating_missing_signal_identity() {
+    let root = TestDir::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let public = key.verifying_key();
+    let owner = Owner {
+        void_id: "41",
+        public_key: public.as_bytes(),
+    };
+    let mut db = Database::open(&root.0, owner).unwrap();
+    db.initialize_signal(owner.void_id, &key).unwrap();
+    let publication = db.prepare_publication().unwrap().unwrap();
+    db.confirm_publication(&publication.id).unwrap();
+
+    // Model a damaged fixture with its receipt intact and only the pristine identity slot present.
+    db.connection
+        .execute_batch(
+            "DELETE FROM signal_prekeys;
+         DELETE FROM signal_local_identity;
+         INSERT INTO signal_local_identity (slot, device_id, next_prekey_id) VALUES (1, 1, 1);",
+        )
+        .unwrap();
+    assert!(matches!(
+        db.initialize_signal(owner.void_id, &key),
+        Err(Error::SignalState)
+    ));
+    assert!(
+        !db.connection
+            .prepare("SELECT 1 FROM signal_prekeys")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    );
+}
+
+#[test]
 fn request_promotion_and_first_reply_commit_together() {
     let root = TestDir::new();
     let mut db = Database::open(&root.0, OWNER).unwrap();

@@ -46,6 +46,8 @@ pub(crate) enum Error {
     SqlCipherUnavailable,
     Unreadable,
     WrongAccount,
+    MissingSignalStore,
+    EnrollmentCheckpoint,
     UnsupportedSchema,
     Database,
     EventConflict,
@@ -74,6 +76,12 @@ impl Error {
             }
             Self::WrongAccount => {
                 "The encrypted database belongs to a different VOID account. Use the storage for the account registered on this device."
+            }
+            Self::MissingSignalStore => {
+                "The saved encryption store is missing. Restore the original VOID data for this account to continue."
+            }
+            Self::EnrollmentCheckpoint => {
+                "VOID could not save enrollment progress. Your VOID-ID and encryption keys are saved. Try again."
             }
             Self::UnsupportedSchema => {
                 "This build cannot open the local database version. Use a compatible VOID build."
@@ -124,6 +132,14 @@ pub(crate) struct Database {
 
 impl Database {
     pub(crate) fn open(root: &Path, owner: Owner<'_>) -> Result<Self> {
+        Self::open_local(root, owner, true)
+    }
+
+    pub(crate) fn open_existing(root: &Path, owner: Owner<'_>) -> Result<Self> {
+        Self::open_local(root, owner, false)
+    }
+
+    fn open_local(root: &Path, owner: Owner<'_>, allow_create: bool) -> Result<Self> {
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -137,6 +153,9 @@ impl Database {
 
         let directory = root.join("messages");
         if !entry_exists(&directory)? {
+            if !allow_create {
+                return Err(Error::MissingSignalStore);
+            }
             // Publish the completed pair as a directory so a crash cannot expose a half-created store.
             // The separate staging directory is only used before the first successful publication.
             let staging = root.join("messages.initializing");
