@@ -909,7 +909,9 @@ fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessa
                 heading = time.calendar_label();
             }
             StoredMessage {
-                body: message.body.into(),
+                body: storage::messaging::without_edge_blank_lines(&message.body)
+                    .unwrap_or_default()
+                    .into(),
                 day: heading.into(),
                 time: time
                     .as_ref()
@@ -1064,11 +1066,12 @@ pub(crate) mod tests {
         let publication = db.prepare_publication().unwrap().unwrap();
         db.confirm_publication(&publication.id).unwrap();
         let id = db.create_conversation("123", 100).unwrap();
+        let stored_body = "\nStored test message\n\nSecond paragraph\n\n\n";
         db.save_message(&Message {
             id: "test-1".into(),
             conversation_id: id,
             direction: Direction::Incoming,
-            body: "Stored test message".into(),
+            body: stored_body.into(),
             created_at: 200,
             delivery_state: DeliveryState::Received,
         })
@@ -1105,14 +1108,14 @@ pub(crate) mod tests {
                 let row = ui.get_stored_chats().row_data(0).unwrap();
                 assert!(row.unread);
                 assert_eq!(row.title, "Contact");
-                assert_eq!(row.preview, "Stored test message");
+                assert_eq!(row.preview, "Stored test message Second paragraph");
                 ui.invoke_select_stored_conversation(id.to_string().into());
             } else if ui.get_selected_conversation() == id.to_string()
                 && !ui.get_conversation_loading()
             {
                 assert_eq!(
                     ui.get_stored_messages().row_data(0).unwrap().body,
-                    "Stored test message"
+                    "Stored test message\n\nSecond paragraph"
                 );
                 assert_eq!(ui.get_stored_draft(), "Earlier draft");
                 if !ui.get_window_foreground() {
@@ -1146,6 +1149,7 @@ pub(crate) mod tests {
         worker.finish();
 
         let db = Database::open(&temp.0, owner).unwrap();
+        assert_eq!(db.messages(id).unwrap()[0].body, stored_body);
         assert_eq!(db.draft(id).unwrap().as_deref(), Some("Latest edit"));
         assert_eq!(db.conversations(false).unwrap().len(), 2);
     }

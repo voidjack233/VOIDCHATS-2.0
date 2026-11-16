@@ -5,7 +5,7 @@ use super::{
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 
-fn outgoing_body(body: &str) -> Option<&str> {
+pub(crate) fn without_edge_blank_lines(body: &str) -> Option<&str> {
     let first = body.find(|c: char| !c.is_whitespace())?;
     let last = body.rfind(|c: char| !c.is_whitespace())?;
     // Keep indentation and internal spacing. Drop only blank lines around the message.
@@ -105,7 +105,7 @@ impl Database {
         submitted: &str,
         created_at: i64,
     ) -> Result<(String, bool)> {
-        let body = outgoing_body(submitted).ok_or(Error::SignalEnvelope)?;
+        let body = without_edge_blank_lines(submitted).ok_or(Error::SignalEnvelope)?;
         if !super::signal::valid_content(body, created_at) {
             return Err(Error::SignalEnvelope);
         }
