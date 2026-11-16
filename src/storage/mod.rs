@@ -1,3 +1,4 @@
+pub(crate) mod account_status;
 mod events;
 pub(crate) mod messaging;
 mod records;
@@ -30,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v4.sql"),
     include_str!("schema_v5.sql"),
     include_str!("schema_v6.sql"),
+    include_str!("schema_v7.sql"),
 ];
 
 #[derive(Clone, Copy)]
@@ -46,6 +48,8 @@ pub(crate) enum Error {
     SqlCipherUnavailable,
     Unreadable,
     WrongAccount,
+    InvalidAccountStatusPeer,
+    PeerDeleted,
     MissingSignalStore,
     EnrollmentCheckpoint,
     UnsupportedSchema,
@@ -77,6 +81,8 @@ impl Error {
             Self::WrongAccount => {
                 "The encrypted database belongs to a different VOID account. Use the storage for the account registered on this device."
             }
+            Self::InvalidAccountStatusPeer => "The peer account status has an invalid VOID-ID.",
+            Self::PeerDeleted => "This user account has been deleted.",
             Self::MissingSignalStore => {
                 "The saved encryption store is missing. Restore the original VOID data for this account to continue."
             }

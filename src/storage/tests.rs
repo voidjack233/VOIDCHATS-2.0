@@ -199,7 +199,7 @@ fn migrations_and_message_transactions_roll_back_and_enforce_foreign_keys() {
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap()
     };
-    assert_eq!(version(&db.connection), 6);
+    assert_eq!(version(&db.connection), 7);
     assert!(db.save_draft(999, "missing conversation").is_err());
     assert!(db.set_request(999, true).is_err());
     assert!(db.save_message(&sample_message(999)).is_err());
@@ -343,7 +343,7 @@ fn existing_v1_history_survives_current_migrations_and_fk_diagnostics_detect_orp
     connection.close().unwrap();
 
     let db = Database::open(&root.0, OWNER).unwrap();
-    assert_eq!(schema_version(&db.connection, 6).unwrap(), 6);
+    assert_eq!(schema_version(&db.connection, 7).unwrap(), 7);
     assert_eq!(db.messages(1).unwrap()[0].body, "Existing body");
     assert_eq!(db.draft(1).unwrap().as_deref(), Some("Existing draft"));
     db.connection
@@ -435,6 +435,84 @@ fn v4_ciphertext_history_and_account_binding_survive_v5_migration() {
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].retry_event, event);
     assert_eq!(db.messages(conversation).unwrap()[0].id, "legacy-out");
+}
+
+#[test]
+fn confirmed_peer_deletion_is_terminal_and_preserves_history_and_outbox() {
+    use super::account_status::{AccountStatus, VerifiedPeerStatus};
+    let root = TestDir::new();
+    let mut db = Database::open(&root.0, OWNER).unwrap();
+    let chat = db.create_conversation("123", 100).unwrap();
+    let request = db.create_conversation("456", 100).unwrap();
+    db.set_request(request, true).unwrap();
+    db.save_message(&sample_message(chat)).unwrap();
+    db.save_draft(request, "Reply draft").unwrap();
+    let (event, _) = db.queue_outgoing(chat, "Pending text", 150).unwrap();
+    db.commit_outgoing(chat, &event, |_| {
+        Ok((
+            Message {
+                id: "encrypted-pending".into(),
+                conversation_id: chat,
+                direction: Direction::Outgoing,
+                body: "Pending text".into(),
+                created_at: 150,
+                delivery_state: DeliveryState::Pending,
+            },
+            vec![1, 2, 3],
+        ))
+    })
+    .unwrap();
+
+    assert_eq!(
+        db.conversation_account_status(chat).unwrap(),
+        AccountStatus::Unknown
+    );
+    db.record_verified_peer_status("123", VerifiedPeerStatus::Active)
+        .unwrap();
+    assert_eq!(
+        db.peer_account_status("123").unwrap(),
+        AccountStatus::Active
+    );
+    db.record_verified_peer_status("123", VerifiedPeerStatus::Deleted)
+        .unwrap();
+    db.record_verified_peer_status("456", VerifiedPeerStatus::Deleted)
+        .unwrap();
+    // An older result arriving on a replacement connection cannot supersede Deleted.
+    db.record_verified_peer_status("123", VerifiedPeerStatus::Active)
+        .unwrap();
+    db.close().unwrap();
+
+    let mut db = Database::open(&root.0, OWNER).unwrap();
+    db.recover_interrupted_sends().unwrap();
+    for id in [chat, request] {
+        assert_eq!(
+            db.conversation_account_status(id).unwrap(),
+            AccountStatus::Deleted
+        );
+        assert!(matches!(
+            db.queue_outgoing(id, "Reply draft", 200),
+            Err(Error::PeerDeleted)
+        ));
+    }
+    assert!(matches!(
+        crate::messaging::send(&mut db, None, &event),
+        Err(crate::messaging::Error::Storage(Error::PeerDeleted))
+    ));
+    assert_eq!(db.conversations(false).unwrap()[0].id, chat);
+    assert_eq!(db.conversations(true).unwrap()[0].id, request);
+    assert_eq!(db.messages(chat).unwrap()[0].body, BODY);
+    assert_eq!(
+        db.messages(chat).unwrap()[1].delivery_state,
+        DeliveryState::Pending
+    );
+    assert_eq!(db.conversation_timeline(chat).unwrap().len(), 2);
+    assert!(db.conversation_timeline(request).unwrap().is_empty());
+    assert_eq!(db.outgoing_operation(&event).unwrap().state, "pending");
+    assert_eq!(
+        db.committed_outgoing(&event).unwrap().unwrap().payload,
+        [1, 2, 3]
+    );
+    assert_eq!(db.draft(request).unwrap().as_deref(), Some("Reply draft"));
 }
 
 #[test]

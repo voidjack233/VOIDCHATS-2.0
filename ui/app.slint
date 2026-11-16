@@ -495,6 +495,7 @@ export component AppWindow inherits Window {
     in property <string> selected-conversation;
     in property <string> conversation-title;
     in property <bool> conversation-is-request;
+    in property <bool> conversation-peer-deleted;
     in-out property <bool> conversation-loading;
     in-out property <bool> creating-conversation;
     in-out property <string> conversation-error;
@@ -511,11 +512,38 @@ export component AppWindow inherits Window {
     callback load-stored-draft(string, string);
     callback report-draft-saved(string, int, bool);
 
+    in-out property <string> permanent-deletion-phrase;
+    out property <bool> permanent-deletion-open: false;
+    out property <bool> permanent-deletion-confirmed:
+        root.permanent-deletion-open && root.permanent-deletion-phrase == "DELETE";
+    private property <bool> permanent-deletion-supported: false;
+    out property <bool> can-permanently-delete:
+        root.permanent-deletion-supported && root.permanent-deletion-confirmed;
+    callback open-permanent-deletion();
+    callback cancel-permanent-deletion();
+
+    open-permanent-deletion => {
+        if root.account-void-id != "" {
+            root.permanent-deletion-phrase = "";
+            root.permanent-deletion-open = true;
+        }
+    }
+    cancel-permanent-deletion => {
+        root.permanent-deletion-open = false;
+        root.permanent-deletion-phrase = "";
+    }
+
     private property <[StoredConversation]> visible-conversations: root.section == "Requests"
         ? root.stored-requests : root.stored-chats;
     private property <bool> show-conversation: root.selected-conversation != "" && !root.creating-conversation
         && ((root.section == "Requests" && root.conversation-is-request)
             || (root.section == "Chats" && !root.conversation-is-request));
+    out property <bool> conversation-can-compose: root.show-conversation && !root.conversation-peer-deleted;
+    out property <string> conversation-account-notice: root.show-conversation && root.conversation-peer-deleted
+        ? "This user account has been deleted." : "";
+
+    changed section => { root.cancel-permanent-deletion(); }
+    changed settings-section => { root.cancel-permanent-deletion(); }
 
     function navigate(section: string) {
         if root.section != section {
@@ -905,18 +933,74 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                VerticalLayout {
-                    padding: root.chat-gutter;
-                    SettingDetail {
-                        label: root.settings-section == "Appearance" ? "Theme"
-                            : root.settings-section == "Account" ? "VOID-ID" : "VOID";
-                        value: root.settings-section == "Appearance" ? "Dark"
-                            : root.settings-section == "Account" ? root.account-void-id : "Native app";
-                        description: root.settings-section == "Appearance" ? "Uses the VOID dark palette."
-                            : root.settings-section == "Account" ? "Your account is stored on this device."
-                            : "";
+                ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.visible-width;
+                    VerticalLayout {
+                        padding: root.chat-gutter;
+                        spacing: 16px;
+                        SettingDetail {
+                            label: root.settings-section == "Appearance" ? "Theme"
+                                : root.settings-section == "Account" ? "VOID-ID" : "VOID";
+                            value: root.settings-section == "Appearance" ? "Dark"
+                                : root.settings-section == "Account" ? root.account-void-id : "Native app";
+                            description: root.settings-section == "Appearance" ? "Uses the VOID dark palette."
+                                : root.settings-section == "Account" ? "Your account is stored on this device."
+                                : "";
+                        }
+                        if root.settings-section == "Account" && root.account-void-id != "" && !root.permanent-deletion-open: HorizontalLayout {
+                            Action {
+                                label: "Delete account permanently";
+                                clicked => { root.open-permanent-deletion(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        if root.settings-section == "Account" && root.permanent-deletion-open: VerticalLayout {
+                            spacing: 12px;
+                            Text {
+                                text: "Delete account permanently";
+                                color: Theme.primary;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "Your VOID-ID will be permanently deactivated. Other users will no longer be able to message you. This cannot be undone.";
+                                color: Theme.primary;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "Previous conversations will remain on other users’ devices. The server’s deletion protocol will handle queued messages and public prekeys.";
+                                color: Theme.secondary;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "VOID will remove this device’s credentials, Signal keys, and conversations after the server confirms deletion.";
+                                color: Theme.secondary;
+                                wrap: word-wrap;
+                            }
+                            Text { text: "Type DELETE to confirm"; color: Theme.primary; font-weight: 600; }
+                            LineEdit {
+                                accessible-label: "Type DELETE to confirm permanent account deletion";
+                                height: 44px;
+                                text <=> root.permanent-deletion-phrase;
+                            }
+                            Text {
+                                text: "Permanent deletion is unavailable until the server supports it.";
+                                color: Theme.secondary;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Action { label: "Cancel"; clicked => { root.cancel-permanent-deletion(); } }
+                                Rectangle { horizontal-stretch: 1; }
+                                Action {
+                                    label: "Delete account permanently";
+                                    enabled: root.can-permanently-delete;
+                                }
+                            }
+                        }
                     }
-                    Rectangle { vertical-stretch: 1; }
                 }
             }
 
@@ -1024,7 +1108,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 width: min(380px, (chat-pane.width - 2 * root.chat-gutter) * 0.82,
                                     max(body.preferred-width, time.preferred-width, state.preferred-width,
-                                        message.retry-event != "" ? 84px : 0px) + 20px);
+                                        !root.conversation-peer-deleted && message.retry-event != "" ? 84px : 0px) + 20px);
                                 min-height: bubble.min-height;
                                 background: message.outgoing ? Theme.outgoing : Theme.elevated;
                                 border-radius: 12px;
@@ -1041,7 +1125,7 @@ export component AppWindow inherits Window {
                                         horizontal-alignment: right;
                                         wrap: word-wrap;
                                     }
-                                    if message.retry-event != "": HorizontalLayout {
+                                    if !root.conversation-peer-deleted && message.retry-event != "": HorizontalLayout {
                                         Rectangle { horizontal-stretch: 1; }
                                         Action {
                                             label: "Resend";
@@ -1056,7 +1140,13 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                VerticalLayout {
+                if root.conversation-account-notice != "": VerticalLayout {
+                    padding: root.chat-gutter;
+                    spacing: 4px;
+                    Text { text: root.conversation-account-notice; color: Theme.primary; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+                    Text { text: "You can no longer send messages to this account."; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
+                }
+                if root.conversation-can-compose: VerticalLayout {
                     padding: 12px;
                     padding-left: root.chat-gutter;
                     padding-right: root.chat-gutter;

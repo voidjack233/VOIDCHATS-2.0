@@ -1,4 +1,7 @@
-use super::{Database, DeliveryState, Error, Result};
+use super::{
+    Database, DeliveryState, Error, Result,
+    account_status::{self, AccountStatus},
+};
 use rusqlite::{OptionalExtension, params};
 
 pub(crate) fn new_event_id() -> Result<String> {
@@ -62,7 +65,11 @@ impl Database {
         self.connection.execute(
             "UPDATE outgoing_operations SET state = CASE
                WHEN EXISTS (SELECT 1 FROM outbox WHERE outbox.event_id = outgoing_operations.event_id)
-               THEN 'unconfirmed' ELSE 'failed' END WHERE state = 'pending'", [],
+               THEN 'unconfirmed' ELSE 'failed' END WHERE state = 'pending'
+               AND NOT EXISTS (
+                 SELECT 1 FROM conversations c JOIN peer_account_status a ON a.void_id = c.peer_void_id
+                 WHERE c.id = outgoing_operations.conversation_id AND a.status = 'deleted'
+               )", [],
         )?;
         Ok(())
     }
@@ -79,6 +86,9 @@ impl Database {
         }
         let event_id = new_event_id()?;
         let promoted = self.write(|tx| {
+            if account_status::conversation_status(tx, conversation_id)? == AccountStatus::Deleted {
+                return Err(Error::PeerDeleted);
+            }
             tx.execute("INSERT INTO outgoing_operations (event_id, conversation_id, body, created_at, state)
                 VALUES (?1, ?2, ?3, ?4, 'pending')", params![event_id, conversation_id, body, created_at])?;
             tx.execute("DELETE FROM drafts WHERE conversation_id = ?1 AND body = ?2", params![conversation_id, body])?;

@@ -2,6 +2,7 @@ use crate::{AppWindow, StoredContact, StoredConversation, StoredMessage, account
 use crate::{
     messaging,
     relay::{Activity, Session},
+    storage::account_status::{AccountStatus, VerifiedPeerStatus},
 };
 use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 use std::{
@@ -21,6 +22,7 @@ enum Command {
     Resend(String),
     RetryMessaging,
     Relay(Activity),
+    VerifiedPeerStatus(String, VerifiedPeerStatus),
     Close,
 }
 
@@ -30,6 +32,18 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
+    /// Entry point for a future adapter after it authenticates and correlates a status response.
+    #[allow(dead_code, reason = "The backend account-status contract is pending")]
+    pub(crate) fn record_verified_peer_status(
+        &self,
+        peer: String,
+        status: VerifiedPeerStatus,
+    ) -> io::Result<()> {
+        self.sender
+            .send(Command::VerifiedPeerStatus(peer, status))
+            .map_err(|_| io::Error::other("Local storage worker stopped"))
+    }
+
     pub(crate) fn relay_activity(&self) -> impl Fn(Activity) + Send + 'static {
         let sender = self.sender.clone();
         move |activity| {
@@ -205,6 +219,27 @@ fn bind_with(
                         {
                             relay = None;
                             messaging_ready = false;
+                        }
+                    }
+                    Command::VerifiedPeerStatus(peer, status) => {
+                        if let Some(db) = &database {
+                            match db.record_verified_peer_status(&peer, status) {
+                                Ok(()) => {
+                                    if let Some(id) = selected
+                                        && let Ok(status) = db.conversation_account_status(id)
+                                    {
+                                        let id = id.to_string();
+                                        let _ = weak.upgrade_in_event_loop(move |ui| {
+                                            if ui.get_selected_conversation() == id {
+                                                ui.set_conversation_peer_deleted(
+                                                    status == AccountStatus::Deleted,
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+                                Err(error) => show_messaging_result(&weak, Err(error.into())),
+                            }
                         }
                     }
                     Command::RetryMessaging => {
@@ -455,7 +490,7 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_storage_ready() || ui.get_send_busy() {
+        if !ui.get_storage_ready() || ui.get_send_busy() || ui.get_conversation_peer_deleted() {
             return;
         }
         let Ok(id) = ui.get_selected_conversation().parse() else {
@@ -480,7 +515,11 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_messaging_ready() || ui.get_send_busy() || event_id.is_empty() {
+        if !ui.get_messaging_ready()
+            || ui.get_send_busy()
+            || event_id.is_empty()
+            || ui.get_conversation_peer_deleted()
+        {
             return;
         }
         ui.set_send_busy(true);
@@ -653,6 +692,7 @@ fn conversation_model(list: Vec<storage::Conversation>) -> ModelRc<StoredConvers
 
 struct Detail {
     conversation: storage::Conversation,
+    account_status: AccountStatus,
     messages: Vec<storage::messaging::TimelineMessage>,
     draft: String,
 }
@@ -661,6 +701,7 @@ impl Detail {
     fn show(self, ui: &AppWindow) {
         let Self {
             conversation,
+            account_status,
             messages,
             draft,
         } = self;
@@ -672,6 +713,7 @@ impl Detail {
                 .into(),
         );
         ui.set_conversation_is_request(conversation.is_request);
+        ui.set_conversation_peer_deleted(account_status == AccountStatus::Deleted);
         show_messages(ui, messages);
         ui.invoke_load_stored_draft(ui.get_selected_conversation(), draft.into());
     }
@@ -680,6 +722,7 @@ impl Detail {
 fn load_conversation(db: &storage::Database, id: i64) -> storage::Result<Detail> {
     Ok(Detail {
         conversation: db.conversation(id)?,
+        account_status: db.conversation_account_status(id)?,
         messages: db.conversation_timeline(id)?,
         draft: db.draft(id)?.unwrap_or_default(),
     })
@@ -946,6 +989,173 @@ mod tests {
         assert!(!ui.get_send_busy());
         drop(ui);
         worker.finish();
+    }
+
+    #[test]
+    fn verified_deletion_keeps_chats_and_requests_readable_in_slint() {
+        if !in_test_process(
+            "storage_ui::tests::verified_deletion_keeps_chats_and_requests_readable_in_slint",
+        ) {
+            return;
+        }
+        use crate::{relay::ConnectionStatus, report_relay_status};
+        use std::rc::Rc;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let public = key.verifying_key();
+        let owner = Owner {
+            void_id: "41",
+            public_key: public.as_bytes(),
+        };
+        let temp = TestDir::new();
+        let mut db = Database::open(&temp.0, owner).unwrap();
+        let chat = db.create_conversation("123", 100).unwrap();
+        let request = db.create_conversation("456", 100).unwrap();
+        db.set_request(request, true).unwrap();
+        db.record_verified_peer_status("123", VerifiedPeerStatus::Active)
+            .unwrap();
+        for id in [chat, request] {
+            db.save_message(&Message {
+                id: format!("incoming-{id}"),
+                conversation_id: id,
+                direction: Direction::Incoming,
+                body: "Saved incoming message".into(),
+                created_at: 120,
+                delivery_state: DeliveryState::Received,
+            })
+            .unwrap();
+        }
+        db.save_draft(chat, "Keep this draft").unwrap();
+        let (event, _) = db
+            .queue_outgoing(chat, "Existing outgoing message", 130)
+            .unwrap();
+        db.close().unwrap();
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_account_void_id(owner.void_id.into());
+        ui.set_setup_page(0);
+        let root = temp.0.clone();
+        let worker = Rc::new(bind_fixture(&ui, move |_| (root.clone(), key.clone())).unwrap());
+        worker.opener()(&ui);
+        let post_status = worker.clone();
+        let relay_status = report_relay_status(&ui);
+        let weak = ui.as_weak();
+        let step = Cell::new(0);
+        let poll = Timer::default();
+        let (chat, request) = (chat.to_string(), request.to_string());
+        let event: slint::SharedString = event.into();
+        poll.start(TimerMode::Repeated, Duration::from_millis(10), move || {
+            let ui = weak.upgrade().unwrap();
+            match step.get() {
+                0 if ui.get_storage_ready() => {
+                    ui.set_section("Requests".into());
+                    ui.invoke_select_stored_conversation(request.clone().into());
+                    step.set(1);
+                }
+                1 if ui.get_selected_conversation() == request
+                    && !ui.get_conversation_loading() =>
+                {
+                    assert!(ui.get_conversation_can_compose());
+                    assert!(ui.get_conversation_account_notice().is_empty());
+                    ui.set_section("Chats".into());
+                    ui.invoke_select_stored_conversation(chat.clone().into());
+                    step.set(2);
+                }
+                2 if ui.get_selected_conversation() == chat && !ui.get_conversation_loading() => {
+                    assert!(ui.get_conversation_can_compose());
+                    assert!(ui.get_conversation_account_notice().is_empty());
+                    for peer in ["123", "456"] {
+                        post_status
+                            .record_verified_peer_status(peer.into(), VerifiedPeerStatus::Deleted)
+                            .unwrap();
+                    }
+                    step.set(3);
+                }
+                3 if ui.get_conversation_peer_deleted() => {
+                    assert!(!ui.get_conversation_can_compose());
+                    assert_eq!(
+                        ui.get_conversation_account_notice(),
+                        "This user account has been deleted."
+                    );
+                    assert_eq!(
+                        ui.get_stored_messages().row_data(0).unwrap().body,
+                        "Saved incoming message"
+                    );
+                    assert_eq!(ui.get_stored_messages().row_count(), 2);
+                    assert_eq!(ui.get_stored_draft(), "Keep this draft");
+                    ui.set_messaging_ready(true);
+                    ui.invoke_send_message();
+                    ui.invoke_resend_message(event.clone());
+                    assert!(!ui.get_send_busy());
+                    relay_status(ConnectionStatus::Reconnecting);
+                    relay_status(ConnectionStatus::Connected);
+                    step.set(4);
+                }
+                4 if ui.get_connection_status() == "Connected" => {
+                    assert!(ui.get_conversation_peer_deleted());
+                    ui.set_section("Requests".into());
+                    ui.invoke_select_stored_conversation(request.clone().into());
+                    step.set(5);
+                }
+                5 if ui.get_selected_conversation() == request
+                    && !ui.get_conversation_loading() =>
+                {
+                    slint::quit_event_loop().unwrap();
+                }
+                _ => (),
+            }
+        });
+        let watchdog = Timer::default();
+        watchdog.start(TimerMode::SingleShot, Duration::from_secs(4), || {
+            slint::quit_event_loop().unwrap();
+        });
+        slint::run_event_loop_until_quit().unwrap();
+        poll.stop();
+        assert_eq!(ui.get_section(), "Requests");
+        assert!(ui.get_conversation_is_request());
+        assert!(!ui.get_conversation_can_compose());
+        assert_eq!(
+            ui.get_conversation_account_notice(),
+            "This user account has been deleted."
+        );
+        assert_eq!(ui.get_stored_messages().row_count(), 1);
+        drop(poll);
+        drop(ui);
+        Rc::into_inner(worker).unwrap().finish();
+    }
+
+    #[test]
+    fn permanent_deletion_requires_exact_text_and_remains_unavailable() {
+        if !in_test_process(
+            "storage_ui::tests::permanent_deletion_requires_exact_text_and_remains_unavailable",
+        ) {
+            return;
+        }
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_account_void_id("41".into());
+        ui.set_setup_page(0);
+        ui.set_section("Settings".into());
+        ui.set_stored_draft("Untouched draft".into());
+
+        ui.invoke_open_permanent_deletion();
+        assert!(ui.get_permanent_deletion_open());
+        for phrase in ["", "delete", "Delete", "DELETE ", " DELETE", "DELETE\n"] {
+            ui.set_permanent_deletion_phrase(phrase.into());
+            assert!(!ui.get_permanent_deletion_confirmed());
+            assert!(!ui.get_can_permanently_delete());
+        }
+        ui.set_permanent_deletion_phrase("DELETE".into());
+        assert!(ui.get_permanent_deletion_confirmed());
+        assert!(!ui.get_can_permanently_delete());
+
+        ui.invoke_cancel_permanent_deletion();
+        assert!(!ui.get_permanent_deletion_open());
+        assert!(ui.get_permanent_deletion_phrase().is_empty());
+        assert_eq!(ui.get_account_void_id(), "41");
+        assert_eq!(ui.get_stored_draft(), "Untouched draft");
+        ui.invoke_open_permanent_deletion();
+        assert!(!ui.get_permanent_deletion_confirmed());
     }
 
     #[test]

@@ -121,6 +121,11 @@ fn lookup(session: &Session, void_id: &str) -> Result<TrustedPeer> {
 
 pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str) -> Result<()> {
     let operation = db.outgoing_operation(event_id)?;
+    if db.peer_account_status(&operation.peer)?
+        == crate::storage::account_status::AccountStatus::Deleted
+    {
+        return Err(StorageError::PeerDeleted.into());
+    }
     if operation.state == "sent" {
         return Ok(());
     }
