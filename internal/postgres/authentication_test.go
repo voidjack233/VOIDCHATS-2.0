@@ -34,7 +34,7 @@ func TestAuthenticationKeyUsesBoundIDAndCopiesResult(t *testing.T) {
 	key := bytes.Repeat([]byte{42}, 32)
 	ctx := context.WithValue(context.Background(), struct{}{}, "lookup")
 	reader := authenticationQuery(func(got context.Context, sql string, args ...any) pgx.Row {
-		if got != ctx || sql != `SELECT auth_public_key FROM public.accounts WHERE void_id = $1` || len(args) != 1 || args[0] != int64(123) {
+		if got != ctx || sql != `SELECT auth_public_key FROM public.accounts WHERE void_id = $1 AND deleted_at IS NULL` || len(args) != 1 || args[0] != int64(123) {
 			t.Fatal("authentication lookup did not use the request context and bound VOID-ID")
 		}
 		return authenticationRow{key: key}

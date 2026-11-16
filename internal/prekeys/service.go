@@ -114,7 +114,7 @@ func safeError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for _, known := range []error{ErrInvalid, ErrConflict, ErrCapacity, ErrExpired, ErrUnavailable} {
+	for _, known := range []error{ErrInvalid, ErrConflict, ErrCapacity, ErrExpired, ErrUnavailable, account.ErrDeleted} {
 		if errors.Is(err, known) {
 			return known
 		}

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 )
 
@@ -144,7 +145,7 @@ func safeError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for _, known := range []error{ErrInvalid, ErrNotFound, ErrDuplicate, ErrCapacity} {
+	for _, known := range []error{ErrInvalid, ErrNotFound, ErrDuplicate, ErrCapacity, account.ErrDeleted} {
 		if errors.Is(err, known) {
 			return known
 		}

@@ -75,6 +75,7 @@ var expectedAccountColumns = map[string]accountColumn{
 	"void_id":         {"int8", "", -1, true},
 	"auth_public_key": {"bytea", "", -1, true},
 	"created_at":      {"timestamptz", "now()", -1, true},
+	"deleted_at":      {"timestamptz", "", -1, false},
 }
 
 func validAccountColumn(name, typ, def string, modifier int32, notNull, generated bool) bool {
@@ -262,6 +263,18 @@ func (r *Repository) Validate(ctx context.Context) error {
 	if !compatibleTable {
 		return ErrSchemaMismatch
 	}
+	var lifecycleAccess bool
+	err = conn.QueryRow(ctx, `SELECT has_column_privilege('public.accounts','deleted_at','UPDATE')
+		AND (SELECT count(*)=2 FROM pg_catalog.pg_trigger WHERE tgrelid='public.accounts'::regclass
+		AND tgname IN ('accounts_preserve_identity','accounts_preserve_tombstones') AND tgenabled='O' AND NOT tgisinternal)
+		AND (to_regclass('public.signal_prekey_inventory') IS NULL OR has_table_privilege(to_regclass('public.signal_prekey_inventory'),'DELETE'))
+		AND (to_regclass('public.signal_prekey_claims') IS NULL OR has_table_privilege(to_regclass('public.signal_prekey_claims'),'DELETE'))`).Scan(&lifecycleAccess)
+	if err != nil {
+		return classifyValidationError(ctx, err)
+	}
+	if !lifecycleAccess {
+		return ErrRuntimeRole
+	}
 	r.mu.Lock()
 	r.idConstraint, r.keyConstraint = idConstraint, keyConstraint
 	r.mu.Unlock()
@@ -276,7 +289,7 @@ func hasRequiredColumnAccess(name string, selectable, insertable bool) bool {
 	switch name {
 	case "void_id", "auth_public_key":
 		return selectable && insertable
-	case "created_at":
+	case "created_at", "deleted_at":
 		return selectable
 	default:
 		return true

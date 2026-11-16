@@ -7,11 +7,12 @@ No credentials are printed; development accounts are never read or modified.
 import argparse
 import getpass
 import os
+import re
 from pathlib import Path
 import secrets
 import subprocess
 import sys
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit, parse_qs
 
 
 def read_env(path):
@@ -35,16 +36,22 @@ def read_env(path):
 
 def psql(env, sql):
     result = subprocess.run(
-        ["psql", "-X", "--no-password", "-v", "ON_ERROR_STOP=1", "-A", "-t"],
+        ["psql", "-X", "--no-password", "-v", "ON_ERROR_STOP=1", "-A", "-t", "-v", "VERBOSITY=sqlstate"],
         input=sql, text=True, capture_output=True, env=env,
     )
     if result.returncode:
         # Do not print SQL/passwords from administrative diagnostics.
-        raise RuntimeError("PostgreSQL test setup/cleanup failed (diagnostics suppressed)")
+        state = re.search(r"(?:ERROR|FATAL):\s+([0-9A-Z]{5})\b", result.stderr)
+        raise RuntimeError("PostgreSQL test setup/cleanup failed; SQLSTATE=" + (state.group(1) if state else "unavailable"))
     return result.stdout.strip()
 
 
 def connection_url(env, database, user=None, password=None):
+    if env.get("DATABASE_URL") and user is None:
+        parts = urlsplit(env["DATABASE_URL"])
+        if parts.scheme not in ("postgres", "postgresql"):
+            raise RuntimeError("Expected a PostgreSQL connection URL")
+        return urlunsplit((parts.scheme, parts.netloc, "/" + quote(database, safe=""), parts.query, ""))
     host = env.get("PGHOST", "localhost")
     if ":" in host and not host.startswith("["):
         host = "[" + host + "]"
@@ -61,6 +68,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-database-admin", action="store_true",
                         help="explicit opt-in to creating/dropping disposable PostgreSQL resources")
+    parser.add_argument("--existing-login", action="store_true", help="use the configured login for disposable fixtures; create or change no roles")
     parser.add_argument("--admin-env", help="literal admin PG* env file; never evaluated as shell")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="command after -- (default: go test ./...)")
     args = parser.parse_args()
@@ -70,9 +78,17 @@ def main():
     if command[:1] == ["--"]:
         command = command[1:]
     command = command or ["go", "test", "./..."]
-    admin = os.environ.copy()
-    admin.update(read_env(args.admin_env))
-    admin["PGDATABASE"] = "postgres"
+    admin = read_env(args.admin_env)
+    admin.update(os.environ)
+    if admin.get("DATABASE_URL"):
+        parts = urlsplit(admin["DATABASE_URL"])
+        admin.update(PGHOST=parts.hostname or "localhost", PGPORT=str(parts.port or 5432),
+                     PGUSER=unquote(parts.username or ""), PGPASSWORD=unquote(parts.password or ""),
+                     PGDATABASE=unquote(parts.path.lstrip("/")))
+        params = parse_qs(parts.query)
+        if "sslmode" in params:
+            admin["PGSSLMODE"] = params["sslmode"][0]
+    admin.setdefault("PGDATABASE", "postgres")
     admin["PGCONNECT_TIMEOUT"] = "5"
     version = int(psql(admin, "SHOW server_version_num;"))
     if version // 10000 != 18:
@@ -81,17 +97,21 @@ def main():
     database, role, password = "void_test_" + suffix, "void_test_app_" + suffix, secrets.token_hex(32)
     role_created = database_created = False
     try:
-        psql(admin, f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';")
-        role_created = True
+        if not args.existing_login:
+            psql(admin, f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{password}';")
+            role_created = True
+        else:
+            role = psql(admin, "SELECT current_user;")
+        role_sql = '"' + role.replace('"', '""') + '"'
         psql(admin, f'CREATE DATABASE "{database}" TEMPLATE template0;')
         database_created = True
         test_admin = admin.copy()
         test_admin["PGDATABASE"] = database
         psql(test_admin, f'''
             REVOKE ALL ON DATABASE "{database}" FROM PUBLIC;
-            GRANT CONNECT ON DATABASE "{database}" TO {role};
+            GRANT CONNECT ON DATABASE "{database}" TO {role_sql};
             REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-            GRANT USAGE ON SCHEMA public TO {role};
+            GRANT USAGE ON SCHEMA public TO {role_sql};
             CREATE TABLE public.accounts (
                 id UUID PRIMARY KEY DEFAULT uuidv7(),
                 void_id BIGINT NOT NULL UNIQUE CHECK (void_id > 0),
@@ -99,7 +119,7 @@ def main():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             GRANT INSERT (void_id, auth_public_key),
-                SELECT (void_id, auth_public_key, created_at) ON public.accounts TO {role};
+                SELECT (void_id, auth_public_key, created_at) ON public.accounts TO {role_sql};
         ''')
         # Only this newly created disposable database receives test schema.
         # Exercise the exact reviewed prekey migration without touching .env/live DB.
@@ -122,11 +142,16 @@ def main():
         migration_dir = Path(__file__).resolve().parents[1] / "migrations"
         psql(test_admin, (migration_dir / "006_signal_public_prekeys.sql").read_text(encoding="utf-8"))
         grants = (migration_dir / "006_signal_public_prekeys_privileges.sql").read_text(encoding="utf-8")
-        # role is generated locally using only an alphabetic prefix and hex.
-        psql(test_admin, grants.replace(':"runtime_role"', role))
-        psql(test_admin, f"GRANT SELECT,INSERT,DELETE ON public.messages TO {role};")
+        # The generated or existing login is quoted as a SQL identifier.
+        psql(test_admin, grants.replace(':"runtime_role"', role_sql))
+        psql(test_admin, (migration_dir / "007_account_deletion.sql").read_text(encoding="utf-8"))
+        grants = (migration_dir / "007_account_deletion_privileges.sql").read_text(encoding="utf-8")
+        psql(test_admin, grants.replace(':"runtime_role"', role_sql))
+        psql(test_admin, f"GRANT SELECT,INSERT,DELETE ON public.messages TO {role_sql};")
         test_env = os.environ.copy()
-        test_env["VOID_TEST_DATABASE_URL"] = connection_url(admin, database, role, password)
+        test_env["VOID_TEST_DATABASE_URL"] = connection_url(admin, database) if args.existing_login else connection_url(admin, database, role, password)
+        if args.existing_login:
+            test_env["VOID_TEST_OWNER_LOGIN"] = "1"
         test_env["VOID_TEST_ADMIN_URL"] = connection_url(admin, database)
         test_env["VOID_RUN_POSTGRES_INTEGRATION"] = "1"
         print(f"Running tests on disposable PostgreSQL {version // 10000} database {database}", flush=True)
@@ -143,6 +168,9 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (RuntimeError, OSError, ValueError):
-        print("Integration runner failed; check administrative PG* configuration and PostgreSQL 18 availability.", file=sys.stderr)
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError):
+        print("Integration runner failed; check executable availability and configuration.", file=sys.stderr)
         sys.exit(1)

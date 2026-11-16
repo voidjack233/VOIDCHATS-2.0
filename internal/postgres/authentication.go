@@ -26,7 +26,7 @@ func authenticationKey(ctx context.Context, reader authenticationReader, voidID 
 		return nil, auth.ErrNotFound
 	}
 	var key []byte
-	err := reader.QueryRow(ctx, `SELECT auth_public_key FROM public.accounts WHERE void_id = $1`, voidID).Scan(&key)
+	err := reader.QueryRow(ctx, `SELECT auth_public_key FROM public.accounts WHERE void_id = $1 AND deleted_at IS NULL`, voidID).Scan(&key)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

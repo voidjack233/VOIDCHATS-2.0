@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/prekeys"
 	"void-nothingness/internal/queue"
@@ -45,7 +46,7 @@ func prekeyError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for _, known := range []error{prekeys.ErrInvalid, prekeys.ErrConflict, prekeys.ErrCapacity, prekeys.ErrExpired, prekeys.ErrUnavailable} {
+	for _, known := range []error{prekeys.ErrInvalid, prekeys.ErrConflict, prekeys.ErrCapacity, prekeys.ErrExpired, prekeys.ErrUnavailable, account.ErrDeleted} {
 		if errors.Is(err, known) {
 			return known
 		}
@@ -61,18 +62,18 @@ func beginPrekeyTx(ctx context.Context, db queueDB, lock int64) (pgx.Tx, error) 
 	}
 	for _, query := range []string{`SET LOCAL lock_timeout='5s'`, `SET LOCAL statement_timeout='15s'`} {
 		if _, err = tx.Exec(ctx, query); err != nil {
-			rollbackPrekeyTx(tx)
+			rollbackTx(tx)
 			return nil, err
 		}
 	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, lock); err != nil {
-		rollbackPrekeyTx(tx)
+		rollbackTx(tx)
 		return nil, err
 	}
 	return tx, nil
 }
 
-func rollbackPrekeyTx(tx pgx.Tx) {
+func rollbackTx(tx pgx.Tx) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = tx.Rollback(ctx)
@@ -127,7 +128,10 @@ func (s *PrekeyStore) Publish(ctx context.Context, actor, publicationID string, 
 	if err != nil {
 		return prekeys.Counts{}, prekeyError(ctx, err)
 	}
-	defer rollbackPrekeyTx(tx)
+	defer rollbackTx(tx)
+	if err = lockActiveAccounts(ctx, tx, actor); err != nil {
+		return prekeys.Counts{}, prekeyError(ctx, err)
+	}
 	current, err := readPrekeyInventory(tx.QueryRow(ctx, selectPrekeyInventory, queueNumber(actor)))
 	var existing *prekeys.Inventory
 	if err == nil {
@@ -216,7 +220,19 @@ func (s *PrekeyStore) Claim(ctx context.Context, actor, requestID, target string
 	if err != nil {
 		return prekeys.Bundle{}, prekeyError(ctx, err)
 	}
-	defer rollbackPrekeyTx(tx)
+	defer rollbackTx(tx)
+	if err = lockActiveAccounts(ctx, tx, actor, target); err != nil {
+		// An expired UUID remains terminal even when a retry names an unknown
+		// target. Deleted targets are rejected above with account_deleted, before
+		// any cached public bundle can be returned.
+		if errors.Is(err, queue.ErrNotFound) {
+			if _, claimErr := readPrekeyClaim(ctx, tx, actor, requestID, target, now); errors.Is(claimErr, prekeys.ErrExpired) {
+				return prekeys.Bundle{}, prekeys.ErrExpired
+			}
+			return prekeys.Bundle{}, prekeys.ErrInvalid
+		}
+		return prekeys.Bundle{}, prekeyError(ctx, err)
+	}
 	if bundle, claimErr := readPrekeyClaim(ctx, tx, actor, requestID, target, now); !errors.Is(claimErr, pgx.ErrNoRows) {
 		if claimErr != nil {
 			return prekeys.Bundle{}, prekeyError(ctx, claimErr)

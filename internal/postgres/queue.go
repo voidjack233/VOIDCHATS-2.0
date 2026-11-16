@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/queue"
 )
@@ -54,7 +54,7 @@ func queueError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for _, known := range []error{queue.ErrInvalid, queue.ErrNotFound, queue.ErrDuplicate, queue.ErrCapacity} {
+	for _, known := range []error{queue.ErrInvalid, queue.ErrNotFound, queue.ErrDuplicate, queue.ErrCapacity, account.ErrDeleted} {
 		if errors.Is(err, known) {
 			return known
 		}
@@ -72,12 +72,16 @@ func (s *QueueStore) Lookup(ctx context.Context, id string) (queue.Person, error
 	}
 	var n int64
 	var key []byte
-	err := s.db.QueryRow(ctx, `SELECT void_id,auth_public_key FROM public.accounts WHERE void_id=$1`, queueNumber(id)).Scan(&n, &key)
+	var deleted *time.Time
+	err := s.db.QueryRow(ctx, `SELECT void_id,auth_public_key,deleted_at FROM public.accounts WHERE void_id=$1`, queueNumber(id)).Scan(&n, &key, &deleted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return queue.Person{}, queueError(ctx, queue.ErrNotFound)
 	}
 	if err != nil {
 		return queue.Person{}, queueError(ctx, err)
+	}
+	if deleted != nil {
+		return queue.Person{}, account.ErrDeleted
 	}
 	if len(key) != 32 {
 		return queue.Person{}, queue.ErrUnavailable
@@ -108,39 +112,8 @@ func (s *QueueStore) Enqueue(ctx context.Context, event queue.Event) error {
 		return queueError(ctx, err)
 	}
 
-	ids := []int64{queueNumber(event.SenderVoidID)}
-	if event.RecipientVoidID != event.SenderVoidID {
-		ids = append(ids, queueNumber(event.RecipientVoidID))
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	// Serialize only the affected accounts, in numeric order, without requiring
-	// account UPDATE privileges. Splitting a positive int64 into two int32 keys
-	// is injective; this lock space is separate from PostgreSQL's bigint locks.
-	for _, id := range ids {
-		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::integer,$2::integer)`, int32(id>>32), int32(id)); err != nil {
-			return queueError(ctx, err)
-		}
-	}
-	rows, err := tx.Query(ctx, `SELECT void_id FROM public.accounts WHERE void_id=ANY($1::bigint[]) ORDER BY void_id`, ids)
-	if err != nil {
+	if err = lockActiveAccounts(ctx, tx, event.SenderVoidID, event.RecipientVoidID); err != nil {
 		return queueError(ctx, err)
-	}
-	found := 0
-	for rows.Next() {
-		var id int64
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return queueError(ctx, err)
-		}
-		found++
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return queueError(ctx, err)
-	}
-	if found != len(ids) {
-		return queue.ErrNotFound
 	}
 
 	var duplicate bool
@@ -183,7 +156,15 @@ func (s *QueueStore) Pending(ctx context.Context, recipient string, now time.Tim
 	if s.db == nil {
 		return nil, queue.ErrUnavailable
 	}
-	rows, err := s.db.Query(ctx, `SELECT event_id::text,sender_void_id::text,recipient_void_id::text,payload,created_at,expires_at FROM public.messages WHERE recipient_void_id=$1 AND expires_at>$2 ORDER BY created_at,sender_void_id,event_id LIMIT $3`, queueNumber(recipient), now, limit)
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, queueError(ctx, err)
+	}
+	defer rollbackTx(tx)
+	if err = lockActiveAccounts(ctx, tx, recipient); err != nil {
+		return nil, queueError(ctx, err)
+	}
+	rows, err := tx.Query(ctx, `SELECT event_id::text,sender_void_id::text,recipient_void_id::text,payload,created_at,expires_at FROM public.messages WHERE recipient_void_id=$1 AND expires_at>$2 ORDER BY created_at,sender_void_id,event_id LIMIT $3`, queueNumber(recipient), now, limit)
 	if err != nil {
 		return nil, queueError(ctx, err)
 	}
@@ -202,7 +183,8 @@ func (s *QueueStore) Pending(ctx context.Context, recipient string, now time.Tim
 	if err = rows.Err(); err != nil {
 		return nil, queueError(ctx, err)
 	}
-	return out, nil
+	rows.Close()
+	return out, queueError(ctx, tx.Commit(ctx))
 }
 
 func (s *QueueStore) Ack(ctx context.Context, recipient, sender, eventID string) error {
@@ -212,8 +194,19 @@ func (s *QueueStore) Ack(ctx context.Context, recipient, sender, eventID string)
 	if s.db == nil {
 		return queue.ErrUnavailable
 	}
-	_, err := s.db.Exec(ctx, `DELETE FROM public.messages WHERE recipient_void_id=$1 AND sender_void_id=$2 AND event_id=$3`, queueNumber(recipient), queueNumber(sender), queueUUID(eventID))
-	return queueError(ctx, err)
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return queueError(ctx, err)
+	}
+	defer rollbackTx(tx)
+	if err = lockActiveAccounts(ctx, tx, recipient); err != nil {
+		return queueError(ctx, err)
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM public.messages WHERE recipient_void_id=$1 AND sender_void_id=$2 AND event_id=$3`, queueNumber(recipient), queueNumber(sender), queueUUID(eventID))
+	if err != nil {
+		return queueError(ctx, err)
+	}
+	return queueError(ctx, tx.Commit(ctx))
 }
 
 func (s *QueueStore) Expire(ctx context.Context, now time.Time, limit int) (int64, error) {

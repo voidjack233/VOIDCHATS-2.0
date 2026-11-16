@@ -51,11 +51,11 @@ func TestAccountInsertUsesOnlyIdentityAndKey(t *testing.T) {
 }
 
 func TestAccountSchemaRequiresIdentityColumns(t *testing.T) {
-	if len(expectedAccountColumns) != 4 {
-		t.Fatal("account schema must contain exactly four columns")
+	if len(expectedAccountColumns) != 5 {
+		t.Fatal("account schema must contain exactly five columns")
 	}
 	for name, column := range expectedAccountColumns {
-		if !column.notNull {
+		if !column.notNull && name != "deleted_at" {
 			t.Errorf("identity column permits null values: %s", name)
 		}
 		if !validAccountColumn(name, column.typ, column.def, column.modifier, column.notNull, false) {

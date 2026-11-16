@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/queue"
 )
@@ -43,6 +44,8 @@ func (s *Server) allowCommand(actor string) bool {
 func (client *session) queueError(ctx context.Context, err error) {
 	code := "unavailable"
 	switch {
+	case errors.Is(err, account.ErrDeleted):
+		code = "account_deleted"
 	case errors.Is(err, queue.ErrInvalid):
 		code = "invalid_frame"
 	case errors.Is(err, queue.ErrNotFound):
@@ -56,6 +59,17 @@ func (client *session) queueError(ctx context.Context, err error) {
 }
 
 func (client *session) handleCommand(fields map[string]string) bool {
+	if fields["type"] == "account_delete_begin" {
+		return client.deleteAccount(fields)
+	}
+	check, stop := context.WithTimeout(client.ctx, client.server.opts.ForwardTimeout)
+	err := client.server.withActive(check, []string{client.voidID}, func() error { return nil })
+	stop()
+	if err != nil {
+		client.queueError(client.ctx, err)
+		return false
+	}
+
 	if fields["type"] == "prekeys_publish" || fields["type"] == "prekeys_claim" {
 		return client.handlePrekeys(fields)
 	}
@@ -74,6 +88,8 @@ func (client *session) handleCommand(fields map[string]string) bool {
 	ctx, cancel := context.WithTimeout(client.ctx, s.opts.ForwardTimeout)
 	defer cancel()
 	switch fields["type"] {
+	case "account_status":
+		return client.accountStatus(ctx, fields)
 	case "send":
 		if !exactFields(fields, "send", "event_id", "to_void_id", "payload_base64") || !queue.ValidEventID(fields["event_id"]) || !auth.ValidVoidID(fields["to_void_id"]) {
 			break
@@ -90,7 +106,7 @@ func (client *session) handleCommand(fields map[string]string) bool {
 		// Persistence already committed. Wake the recipient even if the sender
 		// disconnects or its acceptance frame cannot be written.
 		defer s.wakeRecipient(event.RecipientVoidID)
-		return client.transmit(ctx, map[string]string{"type": "accepted", "event_id": event.EventID, "created_at": event.CreatedAt.Format(time.RFC3339Nano), "expires_at": event.ExpiresAt.Format(time.RFC3339Nano)}) == nil
+		return client.activeTransmit(ctx, []string{client.voidID, event.RecipientVoidID}, map[string]string{"type": "accepted", "event_id": event.EventID, "created_at": event.CreatedAt.Format(time.RFC3339Nano), "expires_at": event.ExpiresAt.Format(time.RFC3339Nano)})
 	case "ack":
 		if !exactFields(fields, "ack", "sender_void_id", "event_id") || !auth.ValidVoidID(fields["sender_void_id"]) || !queue.ValidEventID(fields["event_id"]) {
 			break
@@ -105,7 +121,7 @@ func (client *session) handleCommand(fields map[string]string) bool {
 		}
 		client.deliveryMu.Unlock()
 		defer s.wakeRecipient(client.voidID)
-		return client.transmit(ctx, map[string]string{"type": "ack_ok", "sender_void_id": fields["sender_void_id"], "event_id": fields["event_id"]}) == nil
+		return client.activeTransmit(ctx, []string{client.voidID}, map[string]string{"type": "ack_ok", "sender_void_id": fields["sender_void_id"], "event_id": fields["event_id"]})
 	case "lookup":
 		if !exactFields(fields, "lookup", "void_id") {
 			break
@@ -115,7 +131,7 @@ func (client *session) handleCommand(fields map[string]string) bool {
 			client.queueError(ctx, err)
 			return true
 		}
-		return client.transmit(ctx, map[string]string{"type": "person", "void_id": person.VoidID, "auth_public_key": person.AuthPublicKey}) == nil
+		return client.activeTransmit(ctx, []string{client.voidID, person.VoidID}, map[string]string{"type": "person", "void_id": person.VoidID, "auth_public_key": person.AuthPublicKey})
 	case "relay_online":
 		if !exactFields(fields, "relay_online", "exchange_id", "to_void_id", "payload_base64") || !validRequestID(fields["exchange_id"]) || !auth.ValidVoidID(fields["to_void_id"]) {
 			break
@@ -125,8 +141,14 @@ func (client *session) handleCommand(fields map[string]string) bool {
 		}
 		// Public MLS initialization objects use only the authenticated online
 		// relay. No object inventories or initialization state are persisted.
-		status := client.forward(fields)
-		return client.transmit(ctx, map[string]string{"type": "online_result", "exchange_id": fields["exchange_id"], "status": status}) == nil
+		err := client.server.withActive(ctx, []string{client.voidID, fields["to_void_id"]}, func() error {
+			status := client.forward(fields)
+			return client.transmit(ctx, map[string]string{"type": "online_result", "exchange_id": fields["exchange_id"], "status": status})
+		})
+		if err != nil {
+			client.queueError(client.ctx, err)
+		}
+		return err == nil
 	}
 	client.sendError(ctx, "invalid_frame")
 	return false
@@ -166,14 +188,24 @@ func (client *session) deliveryLoop() {
 
 func (client *session) deliverOne() bool {
 	s := client.server
+	client.deliveryMu.Lock()
+	defer client.deliveryMu.Unlock()
+	if client.deleting.Load() {
+		return true
+	}
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	default:
 		return true
 	}
-	client.deliveryMu.Lock()
-	defer client.deliveryMu.Unlock()
+	check, stop := context.WithTimeout(client.ctx, s.opts.ForwardTimeout)
+	err := s.withActive(check, []string{client.voidID}, func() error { return nil })
+	stop()
+	if err != nil {
+		client.stop()
+		return false
+	}
 	if client.inFlightID != "" && time.Now().Before(client.inFlightExpiry) {
 		return true
 	}
@@ -191,8 +223,19 @@ func (client *session) deliverOne() bool {
 	event := rows[0]
 	client.inFlightSender, client.inFlightID, client.inFlightExpiry = event.SenderVoidID, event.EventID, event.ExpiresAt
 	eventCtx, expireCancel := context.WithDeadline(ctx, event.ExpiresAt)
-	err = client.transmit(eventCtx, map[string]string{"type": "event", "event_id": event.EventID, "from_void_id": event.SenderVoidID, "payload_base64": base64.StdEncoding.EncodeToString(event.Payload), "created_at": event.CreatedAt.Format(time.RFC3339Nano), "expires_at": event.ExpiresAt.Format(time.RFC3339Nano)})
+	err = s.withActive(eventCtx, []string{client.voidID, event.SenderVoidID}, func() error {
+		return client.transmit(eventCtx, map[string]string{"type": "event", "event_id": event.EventID, "from_void_id": event.SenderVoidID, "payload_base64": base64.StdEncoding.EncodeToString(event.Payload), "created_at": event.CreatedAt.Format(time.RFC3339Nano), "expires_at": event.ExpiresAt.Format(time.RFC3339Nano)})
+	})
 	expireCancel()
+	if errors.Is(err, account.ErrDeleted) {
+		// Deletion can remove an event after Pending read it. Silently discard
+		// that stale delivery; an unsolicited generic error could otherwise be
+		// mistaken for a reply to an unrelated request on this recipient socket.
+		client.inFlightSender, client.inFlightID = "", ""
+		if s.withActive(ctx, []string{client.voidID}, func() error { return nil }) == nil {
+			return true
+		}
+	}
 	if err != nil {
 		client.stop()
 		return false

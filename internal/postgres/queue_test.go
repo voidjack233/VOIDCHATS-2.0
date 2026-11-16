@@ -56,6 +56,7 @@ type queueTestDB struct {
 	beginErr, execErr, queryErr error
 	tag                         pgconn.CommandTag
 	beginCount                  int
+	accounts                    map[int64]*time.Time
 }
 
 func (db *queueTestDB) BeginTx(_ context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
@@ -80,6 +81,15 @@ func (db *queueTestDB) QueryRow(_ context.Context, sql string, args ...any) pgx.
 }
 func (db *queueTestDB) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 	db.calls = append(db.calls, queueTestCall{sql, args})
+	if db.accounts != nil && strings.HasPrefix(sql, "SELECT void_id,deleted_at FROM public.accounts") {
+		rows := queueRows()
+		for _, id := range args[0].([]int64) {
+			if deleted, ok := db.accounts[id]; ok {
+				rows.values = append(rows.values, []any{id, deleted})
+			}
+		}
+		return rows, nil
+	}
 	if db.queryErr != nil {
 		return nil, db.queryErr
 	}
@@ -125,7 +135,7 @@ func queueSampleEvent() queue.Event {
 }
 func queueEnqueueStore() (*QueueStore, *queueTestTx) {
 	tx := &queueTestTx{queueTestDB: queueTestDB{
-		rowsResults: []pgx.Rows{queueRows([]any{int64(101)}, []any{int64(9223372036854775807)})},
+		rowsResults: []pgx.Rows{queueRows([]any{int64(101), (*time.Time)(nil)}, []any{int64(9223372036854775807), (*time.Time)(nil)})},
 		rowResults:  []pgx.Row{queueRow(false), queueRow(int64(0), int64(0)), queueRow(int64(0), int64(0))},
 		tag:         pgconn.NewCommandTag("INSERT 0 1"),
 	}}
@@ -180,7 +190,7 @@ func TestQueueEnqueueFailuresNeverAcknowledgePersistence(t *testing.T) {
 		change func(*queueTestTx)
 		want   error
 	}{
-		{"missing_recipient", func(tx *queueTestTx) { tx.rowsResults = []pgx.Rows{queueRows([]any{int64(101)})} }, queue.ErrNotFound},
+		{"missing_recipient", func(tx *queueTestTx) { tx.rowsResults = []pgx.Rows{queueRows([]any{int64(101), (*time.Time)(nil)})} }, queue.ErrNotFound},
 		{"duplicate", func(tx *queueTestTx) { tx.rowResults[0] = queueRow(true) }, queue.ErrDuplicate},
 		{"sender_count_limit", func(tx *queueTestTx) { tx.rowResults[1] = queueRow(int64(queue.MaxPendingPerAccount), int64(0)) }, queue.ErrCapacity},
 		{"recipient_byte_limit", func(tx *queueTestTx) { tx.rowResults[2] = queueRow(int64(1), int64(queue.MaxPendingBytesPerAccount)) }, queue.ErrCapacity},
@@ -203,7 +213,7 @@ func TestQueueSelfDeliveryLocksOneAccount(t *testing.T) {
 	s, tx := queueEnqueueStore()
 	event := queueSampleEvent()
 	event.SenderVoidID = "101"
-	tx.rowsResults = []pgx.Rows{queueRows([]any{int64(101)})}
+	tx.rowsResults = []pgx.Rows{queueRows([]any{int64(101), (*time.Time)(nil)})}
 	if err := s.Enqueue(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
@@ -214,13 +224,13 @@ func TestQueueSelfDeliveryLocksOneAccount(t *testing.T) {
 
 func TestQueueLookupUsesRegisteredKeyWithoutUsernameRequirement(t *testing.T) {
 	key := bytes.Repeat([]byte{17}, 32)
-	db := &queueTestDB{rowResults: []pgx.Row{queueRow(int64(101), key)}}
+	db := &queueTestDB{rowResults: []pgx.Row{queueRow(int64(101), key, (*time.Time)(nil))}}
 	store := &QueueStore{db: db}
 	person, err := store.Lookup(context.Background(), "101")
 	if err != nil || person.VoidID != "101" || person.AuthPublicKey == "" {
 		t.Fatal(person, err)
 	}
-	if db.calls[0].sql != "SELECT void_id,auth_public_key FROM public.accounts WHERE void_id=$1" || db.calls[0].args[0] != int64(101) {
+	if db.calls[0].sql != "SELECT void_id,auth_public_key,deleted_at FROM public.accounts WHERE void_id=$1" || db.calls[0].args[0] != int64(101) {
 		t.Fatal("lookup changed account identity or depends on username")
 	}
 	db.rowResults = []pgx.Row{queueTestRow(func(...any) error { return pgx.ErrNoRows })}
@@ -240,12 +250,16 @@ func TestQueueFailedBeginDoesNotAcknowledge(t *testing.T) {
 func TestQueueACKDeletesOnlyAuthenticatedRecipientRecord(t *testing.T) {
 	event := queueSampleEvent()
 	for _, tag := range []string{"DELETE 1", "DELETE 0"} {
-		db := &queueTestDB{tag: pgconn.NewCommandTag(tag)}
+		tx := &queueTestTx{queueTestDB: queueTestDB{tag: pgconn.NewCommandTag(tag), accounts: map[int64]*time.Time{101: nil}}}
+		db := &queueTestDB{tx: tx}
 		s := &QueueStore{db: db}
 		if err := s.Ack(context.Background(), event.RecipientVoidID, event.SenderVoidID, event.EventID); err != nil {
 			t.Fatal(err)
 		}
-		call := db.calls[0]
+		call := tx.calls[len(tx.calls)-1]
+		if !tx.committed {
+			t.Fatal("ACK did not commit")
+		}
 		if call.sql != "DELETE FROM public.messages WHERE recipient_void_id=$1 AND sender_void_id=$2 AND event_id=$3" || !reflect.DeepEqual(call.args, []any{int64(101), int64(9223372036854775807), queueUUID(event.EventID)}) {
 			t.Fatal("ACK ownership is not enforced", call)
 		}
@@ -256,12 +270,17 @@ func TestQueuePendingFiltersExpiredAndCopiesOpaqueBytes(t *testing.T) {
 	event := queueSampleEvent()
 	original := append([]byte(nil), event.Payload...)
 	db := &queueTestDB{rowsResults: []pgx.Rows{queueRows([]any{event.EventID, event.SenderVoidID, event.RecipientVoidID, original, event.CreatedAt.In(time.FixedZone("synthetic", 8*3600)), event.ExpiresAt.In(time.FixedZone("synthetic", 8*3600))})}}
-	s := &QueueStore{db: db}
+	tx := &queueTestTx{queueTestDB: *db}
+	tx.accounts = map[int64]*time.Time{101: nil}
+	s := &QueueStore{db: &queueTestDB{tx: tx}}
 	events, err := s.Pending(context.Background(), "101", event.CreatedAt, 100)
 	if err != nil || len(events) != 1 || !reflect.DeepEqual(events[0], event) {
 		t.Fatal(events, err)
 	}
-	call := db.calls[0]
+	call := tx.calls[len(tx.calls)-1]
+	if !tx.committed {
+		t.Fatal("pending read did not finish")
+	}
 	if !strings.Contains(call.sql, "WHERE recipient_void_id=$1 AND expires_at>$2 ORDER BY created_at,sender_void_id,event_id LIMIT $3") || !reflect.DeepEqual(call.args, []any{int64(101), event.CreatedAt, 100}) {
 		t.Fatal("pending query ownership,expiry or bounds changed")
 	}

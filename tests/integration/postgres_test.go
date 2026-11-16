@@ -141,6 +141,9 @@ func TestPostgresPersistenceAndUniqueness(t *testing.T) {
 }
 
 func TestPostgresRuntimePrivileges(t *testing.T) {
+	if os.Getenv("VOID_TEST_OWNER_LOGIN") == "1" {
+		t.Skip("restricted-grant fixture is not used with the configured login")
+	}
 	app, _ := testPools(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

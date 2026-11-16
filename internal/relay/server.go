@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/prekeys"
 	"void-nothingness/internal/queue"
@@ -43,6 +44,7 @@ type Options struct {
 	Logger          *slog.Logger
 	Queue           *queue.Service
 	Prekeys         *prekeys.Service
+	Accounts        *account.DeletionService
 }
 
 // Server is an HTTP handler for the WebSocket endpoint. Close must be called
@@ -80,6 +82,7 @@ type session struct {
 	inFlightExpiry time.Time
 	wake           chan struct{}
 	queuedBytes    atomic.Int64
+	deleting       atomic.Bool
 }
 
 // The transport contract also permits deterministic slow-write tests without
@@ -268,6 +271,10 @@ func (client *session) authenticate() bool {
 		}
 		return false
 	}
+	if fields["type"] == "account_delete_begin" {
+		client.deleteAccount(fields)
+		return false
+	}
 	if fields["type"] == "send" || fields["type"] == "prekeys_publish" || fields["type"] == "prekeys_claim" {
 		client.sendError(ctx, "unauthorized")
 		return false
@@ -316,6 +323,20 @@ func (client *session) authenticate() bool {
 		client.sendError(ctx, "authentication_failed")
 		return false
 	}
+	err = client.server.withActive(ctx, []string{voidID}, func() error {
+		if !client.activate(ctx, voidID) {
+			return errStopped
+		}
+		return nil
+	})
+	if err != nil {
+		client.queueError(client.ctx, err)
+		return false
+	}
+	return true
+}
+
+func (client *session) activate(ctx context.Context, voidID string) bool {
 	// Queue auth_ok before publishing, while the writer's source check shares
 	// the registry lock. Other senders can only queue after auth_ok, and a peer
 	// that observes auth_ok is already an active recipient.

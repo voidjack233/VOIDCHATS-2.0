@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"void-nothingness/internal/account"
 	"void-nothingness/internal/auth"
 	"void-nothingness/internal/prekeys"
 	"void-nothingness/internal/queue"
@@ -38,6 +39,8 @@ func (s *Server) allowPrekey(actor string) bool {
 func (client *session) prekeyError(requestID string, err error) bool {
 	code := "prekeys_unavailable"
 	switch {
+	case errors.Is(err, account.ErrDeleted):
+		code = "account_deleted"
 	case errors.Is(err, prekeys.ErrInvalid):
 		code = "prekeys_invalid"
 	case errors.Is(err, prekeys.ErrConflict):
@@ -96,11 +99,23 @@ func (client *session) handlePrekeys(fields map[string]string) bool {
 		if err != nil {
 			return client.prekeyError(requestID, err)
 		}
-		return client.transmit(ctx, map[string]string{"type": "prekeys_published", "publication_id": requestID, "ec_remaining": strconv.Itoa(counts.ECRemaining), "kyber_remaining": strconv.Itoa(counts.KyberRemaining)}) == nil
+		err = s.withActive(ctx, []string{client.voidID}, func() error {
+			return client.transmit(ctx, map[string]string{"type": "prekeys_published", "publication_id": requestID, "ec_remaining": strconv.Itoa(counts.ECRemaining), "kyber_remaining": strconv.Itoa(counts.KyberRemaining)})
+		})
+		if err != nil {
+			return client.prekeyError(requestID, err)
+		}
+		return true
 	}
 	payload, err := s.opts.Prekeys.Claim(ctx, client.voidID, requestID, fields["void_id"])
 	if err != nil {
 		return client.prekeyError(requestID, err)
 	}
-	return client.transmit(ctx, map[string]string{"type": "prekey_bundle", "request_id": requestID, "void_id": fields["void_id"], "payload_base64": payload}) == nil
+	err = s.withActive(ctx, []string{client.voidID, fields["void_id"]}, func() error {
+		return client.transmit(ctx, map[string]string{"type": "prekey_bundle", "request_id": requestID, "void_id": fields["void_id"], "payload_base64": payload})
+	})
+	if err != nil {
+		return client.prekeyError(requestID, err)
+	}
+	return true
 }

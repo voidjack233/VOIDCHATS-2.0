@@ -112,10 +112,14 @@ func run() error {
 	if err != nil {
 		return errors.New("invalid WebSocket authentication configuration")
 	}
+	lifecycle, err := account.NewDeletionService(repo, cfg.APIAudience)
+	if err != nil {
+		return errors.New("invalid account deletion configuration")
+	}
 	sockets, err := relay.New(authentication, relay.Options{
 		AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
 		QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
-		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048), Queue: queued, Prekeys: publicPrekeys,
+		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048), Queue: queued, Prekeys: publicPrekeys, Accounts: lifecycle,
 	})
 	if err != nil {
 		return errors.New("invalid WebSocket configuration")

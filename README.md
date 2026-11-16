@@ -1,5 +1,13 @@
 # VOID-NOTHINGNESS
 
+Permanent account deletion is implemented for review. This source requires
+[migration 007](migrations/007_account_deletion.sql) before startup; it has not
+been applied to production. See the [complete Rust integration contract,
+security audit, verification, and deployment procedure](docs/ACCOUNT_DELETION.md).
+Deleted VOID-IDs remain reserved while queued ciphertext and public prekeys are
+removed transactionally. Startup never applies migrations.
+
+
 A Go backend that authenticates accounts and temporarily queues opaque encrypted events for delivery over WebSockets. VOID-ID is a public contact address, not an authentication credential. Devices retain their own history and encryption state.
 
 Identity and temporary ciphertext delivery use `accounts` and `messages`. The approved Signal extension adds `signal_prekey_inventory` and `signal_prekey_claims` for public setup material. Go assigns creation time and a 30-day expiration. Server acceptance follows PostgreSQL commit; an authenticated recipient ACK deletes the complete queue record and ciphertext. Unexpired pending events are offered again after reconnect.
@@ -51,7 +59,7 @@ A challenge accepts only the authentication public key:
 {"auth_public_key":"<padded base64 of a valid 32-byte Ed25519 public key>"}
 ```
 
-Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. Migration 005 removes the legacy username column and its CHECK constraint. Accounts contain `id`, `void_id`, `auth_public_key` and `created_at`; existing account identities and keys are preserved.
+Username creation is removed. Sending a `username` field, including an empty string or null, returns HTTP 400. Migration 005 removes the legacy username column and its CHECK constraint. Accounts contain `id`, `void_id`, `auth_public_key`, `created_at`, and (after migration 007) nullable `deleted_at`; existing account identities and keys are preserved.
 
 Clients sign the exact decoded `VOID-NOTHINGNESS:register:v1` challenge message and submit `challenge_id` and padded-base64 `signature` to `/accounts`. Registration proofs remain single-use and bind the submitted public key. The v1 proof retains an empty reserved line after the encoded key, so its bytes match the previous username-omitted flow. Registration responses contain only `void_id` and `created_at`. Private keys never leave devices. Registration creates no persistent messaging session.
 

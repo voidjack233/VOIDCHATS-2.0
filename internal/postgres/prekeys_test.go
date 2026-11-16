@@ -62,7 +62,7 @@ func prekeyNoRow() pgx.Row {
 }
 
 func prekeyTestStore(rows ...pgx.Row) (*PrekeyStore, *queueTestTx) {
-	tx := &queueTestTx{queueTestDB: queueTestDB{rowResults: rows, tag: pgconn.NewCommandTag("INSERT 0 1")}}
+	tx := &queueTestTx{queueTestDB: queueTestDB{rowResults: rows, accounts: map[int64]*time.Time{101: nil, 102: nil, 103: nil}, tag: pgconn.NewCommandTag("INSERT 0 1")}}
 	return &PrekeyStore{db: &queueTestDB{tx: tx}}, tx
 }
 
@@ -75,7 +75,7 @@ func TestPrekeyPublicationCommitsBeforeAcceptance(t *testing.T) {
 	if err != nil || counts != (prekeys.Counts{ECRemaining: 1, KyberRemaining: 1}) || !tx.committed || !tx.rolledBack {
 		t.Fatal(counts, err, tx.committed, tx.rolledBack)
 	}
-	if tx.calls[2].sql != "SELECT pg_advisory_xact_lock($1::bigint)" || tx.calls[2].args[0] != prekeyInventoryLock || !strings.HasSuffix(tx.calls[3].sql, "FOR UPDATE") {
+	if tx.calls[2].sql != "SELECT pg_advisory_xact_lock($1::bigint)" || tx.calls[2].args[0] != prekeyInventoryLock || !strings.HasSuffix(tx.calls[5].sql, "FOR UPDATE") {
 		t.Fatal("inventory allocation lock order changed", tx.calls)
 	}
 	insert := tx.calls[len(tx.calls)-1]
@@ -106,7 +106,7 @@ func TestPrekeyPublicationRetriesDoNotResurrectConsumedKeys(t *testing.T) {
 		} else if err != nil || counts != (prekeys.Counts{}) || !tx.committed {
 			t.Fatal("exact old publication retry", counts, err)
 		}
-		if len(tx.calls) != 4 || !tx.rolledBack {
+		if len(tx.calls) != 6 || !tx.rolledBack {
 			t.Fatal("retry rewrote publication or consumed keys", tx.calls)
 		}
 	}
@@ -150,10 +150,10 @@ func TestPrekeyClaimConsumesAndPersistsAtomicallyBeforeResponse(t *testing.T) {
 	if tx.calls[2].sql != "SELECT pg_advisory_xact_lock($1::bigint)" || tx.calls[2].args[0] != prekeyClaimLock || prekeyClaimLock == prekeyInventoryLock {
 		t.Fatal("claim allocator lock shares inventory namespace", tx.calls[2])
 	}
-	if !strings.HasSuffix(tx.calls[5].sql, "FOR UPDATE") || !strings.Contains(tx.calls[6].sql, "WHERE requester_void_id=$1 AND request_id=$2") || strings.Contains(tx.calls[7].sql, "expires") {
+	if !strings.HasSuffix(tx.calls[8].sql, "FOR UPDATE") || !strings.Contains(tx.calls[9].sql, "WHERE requester_void_id=$1 AND request_id=$2") || strings.Contains(tx.calls[10].sql, "expires") {
 		t.Fatal("claim recheck or lifetime capacity count missing", tx.calls)
 	}
-	update, insert := tx.calls[8], tx.calls[9]
+	update, insert := tx.calls[11], tx.calls[12]
 	if !strings.HasPrefix(update.sql, "UPDATE public.signal_prekey_inventory SET ") || string(update.args[1].([]byte)) != "[]" || string(update.args[2].([]byte)) != "[]" {
 		t.Fatal("claim failed to remove exactly the selected one-time keys", update)
 	}
@@ -221,7 +221,7 @@ func TestPrekeyClaimRetryAndExpiredTombstonesNeverConsumeAgain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store, tx := prekeyTestStore(queueRow(tc.recipient, tc.data, original.ClaimExpiresAt))
 			bundle, err := store.Claim(context.Background(), "102", prekeyTestRequest, tc.target, tc.now)
-			if !errors.Is(err, tc.want) || tx.committed != (tc.want == nil) || !tx.rolledBack || len(tx.calls) != 4 {
+			if !errors.Is(err, tc.want) || tx.committed != (tc.want == nil) || !tx.rolledBack || len(tx.calls) != 7 {
 				t.Fatal(bundle, err, tx.calls)
 			}
 			if tc.want == nil {
@@ -241,7 +241,7 @@ func TestPrekeyConcurrentClaimRecheckFindsExistingCommit(t *testing.T) {
 	recipient := int64(101)
 	tx.rowResults[3] = queueRow(&recipient, data, original.ClaimExpiresAt)
 	bundle, err := store.Claim(context.Background(), "102", prekeyTestRequest, "101", inventory.CreatedAt.Add(time.Minute))
-	if err != nil || !reflect.DeepEqual(bundle, original) || !tx.committed || len(tx.calls) != 7 {
+	if err != nil || !reflect.DeepEqual(bundle, original) || !tx.committed || len(tx.calls) != 10 {
 		t.Fatal("claim recheck allocated another key", bundle, err, tx.calls)
 	}
 }
