@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_setup_deletes_only_after_explicit_confirmation_and_returns_to_welcome() {
+    fn settings_deletes_only_after_explicit_confirmation_and_returns_to_welcome() {
         use crate::{
             AppWindow, bind_account_removal, storage::tests::relay_messaging::mock_relay,
             storage_ui::tests::in_test_process,
@@ -148,7 +148,7 @@ mod tests {
         use std::{cell::Cell, rc::Rc};
 
         if !in_test_process(
-            "account::deletion::tests::blocked_setup_deletes_only_after_explicit_confirmation_and_returns_to_welcome",
+            "account::deletion::tests::settings_deletes_only_after_explicit_confirmation_and_returns_to_welcome",
         ) {
             return;
         }
@@ -187,13 +187,9 @@ mod tests {
         let weak = ui.as_weak();
         ui.on_account_registered(move || {
             let ui = weak.upgrade().unwrap();
-            let error = crate::messaging::Error::Relay(crate::relay::RequestError::Rejected {
-                command: "prekeys_publish",
-                code: "prekeys_conflict".into(),
-            });
             ui.set_storage_loading(false);
             ui.set_storage_ready(true);
-            ui.set_publication_error(crate::messaging::publication_failure(&error).0.into());
+            ui.set_publishing_keys(true);
         });
         let root = dir.0.clone();
         let worker = super::super::bind_with(
@@ -216,8 +212,16 @@ mod tests {
         poll.start(TimerMode::Repeated, Duration::from_millis(10), move || {
             let ui = weak.upgrade().unwrap();
             match stage.get() {
-                0 if ui.get_can_manage_enrollment_account() => {
-                    assert!(!ui.get_publication_error().is_empty());
+                0 if ui.get_publishing_keys() => {
+                    ui.invoke_open_permanent_deletion();
+                    ui.set_permanent_deletion_phrase("DELETE".into());
+                    ui.invoke_request_account_removal(true);
+                    assert!(!ui.get_permanent_deletion_open());
+                    assert!(!ui.get_removal_busy());
+                    assert!(fixture_record.exists());
+                    ui.set_publishing_keys(false);
+                    ui.set_setup_page(0);
+                    ui.set_section("Settings".into());
                     ui.invoke_open_permanent_deletion();
                     ui.set_permanent_deletion_phrase("DELETE".into());
                     ui.invoke_cancel_permanent_deletion();

@@ -1241,9 +1241,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn blocked_enrollment_exposes_separate_account_actions_and_cancel_preserves_data() {
+    fn setup_blocks_permanent_deletion_and_only_offers_local_removal_after_error() {
         if !in_test_process(
-            "storage_ui::tests::blocked_enrollment_exposes_separate_account_actions_and_cancel_preserves_data",
+            "storage_ui::tests::setup_blocks_permanent_deletion_and_only_offers_local_removal_after_error",
         ) {
             return;
         }
@@ -1264,15 +1264,24 @@ pub(crate) mod tests {
         ui.set_storage_loading(false);
         ui.set_storage_ready(true);
         ui.set_connection_status("Connected".into());
+        ui.set_publishing_keys(true);
+        assert!(!ui.get_can_remove_enrollment_account());
+        ui.invoke_open_local_removal();
+        assert!(!ui.get_local_removal_open());
         let conflict = messaging::Error::Relay(crate::relay::RequestError::Rejected {
             command: "prekeys_publish",
             code: "prekeys_conflict".into(),
         });
         let (notice, retryable) = messaging::publication_failure(&conflict);
+        ui.set_publishing_keys(false);
         ui.set_publication_error(notice.into());
         ui.set_publication_retryable(retryable);
-        assert!(ui.get_can_manage_enrollment_account());
+        assert!(ui.get_can_remove_enrollment_account());
         assert!(!ui.get_enrollment_can_retry());
+        ui.invoke_open_permanent_deletion();
+        ui.set_permanent_deletion_phrase("DELETE".into());
+        assert!(!ui.get_permanent_deletion_open());
+        assert!(!ui.get_can_permanently_delete());
 
         ui.invoke_open_local_removal();
         assert!(ui.get_local_removal_open());
@@ -1289,13 +1298,12 @@ pub(crate) mod tests {
         assert_eq!(ui.get_publication_error(), notice);
 
         ui.set_connection_status("Reconnecting".into());
-        assert!(ui.get_can_manage_enrollment_account());
+        assert!(!ui.get_can_remove_enrollment_account());
         ui.invoke_open_permanent_deletion();
         ui.set_permanent_deletion_phrase("DELETE".into());
-        assert!(ui.get_permanent_deletion_confirmed());
-        assert!(ui.get_can_permanently_delete());
+        assert!(!ui.get_permanent_deletion_confirmed());
+        assert!(!ui.get_can_permanently_delete());
         assert!(!ui.get_local_removal_confirmed());
-        ui.invoke_cancel_permanent_deletion();
         assert!(std::fs::read(&file).unwrap() == identity);
         let (db, _) = account::open_enrollment_fixture(&temp.0, "41", &key).unwrap();
         assert_eq!(
