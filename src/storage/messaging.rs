@@ -67,26 +67,26 @@ impl Database {
         Ok(())
     }
 
-    /// Move the submitted draft into a durable operation before lookup or network transmission.
+    /// Move the submitted draft into a durable operation and report whether it promoted a request.
     pub(crate) fn queue_outgoing(
         &mut self,
         conversation_id: i64,
         body: &str,
         created_at: i64,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         if !super::signal::valid_content(body, created_at) {
             return Err(Error::SignalEnvelope);
         }
         let event_id = new_event_id()?;
-        self.write(|tx| {
+        let promoted = self.write(|tx| {
             tx.execute("INSERT INTO outgoing_operations (event_id, conversation_id, body, created_at, state)
                 VALUES (?1, ?2, ?3, ?4, 'pending')", params![event_id, conversation_id, body, created_at])?;
             tx.execute("DELETE FROM drafts WHERE conversation_id = ?1 AND body = ?2", params![conversation_id, body])?;
             tx.execute("UPDATE conversations SET last_activity_at = max(last_activity_at, ?2) WHERE id = ?1",
                 params![conversation_id, created_at])?;
-            Ok(())
+            Ok(tx.execute("DELETE FROM requests WHERE conversation_id = ?1", [conversation_id])? != 0)
         })?;
-        Ok(event_id)
+        Ok((event_id, promoted))
     }
 
     pub(crate) fn outgoing_operation(&self, id: &str) -> Result<OutgoingOperation> {

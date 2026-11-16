@@ -227,7 +227,7 @@ fn bind_with(
                             && session.is_active()
                         {
                             let result = messaging::receive(db, session, &sender, &event_id, &json);
-                            refresh_messages(&weak, db, selected);
+                            refresh_messages(&weak, db, selected, None);
                             show_messaging_result(&weak, result);
                         }
                     }
@@ -238,7 +238,7 @@ fn bind_with(
                                 .unwrap_or_default()
                                 .as_millis() as i64;
                             match db.queue_outgoing(id, &body, now) {
-                                Ok(event_id) => {
+                                Ok((event_id, promoted)) => {
                                     let _ = weak.upgrade_in_event_loop(move |ui| {
                                         ui.invoke_draft_queued(
                                             id.to_string().into(),
@@ -246,9 +246,9 @@ fn bind_with(
                                             revision,
                                         );
                                     });
-                                    refresh_messages(&weak, db, selected);
+                                    refresh_messages(&weak, db, selected, promoted.then_some(id));
                                     let result = messaging::send(db, relay.as_ref(), &event_id);
-                                    refresh_messages(&weak, db, selected);
+                                    refresh_messages(&weak, db, selected, None);
                                     result
                                 }
                                 Err(error) => Err(error.into()),
@@ -261,7 +261,7 @@ fn bind_with(
                     Command::Resend(event_id) => {
                         let result = if let Some(db) = &mut database {
                             let result = messaging::send(db, relay.as_ref(), &event_id);
-                            refresh_messages(&weak, db, selected);
+                            refresh_messages(&weak, db, selected, None);
                             result
                         } else {
                             Err(storage::Error::Unavailable.into())
@@ -481,7 +481,12 @@ fn finish_send(weak: &Weak<AppWindow>, result: Result<(), messaging::Error>) {
     });
 }
 
-fn refresh_messages(weak: &Weak<AppWindow>, db: &storage::Database, selected: Option<i64>) {
+fn refresh_messages(
+    weak: &Weak<AppWindow>,
+    db: &storage::Database,
+    selected: Option<i64>,
+    promoted: Option<i64>,
+) {
     let lists = load_lists(db);
     let timeline = selected.and_then(|id| {
         db.conversation_timeline(id)
@@ -491,6 +496,12 @@ fn refresh_messages(weak: &Weak<AppWindow>, db: &storage::Database, selected: Op
     let _ = weak.upgrade_in_event_loop(move |ui| {
         if let Ok(lists) = lists {
             lists.show(&ui);
+        }
+        if promoted.is_some_and(|id| ui.get_selected_conversation().as_str() == id.to_string()) {
+            ui.set_conversation_is_request(false);
+            if ui.get_section() == "Requests" && !ui.get_conversation_loading() {
+                ui.set_section("Chats".into());
+            }
         }
         if let Some((id, messages)) = timeline
             && ui.get_selected_conversation().as_str() == id.to_string()
@@ -631,7 +642,13 @@ fn show_conversation(weak: &Weak<AppWindow>, selection: i32, detail: storage::Re
         }
         ui.set_conversation_loading(false);
         match detail {
-            Ok(detail) => detail.show(&ui),
+            Ok(detail) => {
+                // A request selected while its reply was being queued may already be a chat.
+                if ui.get_section() == "Requests" && !detail.conversation.is_request {
+                    ui.set_section("Chats".into());
+                }
+                detail.show(&ui);
+            }
             Err(_) => ui.set_conversation_error(
                 "The saved conversation could not be loaded. Try opening it again.".into(),
             ),
@@ -650,18 +667,14 @@ mod tests {
     use super::*;
     use crate::storage::{Database, DeliveryState, Direction, Message, Owner, tests::TestDir};
     use slint::{Model, Timer, TimerMode};
-    use std::{process::Command, time::Duration};
+    use std::{cell::Cell, process::Command, time::Duration};
 
-    #[test]
-    fn restores_the_local_conversation_and_latest_draft_in_slint() {
+    fn in_test_process(test: &str) -> bool {
         const CHILD: &str = "VOID_STORAGE_UI_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             // Slint's threaded testing backend is process-global. Keep it separate from the relay UI test.
             let output = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "storage_ui::tests::restores_the_local_conversation_and_latest_draft_in_slint",
-                ])
+                .args(["--exact", test])
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
@@ -671,9 +684,18 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            return false;
+        }
+        true
+    }
+
+    #[test]
+    fn restores_the_local_conversation_and_latest_draft_in_slint() {
+        if !in_test_process(
+            "storage_ui::tests::restores_the_local_conversation_and_latest_draft_in_slint",
+        ) {
             return;
         }
-
         let account_key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
         let public_key = account_key.verifying_key();
         let owner = Owner {
@@ -750,5 +772,90 @@ mod tests {
         let db = Database::open(&temp.0, owner).unwrap();
         assert_eq!(db.draft(id).unwrap().as_deref(), Some("Latest edit"));
         assert_eq!(db.conversations(false).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn replying_offline_promotes_the_selected_request_in_slint() {
+        if !in_test_process(
+            "storage_ui::tests::replying_offline_promotes_the_selected_request_in_slint",
+        ) {
+            return;
+        }
+        let account_key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let public_key = account_key.verifying_key();
+        let owner = Owner {
+            void_id: "41",
+            public_key: public_key.as_bytes(),
+        };
+        let temp = TestDir::new();
+        let mut db = Database::open(&temp.0, owner).unwrap();
+        let id = db.create_conversation("123", 100).unwrap();
+        db.set_request(id, true).unwrap();
+        db.save_message(&Message {
+            id: "incoming-request".into(),
+            conversation_id: id,
+            direction: Direction::Incoming,
+            body: "Incoming request".into(),
+            created_at: 150,
+            delivery_state: DeliveryState::Received,
+        })
+        .unwrap();
+        db.save_draft(id, "First reply").unwrap();
+        db.close().unwrap();
+
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_account_void_id(owner.void_id.into());
+        ui.set_setup_page(0);
+        ui.set_section("Requests".into());
+        ui.set_relay_messaging_enabled(true);
+        let worker = bind_with(&ui, move |_| Ok((temp.0.clone(), account_key.clone()))).unwrap();
+        worker.opener()(&ui);
+
+        let poll = Timer::default();
+        let weak = ui.as_weak();
+        let stage = Cell::new(0);
+        let id = id.to_string();
+        poll.start(TimerMode::Repeated, Duration::from_millis(10), move || {
+            let ui = weak.upgrade().unwrap();
+            match stage.get() {
+                0 if ui.get_storage_ready() => {
+                    assert_eq!(ui.get_stored_requests().row_count(), 1);
+                    ui.invoke_select_stored_conversation(id.clone().into());
+                    stage.set(1);
+                }
+                1 if !ui.get_conversation_loading() => {
+                    assert_eq!(ui.get_section(), "Requests");
+                    assert!(ui.get_conversation_is_request());
+                    assert_eq!(ui.get_stored_requests().row_count(), 1);
+                    assert_eq!(ui.get_stored_draft(), "First reply");
+                    ui.invoke_send_message();
+                    stage.set(2);
+                }
+                2 if !ui.get_send_busy() => {
+                    assert_eq!(ui.get_section(), "Chats");
+                    assert_eq!(ui.get_selected_conversation().as_str(), id);
+                    assert!(!ui.get_conversation_is_request());
+                    assert_eq!(ui.get_stored_requests().row_count(), 0);
+                    assert_eq!(ui.get_stored_chats().row_data(0).unwrap().id.as_str(), id);
+                    assert_eq!(ui.get_stored_messages().row_count(), 2);
+                    let reply = ui.get_stored_messages().row_data(1).unwrap();
+                    assert_eq!(reply.body, "First reply");
+                    assert_eq!(reply.status, "Send failed");
+                    slint::quit_event_loop().unwrap();
+                }
+                _ => (),
+            }
+        });
+        let watchdog = Timer::default();
+        watchdog.start(TimerMode::SingleShot, Duration::from_secs(4), || {
+            slint::quit_event_loop().unwrap();
+        });
+        slint::run_event_loop_until_quit().unwrap();
+        poll.stop();
+        assert_eq!(ui.get_section(), "Chats");
+        assert!(!ui.get_send_busy());
+        drop(ui);
+        worker.finish();
     }
 }

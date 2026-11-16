@@ -199,7 +199,7 @@ fn migrations_and_message_transactions_roll_back_and_enforce_foreign_keys() {
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap()
     };
-    assert_eq!(version(&db.connection), 5);
+    assert_eq!(version(&db.connection), 6);
     assert!(db.save_draft(999, "missing conversation").is_err());
     assert!(db.set_request(999, true).is_err());
     assert!(db.save_message(&sample_message(999)).is_err());
@@ -343,7 +343,7 @@ fn existing_v1_history_survives_current_migrations_and_fk_diagnostics_detect_orp
     connection.close().unwrap();
 
     let db = Database::open(&root.0, OWNER).unwrap();
-    assert_eq!(schema_version(&db.connection, 5).unwrap(), 5);
+    assert_eq!(schema_version(&db.connection, 6).unwrap(), 6);
     assert_eq!(db.messages(1).unwrap()[0].body, "Existing body");
     assert_eq!(db.draft(1).unwrap().as_deref(), Some("Existing draft"));
     db.connection
@@ -435,6 +435,103 @@ fn v4_ciphertext_history_and_account_binding_survive_v5_migration() {
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].retry_event, event);
     assert_eq!(db.messages(conversation).unwrap()[0].id, "legacy-out");
+}
+
+#[test]
+fn request_promotion_and_first_reply_commit_together() {
+    let root = TestDir::new();
+    let mut db = Database::open(&root.0, OWNER).unwrap();
+    let id = db.create_conversation("123", 100).unwrap();
+    db.set_request(id, true).unwrap();
+    db.save_message(&sample_message(id)).unwrap();
+    db.save_draft(id, "First reply").unwrap();
+    db.connection
+        .execute_batch(
+            "CREATE TABLE test_promotion_guard (
+             id INTEGER REFERENCES conversations(id) DEFERRABLE INITIALLY DEFERRED
+         );
+         CREATE TEMP TRIGGER reject_promotion AFTER DELETE ON requests
+         BEGIN INSERT INTO test_promotion_guard VALUES (-1); END;",
+        )
+        .unwrap();
+
+    assert!(db.queue_outgoing(id, "First reply", 200).is_err());
+    assert!(db.conversation(id).unwrap().is_request);
+    assert_eq!(db.conversation(id).unwrap().last_activity_at, 120);
+    assert_eq!(db.conversation_timeline(id).unwrap().len(), 1);
+    assert_eq!(db.draft(id).unwrap().as_deref(), Some("First reply"));
+
+    db.connection
+        .execute_batch("DROP TRIGGER reject_promotion;")
+        .unwrap();
+    db.save_draft(id, "Newer draft").unwrap();
+    let (event_id, promoted) = db.queue_outgoing(id, "First reply", 200).unwrap();
+    assert!(promoted);
+    db.close().unwrap();
+
+    let db = Database::open(&root.0, OWNER).unwrap();
+    assert!(db.conversations(true).unwrap().is_empty());
+    assert_eq!(db.conversations(false).unwrap()[0].id, id);
+    assert_eq!(
+        db.outgoing_operation(&event_id).unwrap().conversation_id,
+        id
+    );
+    assert_eq!(db.draft(id).unwrap().as_deref(), Some("Newer draft"));
+    assert_eq!(db.conversation_timeline(id).unwrap()[1].body, "First reply");
+    assert_eq!(db.messages(id).unwrap()[0].body, BODY);
+}
+
+#[test]
+fn v5_migration_promotes_only_requests_with_outgoing_history_or_operations() {
+    let root = TestDir::new();
+    fs::create_dir(root.0.join("messages")).unwrap();
+    let key = create_key(&root.key()).unwrap();
+    let mut connection = open_keyed(&root.db(), &key, writable_flags(true)).unwrap();
+    migrate_with_scripts(&mut connection, OWNER, true, &MIGRATIONS[..5]).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO conversations VALUES
+            (1, '123', NULL, 100, 120), (2, '124', NULL, 100, 150),
+            (3, '125', NULL, 100, 150), (4, '126', NULL, 100, 150);
+         INSERT INTO requests VALUES (1), (2), (3), (4);
+         INSERT INTO messages VALUES
+            ('incoming-only', 1, 0, 'Incoming', 120, 0),
+            ('before-reply', 2, 0, 'Incoming', 120, 0),
+            ('sent-message', 2, 1, 'Already sent', 150, 2),
+            ('legacy-message', 4, 1, 'Legacy outgoing', 150, 2);
+         INSERT INTO outbox VALUES ('sent-event', 'sent-message', X'0102');
+         INSERT INTO outgoing_operations VALUES
+            ('sent-event', 2, 'Already sent', 150, NULL, 'sent'),
+            ('queued-event', 3, 'Saved locally', 150, NULL, 'failed');
+         INSERT INTO drafts VALUES (1, 'Unsent draft'), (2, 'Keep this draft');",
+        )
+        .unwrap();
+    connection.close().unwrap();
+
+    let db = Database::open(&root.0, OWNER).unwrap();
+    assert_eq!(db.conversations(true).unwrap()[0].id, 1);
+    let chat_ids: Vec<_> = db
+        .conversations(false)
+        .unwrap()
+        .iter()
+        .map(|chat| chat.id)
+        .collect();
+    assert_eq!(chat_ids, [4, 3, 2]);
+    assert_eq!(db.draft(1).unwrap().as_deref(), Some("Unsent draft"));
+    assert_eq!(db.draft(2).unwrap().as_deref(), Some("Keep this draft"));
+    assert_eq!(db.messages(2).unwrap().len(), 2);
+    assert_eq!(
+        db.committed_outgoing("sent-event")
+            .unwrap()
+            .unwrap()
+            .payload,
+        [1, 2]
+    );
+    assert_eq!(
+        db.outgoing_operation("queued-event").unwrap().state,
+        "failed"
+    );
+    assert_eq!(db.messages(4).unwrap()[0].id, "legacy-message");
 }
 
 #[test]

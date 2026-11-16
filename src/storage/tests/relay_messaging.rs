@@ -20,6 +20,7 @@ const BOB: &str = "202";
 const WAIT: Duration = Duration::from_secs(12);
 const BODY: &str = "Offline delivery using Rust Signal";
 const REPLY: &str = "Reply using the established session";
+const FOLLOW_UP: &str = "Later message in the promoted chat";
 
 fn account_key(id: &str) -> SigningKey {
     SigningKey::from_bytes(&[if id == ALICE { 41 } else { 42 }; 32])
@@ -329,6 +330,21 @@ async fn relay_script(listener: TcpListener) {
     .await;
     person(&mut alice, BOB, false).await;
     ack(&mut alice, &reply_event, BOB, true).await;
+
+    person(&mut alice, BOB, false).await;
+    let follow_up = receive_json(&mut alice).await;
+    assert_eq!(follow_up["type"], "send");
+    assert_eq!(follow_up["to_void_id"], BOB);
+    let next_event = delivery(&follow_up, ALICE);
+    send_json(
+        &mut alice,
+        json!({"type":"accepted", "event_id":follow_up["event_id"],
+            "created_at":next_event["created_at"], "expires_at":next_event["expires_at"]}),
+    )
+    .await;
+    send_json(&mut bob, next_event.clone()).await;
+    person(&mut bob, ALICE, false).await;
+    ack(&mut bob, &next_event, ALICE, true).await;
 }
 
 fn mock_relay() -> (String, thread::JoinHandle<()>) {
@@ -402,7 +418,8 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     let when = chrono::Utc::now().timestamp_millis();
     let conversation = alice.create_conversation(BOB, when).unwrap();
     alice.save_draft(conversation, BODY).unwrap();
-    let event_id = alice.queue_outgoing(conversation, BODY, when).unwrap();
+    let (event_id, promoted) = alice.queue_outgoing(conversation, BODY, when).unwrap();
+    assert!(!promoted);
     assert_eq!(
         alice.conversation_timeline(conversation).unwrap()[0].status,
         "Pending"
@@ -492,13 +509,19 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
     let bob_session = session_record(&bob, ALICE);
     bob.close().unwrap();
     let mut bob = open(&bob_dir, BOB);
-    let session = client.next_session();
-    client.receive(&mut bob, &session).unwrap();
+    let bob_relay = client.next_session();
+    client.receive(&mut bob, &bob_relay).unwrap();
     assert_eq!(bob.messages(request.id).unwrap().len(), 1);
     assert_eq!(session_record(&bob, ALICE), bob_session);
 
-    let reply_id = bob.queue_outgoing(request.id, REPLY, when + 1).unwrap();
-    messaging::send(&mut bob, Some(&session), &reply_id).unwrap();
+    assert!(bob.conversation(request.id).unwrap().is_request);
+    let (reply_id, promoted) = bob.queue_outgoing(request.id, REPLY, when + 1).unwrap();
+    assert!(promoted);
+    assert!(bob.conversations(true).unwrap().is_empty());
+    assert_eq!(bob.conversations(false).unwrap()[0].id, request.id);
+    assert_eq!(session_record(&bob, ALICE), bob_session);
+    assert_eq!(bob.outgoing_operation(&reply_id).unwrap().state, "pending");
+    messaging::send(&mut bob, Some(&bob_relay), &reply_id).unwrap();
     assert_eq!(bob.outgoing_operation(&reply_id).unwrap().state, "sent");
     assert_eq!(
         bob.conversation_timeline(request.id).unwrap()[1].status,
@@ -519,5 +542,21 @@ fn encrypted_relay_round_trip_recovers_durable_operations_and_acks_only_committe
         alice.outgoing_operation(&event_id).unwrap().state,
         "unconfirmed"
     );
+    bob.close().unwrap();
+    let mut bob = open(&bob_dir, BOB);
+    assert!(!bob.conversation(request.id).unwrap().is_request);
+    let (follow_up, promoted) = alice
+        .queue_outgoing(conversation, FOLLOW_UP, when + 2)
+        .unwrap();
+    assert!(!promoted);
+    messaging::send(&mut alice, Some(&session), &follow_up).unwrap();
+    client.receive(&mut bob, &bob_relay).unwrap();
+    assert!(bob.conversations(true).unwrap().is_empty());
+    let chats = bob.conversations(false).unwrap();
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0].id, request.id);
+    let messages = bob.messages(request.id).unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2].body, FOLLOW_UP);
     mock.join().unwrap();
 }
