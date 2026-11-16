@@ -77,6 +77,17 @@ component Action inherits Clickable {
     }
 }
 
+component PaneScroll inherits ScrollView {
+    min-height: 0px;
+    horizontal-scrollbar-policy: always-off;
+    content-width: self.visible-width;
+}
+
+component WrappingText inherits Text {
+    min-width: 0px;
+    wrap: word-wrap;
+}
+
 enum NavIcon { chats, requests, contacts, settings }
 
 component NavItem inherits Clickable {
@@ -136,8 +147,8 @@ component SettingDetail inherits Rectangle {
         padding: 16px;
         spacing: 8px;
         Text { text: root.label; color: Theme.primary; font-size: 14px; font-weight: 600; }
-        Text { text: root.value; color: Theme.accent; font-size: 14px; }
-        if root.description != "": Text { text: root.description; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
+        WrappingText { text: root.value; color: Theme.accent; font-size: 14px; }
+        if root.description != "": WrappingText { text: root.description; color: Theme.secondary; font-size: 13px; }
     }
 }
 
@@ -152,18 +163,16 @@ component AccountRemovalPage inherits Rectangle {
     callback edit-phrase(string);
     callback confirm();
     callback cancel();
-    private property <length> gutter: max(40px, (root.width - 600px) / 2);
+    private property <length> gutter: max(24px, (root.width - 600px) / 2);
 
-    ScrollView {
+    PaneScroll {
         width: parent.width;
         height: parent.height;
-        horizontal-scrollbar-policy: always-off;
-        content-width: self.visible-width;
         VerticalLayout {
             alignment: start;
             padding-left: root.gutter;
             padding-right: root.gutter;
-            padding-top: 44px;
+            padding-top: clamp(root.height * 0.075, 24px, 48px);
             padding-bottom: 28px;
             spacing: 14px;
             Text {
@@ -176,9 +185,9 @@ component AccountRemovalPage inherits Rectangle {
             if root.busy: HorizontalLayout {
                 spacing: 12px;
                 Spinner { width: 20px; height: 20px; }
-                Text { text: root.status; color: Theme.secondary; wrap: word-wrap; }
+                WrappingText { text: root.status; color: Theme.secondary; }
             }
-            if root.error != "": Text { text: root.error; color: Theme.error; wrap: word-wrap; }
+            if root.error != "": WrappingText { text: root.error; color: Theme.error; }
             if !root.busy && root.error == "": VerticalLayout {
                 alignment: start;
                 spacing: 12px;
@@ -230,7 +239,9 @@ component AccountRemovalPage inherits Rectangle {
 
 component StorageRow inherits Clickable {
     in property <string> detail;
-    height: 58px;
+    accessible-label: root.label + ", " + root.detail;
+    min-height: 58px;
+    vertical-stretch: 0;
 
     VerticalLayout {
         padding-left: 12px;
@@ -249,6 +260,48 @@ component StorageRow inherits Clickable {
             color: Theme.secondary;
             font-size: 12px;
             overflow: elide;
+        }
+    }
+}
+
+component MessageBubble inherits Rectangle {
+    in property <StoredMessage> message;
+    in property <length> width-limit;
+    in property <bool> show-retry;
+    in property <bool> retry-enabled;
+    callback retry();
+    private property <length> inset: 10px;
+
+    width: min(root.width-limit,
+        max(body.preferred-width, metadata.preferred-width, root.show-retry ? 84px : 0px) + 2 * root.inset);
+    min-height: content.min-height;
+    preferred-height: content.min-height;
+    vertical-stretch: 0;
+    background: root.message.outgoing ? Theme.outgoing : Theme.elevated;
+    border-radius: 12px;
+
+    content := VerticalLayout {
+        alignment: start;
+        padding: root.inset;
+        spacing: 4px;
+        body := WrappingText {
+            text: root.message.body;
+            color: Theme.primary;
+            font-size: 14px;
+        }
+        metadata := WrappingText {
+            text: root.message.time + (root.message.status != "" ? " · " + root.message.status : "");
+            color: Theme.secondary;
+            font-size: 11px;
+            horizontal-alignment: right;
+        }
+        if root.show-retry: HorizontalLayout {
+            alignment: end;
+            Action {
+                label: "Resend";
+                enabled: root.retry-enabled;
+                clicked => { root.retry(); }
+            }
         }
     }
 }
@@ -304,13 +357,10 @@ component SetupPage inherits Rectangle {
         if root.active { setup-content.content-y = 0px; }
     }
 
-    setup-content := ScrollView {
+    setup-content := PaneScroll {
         width: parent.width;
         height: parent.height;
         enabled: root.active;
-        horizontal-scrollbar-policy: always-off;
-        content-width: self.visible-width;
-
         VerticalLayout {
             padding-top: root.onboarding-step ? max(root.top-padding, setup-content.visible-height * 0.30)
                 : root.top-padding;
@@ -322,9 +372,11 @@ component SetupPage inherits Rectangle {
                 horizontal-stretch: 1;
                 max-width: root.reading-width;
                 min-height: step-content.min-height;
+                preferred-height: step-content.min-height;
+                vertical-stretch: 0;
 
                 step-content := VerticalLayout {
-                    alignment: root.onboarding-step || root.page == 5 ? start : stretch;
+                    alignment: start;
                     spacing: root.onboarding-step ? 20px : 16px;
 
                     Text {
@@ -383,19 +435,17 @@ component SetupPage inherits Rectangle {
                         spacing: 12px;
                         min-height: 44px;
                         Spinner { width: 20px; height: 20px; }
-                        Text {
+                        WrappingText {
                             text: root.status;
                             color: Theme.secondary;
                             font-size: 15px;
                             vertical-alignment: center;
-                            wrap: word-wrap;
                         }
                     }
-                    if root.active && root.error != "": Text {
+                    if root.active && root.error != "": WrappingText {
                         text: root.error;
                         color: Theme.error;
                         font-size: 15px;
-                        wrap: word-wrap;
                     }
                     if root.page == 5 && root.can-retry: HorizontalLayout {
                         alignment: root.onboarding-step ? center : start;
@@ -430,7 +480,7 @@ component AccountSetup inherits Rectangle {
     private property <bool> security-acknowledged;
     private property <bool> terms-acknowledged;
     private property <bool> show-steps: root.page > 0 && root.page <= 5 && !root.retry-storage && root.can-retry;
-    private property <length> gutter: max(40px, (root.width - root.reading-width) / 2);
+    private property <length> gutter: max(24px, (root.width - root.reading-width) / 2);
     private property <length> reading-width: 600px;
     private property <float> slide-position: max(0, root.page);
     animate slide-position { duration: 360ms; easing: ease-in-out; }
@@ -718,9 +768,11 @@ export component AppWindow inherits Window {
     private property <length> requested-list-width: 280px;
     private property <length> divider-width: 9px;
     private property <length> min-list-width: 220px;
-    private property <length> max-list-width: min(480px, root.width - root.list-start - root.divider-width - 330px);
-    private property <length> header-height: 72px;
-    private property <length> list-gutter: 16px;
+    private property <length> min-chat-width: root.compact ? 380px : 420px;
+    private property <length> max-list-width: min(480px, root.width - root.list-start - root.divider-width - root.min-chat-width);
+    private property <length> list-width: clamp(root.requested-list-width, root.min-list-width, root.max-list-width);
+    private property <length> header-height: root.compact ? 64px : 72px;
+    private property <length> list-gutter: root.compact ? 12px : 16px;
     private property <length> chat-gutter: root.compact ? 20px : 28px;
     private property <bool> enrolling: root.setup-page == 6;
     private property <bool> in-settings: root.setup-page == 0 && root.section == "Settings";
@@ -905,7 +957,7 @@ export component AppWindow inherits Window {
 
         list-pane := Rectangle {
             x: root.list-start;
-            width: clamp(root.requested-list-width, root.min-list-width, root.max-list-width);
+            width: root.list-width;
             background: Theme.surface;
 
             VerticalLayout {
@@ -925,6 +977,7 @@ export component AppWindow inherits Window {
                             font-weight: 700;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
+                            overflow: elide;
                         }
                         if root.storage-ready && root.section == "Chats": Action {
                             label: "+ New";
@@ -940,120 +993,112 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 1px; background: Theme.divider; }
 
-                if root.section != "Settings" && !root.storage-ready: VerticalLayout {
-                    padding: root.list-gutter;
-                    spacing: 12px;
-
-                    Text {
-                        text: root.storage-loading ? "Opening encrypted storage…" : root.storage-error;
-                        color: root.storage-loading ? Theme.secondary : Theme.error;
-                        font-size: 13px;
-                        wrap: word-wrap;
-                    }
-                    if !root.storage-loading: Action {
-                        label: "Try again";
-                        clicked => { root.retry-storage(); }
-                    }
-                    Rectangle { vertical-stretch: 1; }
-                }
-
-                if root.section != "Settings" && root.storage-ready: ScrollView {
-                    vertical-stretch: 1;
-                    horizontal-scrollbar-policy: always-off;
-                    content-width: self.visible-width;
-
+                PaneScroll {
                     VerticalLayout {
+                        alignment: start;
                         padding: root.list-gutter;
-                        spacing: 4px;
+                        spacing: 8px;
 
-                        if root.section == "Contacts" ? root.stored-contacts.length == 0 : root.visible-conversations.length == 0: Text {
-                            text: root.section == "Requests" ? "No incoming requests"
-                                : root.section == "Contacts" ? "No contacts yet"
-                                : "No conversations yet";
-                            color: Theme.secondary;
-                            font-size: 13px;
-                            wrap: word-wrap;
+                        if root.unsaved-draft-failure: WrappingText {
+                            text: "A draft could not be saved. Reopen its conversation to retry.";
+                            color: Theme.error;
+                            font-size: 12px;
                         }
-                        if root.section == "Contacts": VerticalLayout {
-                            spacing: 4px;
-                            for contact in root.stored-contacts: StorageRow {
-                                label: contact.title;
-                                detail: "VOID-ID " + contact.void-id;
-                                enabled: !root.conversation-loading;
-                                clicked => { root.create-stored-conversation(contact.void-id); }
+                        if root.messaging-notice != "": WrappingText {
+                            text: root.messaging-notice;
+                            color: Theme.error;
+                            font-size: 12px;
+                        }
+                        if root.publication-error != "": WrappingText {
+                            text: root.publication-error;
+                            color: Theme.error;
+                            font-size: 12px;
+                        }
+                        if root.publication-retryable && root.connection-status == "Connected": Action {
+                            label: "Retry messaging";
+                            clicked => { root.retry-messaging(); }
+                        }
+
+                        if root.section == "Settings": VerticalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            for category in ["Appearance", "Account", "About"]: Action {
+                                label: category;
+                                selected: root.settings-section == category;
+                                clicked => { root.settings-section = category; }
                             }
                         }
-                        if root.section != "Contacts": VerticalLayout {
+                        if root.section != "Settings" && !root.storage-ready: WrappingText {
+                            text: root.storage-loading ? "Opening encrypted storage…" : root.storage-error;
+                            color: root.storage-loading ? Theme.secondary : Theme.error;
+                            font-size: 13px;
+                        }
+                        if root.section != "Settings" && !root.storage-ready && !root.storage-loading: Action {
+                            label: "Try again";
+                            clicked => { root.retry-storage(); }
+                        }
+
+                        if root.section != "Settings" && root.storage-ready: VerticalLayout {
+                            alignment: start;
                             spacing: 4px;
-                            for chat in root.visible-conversations: StorageRow {
-                                label: chat.title;
-                                detail: chat.activity;
-                                selected: root.show-conversation && root.selected-conversation == chat.id;
-                                enabled: !root.conversation-loading;
-                                clicked => {
-                                    root.creating-conversation = false;
-                                    root.select-stored-conversation(chat.id);
+                            if root.section == "Contacts" ? root.stored-contacts.length == 0 : root.visible-conversations.length == 0: Text {
+                                text: root.section == "Requests" ? "No incoming requests"
+                                    : root.section == "Contacts" ? "No contacts yet" : "No conversations yet";
+                                color: Theme.secondary;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                            if root.section == "Contacts": VerticalLayout {
+                                alignment: start;
+                                spacing: 4px;
+                                for contact in root.stored-contacts: StorageRow {
+                                    label: contact.title;
+                                    detail: "VOID-ID " + contact.void-id;
+                                    enabled: !root.conversation-loading;
+                                    clicked => { root.create-stored-conversation(contact.void-id); }
+                                }
+                            }
+                            if root.section != "Contacts": VerticalLayout {
+                                alignment: start;
+                                spacing: 4px;
+                                for chat in root.visible-conversations: StorageRow {
+                                    label: chat.title;
+                                    detail: chat.activity;
+                                    selected: root.show-conversation && root.selected-conversation == chat.id;
+                                    enabled: !root.conversation-loading;
+                                    clicked => {
+                                        root.creating-conversation = false;
+                                        root.select-stored-conversation(chat.id);
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                if root.section == "Settings": VerticalLayout {
-                    padding: root.list-gutter;
-                    spacing: 8px;
-                    for category in ["Appearance", "Account", "About"]: Action {
-                        label: category;
-                        selected: root.settings-section == category;
-                        clicked => { root.settings-section = category; }
-                    }
-                    Rectangle { vertical-stretch: 1; }
-                }
-
-                if root.unsaved-draft-failure: VerticalLayout {
+                if root.publication-error == "" && root.connection-status == "Connected": VerticalLayout {
+                    alignment: start;
                     padding-left: root.list-gutter;
                     padding-right: root.list-gutter;
                     padding-bottom: 8px;
                     Text {
-                        text: "A draft could not be saved. Reopen its conversation to retry.";
-                        color: Theme.error;
+                        text: root.messaging-ready ? "Messaging ready" : "Preparing messaging…";
+                        color: Theme.secondary;
                         font-size: 12px;
                         wrap: word-wrap;
-                    }
-                }
-                if root.messaging-notice != "": VerticalLayout {
-                    padding-left: root.list-gutter;
-                    padding-right: root.list-gutter;
-                    padding-bottom: 8px;
-                    Text { text: root.messaging-notice; color: Theme.error; font-size: 12px; wrap: word-wrap; }
-                }
-                if root.publication-error != "" || root.connection-status == "Connected": VerticalLayout {
-                    padding-left: root.list-gutter;
-                    padding-right: root.list-gutter;
-                    padding-bottom: 8px;
-                    spacing: 6px;
-                    Text {
-                        text: root.publication-error != "" ? root.publication-error
-                            : root.messaging-ready ? "Messaging ready" : "Preparing messaging…";
-                        color: root.publication-error != "" ? Theme.error : Theme.secondary;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                    if root.publication-retryable && root.connection-status == "Connected": Action {
-                        label: "Retry messaging";
-                        clicked => { root.retry-messaging(); }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
                 HorizontalLayout {
-                    height: 56px;
+                    min-height: 56px;
+                    vertical-stretch: 0;
                     padding-left: root.list-gutter;
                     padding-right: root.list-gutter;
                     padding-top: 6px;
                     padding-bottom: 6px;
                     spacing: 8px;
 
-                    Text {
+                    WrappingText {
                         text: root.connection-status == "Connected" ? "Relay authenticated" : root.connection-status;
                         accessible-label: "Relay connection: " + self.text;
                         color: root.connection-status == "Authentication failed" ? Theme.error
@@ -1061,7 +1106,6 @@ export component AppWindow inherits Window {
                         font-size: 12px;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
-                        wrap: word-wrap;
                     }
                     if root.can-reconnect: Action {
                         label: "Reconnect";
@@ -1076,7 +1120,11 @@ export component AppWindow inherits Window {
             x: list-pane.x + list-pane.width;
             width: root.divider-width;
             mouse-cursor: col-resize;
+            forward-focus: resize-focus;
 
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down { resize-focus.focus(); }
+            }
             moved => {
                 if self.pressed {
                     root.requested-list-width = clamp(list-pane.width + self.mouse-x - self.pressed-x,
@@ -1104,6 +1152,7 @@ export component AppWindow inherits Window {
         }
 
         chat-pane := Rectangle {
+            private property <length> thread-gutter: max(root.chat-gutter, (self.width - 1080px) / 2);
             x: divider.x + divider.width;
             width: parent.width - self.x;
 
@@ -1121,13 +1170,12 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                ScrollView {
+                PaneScroll {
                     vertical-stretch: 1;
-                    horizontal-scrollbar-policy: always-off;
-                    content-width: self.visible-width;
                     VerticalLayout {
                         alignment: start;
                         padding: root.chat-gutter;
+                        padding-right: max(root.chat-gutter, chat-pane.width - root.chat-gutter - 680px);
                         spacing: 16px;
                         SettingDetail {
                             label: root.settings-section == "Appearance" ? "Theme"
@@ -1185,64 +1233,69 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if root.section != "Settings" && !root.creating-conversation && !root.show-conversation: VerticalLayout {
-                padding: root.chat-gutter;
-                alignment: center;
+            if root.section != "Settings" && !root.creating-conversation && !root.show-conversation: PaneScroll {
+                VerticalLayout {
+                    padding-left: max(root.chat-gutter, (chat-pane.width - 460px) / 2);
+                    padding-right: self.padding-left;
+                    padding-top: root.chat-gutter;
+                    padding-bottom: root.chat-gutter;
+                    alignment: center;
 
-                Text {
-                    text: root.conversation-error != "" ? root.conversation-error
-                        : root.conversation-loading ? "Loading conversation…"
-                        : !root.storage-ready ? ""
-                        : root.section == "Chats" ? "Open a local conversation to view its history or write a draft."
-                        : root.section == "Requests" ? "Open a saved request to view it here."
-                        : "Open a saved contact to view their conversation.";
-                    color: root.conversation-error != "" ? Theme.error : Theme.secondary;
-                    font-size: 16px;
-                    wrap: word-wrap;
-                    horizontal-alignment: center;
+                    WrappingText {
+                        text: root.conversation-error != "" ? root.conversation-error
+                            : root.conversation-loading ? "Loading conversation…"
+                            : !root.storage-ready ? ""
+                            : root.section == "Chats" ? "Open a local conversation to view its history or write a draft."
+                            : root.section == "Requests" ? "Open a saved request to view it here."
+                            : "Open a saved contact to view their conversation.";
+                        color: root.conversation-error != "" ? Theme.error : Theme.secondary;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                    }
                 }
             }
 
-            if root.creating-conversation && root.section == "Chats": VerticalLayout {
-                padding: root.chat-gutter;
-                spacing: 12px;
+            if root.creating-conversation && root.section == "Chats": PaneScroll {
+                VerticalLayout {
+                    alignment: start;
+                    padding: root.chat-gutter;
+                    padding-right: max(root.chat-gutter, chat-pane.width - root.chat-gutter - 500px);
+                    spacing: 12px;
 
-                Text { text: "New local conversation"; color: Theme.primary; font-size: 20px; font-weight: 700; }
-                Text {
-                    text: "Enter the recipient’s VOID-ID to open a conversation.";
-                    color: Theme.secondary;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-                Text { text: "Peer VOID-ID"; color: Theme.primary; font-size: 14px; }
-                peer := LineEdit {
-                    accessible-label: "Peer VOID-ID";
-                    height: 44px;
-                    enabled: !root.conversation-loading;
-                    edited => { root.conversation-error = ""; }
-                    accepted => { root.create-stored-conversation(self.text); }
-                }
-                if root.conversation-error != "": Text {
-                    text: root.conversation-error;
-                    color: Theme.error;
-                    wrap: word-wrap;
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    Action {
-                        label: "Cancel";
+                    Text { text: "New local conversation"; color: Theme.primary; font-size: 20px; font-weight: 700; }
+                    WrappingText {
+                        text: "Enter the recipient’s VOID-ID to open a conversation.";
+                        color: Theme.secondary;
+                        font-size: 13px;
+                    }
+                    Text { text: "Peer VOID-ID"; color: Theme.primary; font-size: 14px; }
+                    peer := LineEdit {
+                        accessible-label: "Peer VOID-ID";
+                        height: 44px;
                         enabled: !root.conversation-loading;
-                        clicked => { root.creating-conversation = false; root.conversation-error = ""; }
+                        edited => { root.conversation-error = ""; }
+                        accepted => { root.create-stored-conversation(self.text); }
                     }
-                    Action {
-                        label: root.conversation-loading ? "Opening…" : "Open conversation";
-                        primary: true;
-                        enabled: !root.conversation-loading && peer.text != "";
-                        clicked => { root.create-stored-conversation(peer.text); }
+                    if root.conversation-error != "": WrappingText {
+                        text: root.conversation-error;
+                        color: Theme.error;
                     }
-                    Rectangle { horizontal-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Action {
+                            label: "Cancel";
+                            enabled: !root.conversation-loading;
+                            clicked => { root.creating-conversation = false; root.conversation-error = ""; }
+                        }
+                        Action {
+                            label: root.conversation-loading ? "Opening…" : "Open conversation";
+                            primary: true;
+                            enabled: !root.conversation-loading && peer.text != "";
+                            clicked => { root.create-stored-conversation(peer.text); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
                 }
-                Rectangle { vertical-stretch: 1; }
             }
 
             if root.show-conversation: VerticalLayout {
@@ -1265,18 +1318,48 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
-                if root.conversation-loading || root.conversation-error != "": Text {
-                    text: root.conversation-loading ? "Loading conversation…" : root.conversation-error;
-                    color: root.conversation-loading ? Theme.secondary : Theme.error;
-                    wrap: word-wrap;
-                    horizontal-alignment: center;
+                if root.conversation-loading || root.conversation-error != "": PaneScroll {
+                    height: min(notice.min-height, 100px);
+                    notice := VerticalLayout {
+                        alignment: start;
+                        padding-left: root.chat-gutter;
+                        padding-right: root.chat-gutter;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        WrappingText {
+                            text: root.conversation-loading ? "Loading conversation…" : root.conversation-error;
+                            color: root.conversation-loading ? Theme.secondary : Theme.error;
+                            horizontal-alignment: center;
+                        }
+                    }
                 }
-                ScrollView {
-                    vertical-stretch: 1;
-                    horizontal-scrollbar-policy: always-off;
-                    content-width: self.visible-width;
-                    VerticalLayout {
-                        padding: root.chat-gutter;
+
+                timeline := PaneScroll {
+                    min-height: 72px;
+                    private property <bool> follow-latest: true;
+                    private property <length> end-offset: min(0px, self.visible-height - self.content-height);
+                    private property <string> conversation: root.selected-conversation;
+
+                    changed conversation => {
+                        self.follow-latest = true;
+                        self.content-y = self.end-offset;
+                    }
+                    changed end-offset => {
+                        self.content-y = self.follow-latest ? self.end-offset
+                            : clamp(self.content-y, self.end-offset, 0px);
+                    }
+                    scrolled => {
+                        self.follow-latest = self.content-y <= self.end-offset + 8px;
+                    }
+
+                    content-height: max(self.visible-height, history.min-height);
+
+                    history := VerticalLayout {
+                        alignment: root.stored-messages.length == 0 ? center : end;
+                        padding-left: chat-pane.thread-gutter;
+                        padding-right: chat-pane.thread-gutter;
+                        padding-top: root.chat-gutter;
+                        padding-bottom: root.chat-gutter;
                         spacing: 8px;
                         if root.stored-messages.length == 0: Text {
                             text: "No saved messages";
@@ -1285,70 +1368,62 @@ export component AppWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         for message in root.stored-messages: HorizontalLayout {
-                            if message.outgoing: Rectangle { horizontal-stretch: 1; }
-                            Rectangle {
-                                width: min(380px, (chat-pane.width - 2 * root.chat-gutter) * 0.82,
-                                    max(body.preferred-width, time.preferred-width, state.preferred-width,
-                                        !root.conversation-peer-deleted && message.retry-event != "" ? 84px : 0px) + 20px);
-                                min-height: bubble.min-height;
-                                background: message.outgoing ? Theme.outgoing : Theme.elevated;
-                                border-radius: 12px;
-                                bubble := VerticalLayout {
-                                    padding: 10px;
-                                    spacing: 3px;
-                                    body := Text { text: message.body; color: Theme.primary; font-size: 14px; wrap: word-wrap; }
-                                    time := Text { text: message.time; color: Theme.secondary; font-size: 11px; horizontal-alignment: right; }
-                                    state := Text {
-                                        visible: message.status != "";
-                                        text: message.status;
-                                        color: Theme.secondary;
-                                        font-size: 11px;
-                                        horizontal-alignment: right;
-                                        wrap: word-wrap;
-                                    }
-                                    if !root.conversation-peer-deleted && message.retry-event != "": HorizontalLayout {
-                                        Rectangle { horizontal-stretch: 1; }
-                                        Action {
-                                            label: "Resend";
-                                            enabled: root.messaging-ready && !root.send-busy;
-                                            clicked => { root.resend-message(message.retry-event); }
-                                        }
-                                    }
-                                }
+                            alignment: message.outgoing ? end : start;
+                            MessageBubble {
+                                message: message;
+                                width-limit: min(440px, (chat-pane.width - 2 * chat-pane.thread-gutter) * 0.86);
+                                show-retry: !root.conversation-peer-deleted && message.retry-event != "";
+                                retry-enabled: root.messaging-ready && !root.send-busy;
+                                retry => { root.resend-message(message.retry-event); }
                             }
-                            if !message.outgoing: Rectangle { horizontal-stretch: 1; }
                         }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }
                 if root.conversation-account-notice != "": VerticalLayout {
-                    padding: root.chat-gutter;
+                    alignment: start;
+                    vertical-stretch: 0;
+                    padding: 12px;
+                    padding-left: chat-pane.thread-gutter;
+                    padding-right: chat-pane.thread-gutter;
                     spacing: 4px;
                     Text { text: root.conversation-account-notice; color: Theme.primary; font-size: 14px; font-weight: 600; wrap: word-wrap; }
                     Text { text: "You can no longer send messages to this account."; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
                 }
                 if root.conversation-can-compose: VerticalLayout {
+                    alignment: start;
+                    vertical-stretch: 0;
                     padding: 12px;
-                    padding-left: root.chat-gutter;
-                    padding-right: root.chat-gutter;
+                    padding-left: chat-pane.thread-gutter;
+                    padding-right: chat-pane.thread-gutter;
                     spacing: 6px;
                     Text { text: "Message"; color: Theme.primary; font-size: 13px; font-weight: 600; }
                     TextEdit {
                         accessible-label: "Local message draft";
-                        height: 72px;
+                        preferred-height: clamp(root.height * 0.12, 56px, 100px);
+                        min-height: 56px;
+                        max-height: 100px;
+                        vertical-stretch: 0;
+                        wrap: word-wrap;
                         enabled: !root.conversation-loading;
                         text <=> root.stored-draft;
                         edited(text) => { root.save-stored-draft(text); }
                     }
+                    if root.draft-save-failed: WrappingText {
+                        text: root.draft-status;
+                        color: Theme.error;
+                        font-size: 12px;
+                    }
                     HorizontalLayout {
                         spacing: 8px;
-                        Text {
+                        if !root.draft-save-failed: WrappingText {
                             text: root.draft-status != "" ? root.draft-status : "Drafts stay on this device";
-                            color: root.draft-save-failed ? Theme.error : Theme.secondary;
+                            color: Theme.secondary;
                             font-size: 12px;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
+                        if root.draft-save-failed: Rectangle { horizontal-stretch: 1; }
                         if root.draft-save-failed: Action {
                             label: "Retry saving";
                             enabled: !root.conversation-loading;
