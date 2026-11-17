@@ -1,4 +1,5 @@
 mod message_time;
+mod timeline;
 
 use crate::{AppWindow, StoredContact, StoredConversation, StoredMessage, account, storage};
 use crate::{
@@ -7,22 +8,27 @@ use crate::{
     storage::account_status::AccountStatus,
 };
 use message_time::MessageTime;
-use slint::{ComponentHandle, ModelRc, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, VecModel, Weak};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     sync::mpsc::{self, Sender},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use storage::messaging::TimelineCursor;
+use timeline::{History, ReadingPosition, TimelineWindow};
 
 const PEER_STATUS_INTERVAL: Duration = Duration::from_millis(600);
 
 enum Command {
     Open(String),
-    Select(i64, i32),
+    Select(i64, i32, bool, Option<ReadingPosition>),
+    Page(i64, i32, bool),
+    Present(i64, i32),
+    Restore(i64, i32, TimelineCursor),
     MarkRead(i64, i64),
-    Create(String, i32),
+    Create(String, i32, Option<ReadingPosition>),
     SaveDraft(i64, String, i32),
     SendDraft(i64, String, i32),
     Resend(String),
@@ -103,7 +109,7 @@ fn bind_with(
             let mut queued = None;
             let mut relay: Option<Session> = None;
             let mut messaging_ready = false;
-            let mut selected = None;
+            let mut history = History::default();
             let mut peer_refresh = VecDeque::new();
             let mut next_peer_refresh = Instant::now();
             let mut next_receipt = None;
@@ -143,6 +149,7 @@ fn bind_with(
                     &command,
                     Command::Relay(_) | Command::RetryMessaging | Command::UploadReceipt
                 );
+                let selected = history.active.as_ref().map(|view| view.conversation);
                 match command {
                     Command::Open(id) => {
                         if database.is_some() {
@@ -177,10 +184,40 @@ fn bind_with(
                             }
                         }
                     }
-                    Command::Select(id, selection) => {
+                    Command::Select(id, selection, from_requests, previous) => {
                         if let Some(db) = &database {
-                            selected = Some(id);
-                            show_conversation(&weak, selection, load_conversation(db, id));
+                            history.remember(previous);
+                            show_conversation(
+                                &weak,
+                                selection,
+                                from_requests,
+                                load_conversation(db, &mut history, id, selection),
+                            );
+                        }
+                    }
+                    Command::Page(id, selection, older) => {
+                        if let (Some(db), Some(view)) = (&database, history.current(id, selection))
+                        {
+                            let result = view.page(db, older);
+                            show_timeline_result(&weak, id, selection, result, false);
+                        }
+                    }
+                    Command::Present(id, selection) => {
+                        if let (Some(db), Some(view)) = (&database, history.current(id, selection))
+                        {
+                            let result = view.present(db);
+                            show_timeline_result(&weak, id, selection, result, true);
+                        }
+                    }
+                    Command::Restore(id, selection, cursor) => {
+                        if let (Some(db), Some(view)) = (&database, history.current(id, selection))
+                        {
+                            let (result, to_present) = match view.restore(db, &cursor) {
+                                Ok(Some(window)) => (Ok(window), false),
+                                Ok(None) => (view.present(db), true),
+                                Err(error) => (Err(error), false),
+                            };
+                            show_timeline_result(&weak, id, selection, result, to_present);
                         }
                     }
                     Command::MarkRead(id, through) => {
@@ -195,16 +232,24 @@ fn bind_with(
                             });
                         }
                     }
-                    Command::Create(peer, selection) => {
+                    Command::Create(peer, selection, previous) => {
                         if let Some(db) = &database {
+                            history.remember(previous);
                             let now = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as i64;
                             let result = db.create_conversation(&peer, now).and_then(|id| {
-                                selected = Some(id);
-                                Ok((load_lists(db)?, load_conversation(db, id)?))
+                                Ok((
+                                    load_lists(db)?,
+                                    load_conversation(db, &mut history, id, selection)?,
+                                ))
                             });
+                            if result.is_err()
+                                && let Some(view) = &mut history.active
+                            {
+                                view.selection = selection;
+                            }
                             let _ = weak.upgrade_in_event_loop(move |ui| match result {
                                 Ok((lists, detail)) => {
                                     lists.show(&ui);
@@ -212,15 +257,17 @@ fn bind_with(
                                         return;
                                     }
                                     ui.set_conversation_loading(false);
-                                    ui.set_creating_conversation(false);
-                                    ui.set_section(
-                                        if detail.conversation.is_request {
-                                            "Requests"
-                                        } else {
-                                            "Chats"
-                                        }
-                                        .into(),
-                                    );
+                                    if ui.get_creating_conversation() {
+                                        ui.set_creating_conversation(false);
+                                        ui.set_section(
+                                            if detail.conversation.is_request {
+                                                "Requests"
+                                            } else {
+                                                "Chats"
+                                            }
+                                            .into(),
+                                        );
+                                    }
                                     detail.show(&ui);
                                 }
                                 Err(_) if ui.get_storage_selection_token() == selection => {
@@ -308,7 +355,7 @@ fn bind_with(
                             && session.is_active()
                         {
                             let result = messaging::receive(db, session, &sender, &event_id, &json);
-                            refresh_messages(&weak, db, selected, None);
+                            refresh_messages(&weak, db, &mut history, None, None);
                             show_messaging_result(&weak, result);
                         }
                     }
@@ -327,13 +374,19 @@ fn bind_with(
                                             revision,
                                         );
                                     });
-                                    refresh_messages(&weak, db, selected, promoted.then_some(id));
+                                    refresh_messages(
+                                        &weak,
+                                        db,
+                                        &mut history,
+                                        promoted.then_some(id),
+                                        Some(id),
+                                    );
                                     let result = messaging::send(
                                         db,
                                         relay.as_ref().filter(|_| messaging_ready),
                                         &event_id,
                                     );
-                                    refresh_messages(&weak, db, selected, None);
+                                    refresh_messages(&weak, db, &mut history, None, None);
                                     result
                                 }
                                 Err(error) => Err(error.into()),
@@ -350,7 +403,7 @@ fn bind_with(
                                 relay.as_ref().filter(|_| messaging_ready),
                                 &event_id,
                             );
-                            refresh_messages(&weak, db, selected, None);
+                            refresh_messages(&weak, db, &mut history, None, None);
                             result
                         } else {
                             Err(storage::Error::Unavailable.into())
@@ -402,12 +455,19 @@ fn bind_with(
     let sender = worker.sender.clone();
     ui.on_select_stored_conversation(move |id| {
         if let (Some(ui), Ok(id)) = (weak.upgrade(), id.parse()) {
+            let previous = ReadingPosition::capture(&ui);
             let selection = begin_selection(&ui);
-            if sender.send(Command::Select(id, selection)).is_err() {
+            let from_requests = ui.get_section() == "Requests";
+            if sender
+                .send(Command::Select(id, selection, from_requests, previous))
+                .is_err()
+            {
                 worker_stopped(&ui);
             }
         }
     });
+
+    bind_timeline(ui, worker.sender.clone());
 
     let sender = worker.sender.clone();
     ui.on_read_visible_conversation(move |id, through| {
@@ -430,9 +490,10 @@ fn bind_with(
             ui.set_conversation_error("Enter another person's VOID-ID.".into());
             return;
         }
+        let previous = ReadingPosition::capture(&ui);
         let selection = begin_selection(&ui);
         if sender
-            .send(Command::Create(peer.to_owned(), selection))
+            .send(Command::Create(peer.to_owned(), selection, previous))
             .is_err()
         {
             worker_stopped(&ui);
@@ -667,18 +728,139 @@ fn finish_send(weak: &Weak<AppWindow>, result: Result<(), messaging::Error>) {
     });
 }
 
+fn bind_timeline(ui: &AppWindow, sender: Sender<Command>) {
+    let weak = ui.as_weak();
+    let page = sender.clone();
+    ui.on_page_timeline(move |older| {
+        if let Some(ui) = weak.upgrade() {
+            request_timeline(&ui, &page, |id, selection| {
+                Command::Page(id, selection, older)
+            });
+        }
+    });
+    let weak = ui.as_weak();
+    let present = sender.clone();
+    ui.on_jump_to_present(move || {
+        if let Some(ui) = weak.upgrade() {
+            request_timeline(&ui, &present, Command::Present);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_restore_timeline(move |key| {
+        if let (Some(ui), Some(cursor)) = (weak.upgrade(), TimelineCursor::from_key(&key)) {
+            request_timeline(&ui, &sender, |id, selection| {
+                Command::Restore(id, selection, cursor)
+            });
+        }
+    });
+}
+
+fn request_timeline(
+    ui: &AppWindow,
+    sender: &Sender<Command>,
+    command: impl FnOnce(i64, i32) -> Command,
+) {
+    if !ui.get_storage_ready() || ui.get_conversation_loading() || ui.get_timeline_loading() {
+        return;
+    }
+    let Ok(id) = ui.get_selected_conversation().parse() else {
+        return;
+    };
+    ui.set_timeline_loading(true);
+    ui.set_conversation_error("".into());
+    if sender
+        .send(command(id, ui.get_storage_selection_token()))
+        .is_err()
+    {
+        ui.set_timeline_loading(false);
+        worker_stopped(ui);
+    }
+}
+
+fn pin_to_present(ui: &AppWindow) {
+    ui.set_timeline_following(true);
+    ui.set_timeline_anchor_key("".into());
+    ui.set_timeline_anchor_offset(0.0);
+    advance_timeline_revision(ui);
+}
+
+fn advance_timeline_revision(ui: &AppWindow) {
+    ui.set_timeline_revision(ui.get_timeline_revision().wrapping_add(1));
+}
+
+fn is_current_timeline(ui: &AppWindow, id: i64, selection: i32) -> bool {
+    ui.get_storage_selection_token() == selection
+        && ui.get_selected_conversation().as_str() == id.to_string()
+}
+
+fn show_timeline_result(
+    weak: &Weak<AppWindow>,
+    id: i64,
+    selection: i32,
+    result: storage::Result<TimelineWindow>,
+    to_present: bool,
+) {
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        if !is_current_timeline(&ui, id, selection) {
+            return;
+        }
+        ui.set_timeline_loading(false);
+        match result {
+            Ok(window) => update_timeline(&ui, window, to_present),
+            Err(_) => {
+                ui.set_conversation_error("Message history could not be loaded. Try again.".into())
+            }
+        }
+    });
+}
+
+fn update_timeline(ui: &AppWindow, window: TimelineWindow, to_present: bool) {
+    if !to_present {
+        if window.has_newer && !ui.get_timeline_has_newer() && ui.get_timeline_following() {
+            ui.invoke_jump_to_present();
+            return;
+        }
+        let key = ui.get_timeline_anchor_key();
+        if let Some(cursor) = TimelineCursor::from_key(&key)
+            && !window.messages.iter().any(|row| row.cursor == cursor)
+        {
+            // Scroll input may have moved beyond the overlap while a page was loading.
+            ui.invoke_restore_timeline(key);
+            return;
+        }
+    }
+    show_window(ui, window);
+    if to_present {
+        pin_to_present(ui);
+    }
+}
+
 fn refresh_messages(
     weak: &Weak<AppWindow>,
     db: &storage::Database,
-    selected: Option<i64>,
+    history: &mut History,
     promoted: Option<i64>,
+    force_present: Option<i64>,
 ) {
+    let selected = history.active.as_ref().map(|view| view.conversation);
     show_selected_peer_status(weak, db, selected);
     let lists = load_lists(db);
-    let timeline = selected.and_then(|id| {
+    let timeline = history.active.as_mut().and_then(|view| {
+        let id = view.conversation;
         let conversation = db.conversation(id).ok()?;
-        let messages = db.conversation_timeline(id).ok()?;
-        Some((id, messages, conversation.unread_through))
+        let to_present = force_present == Some(id);
+        let window = if to_present {
+            view.present(db).ok()?
+        } else {
+            view.refresh(db).ok()?
+        };
+        Some((
+            id,
+            view.selection,
+            window,
+            conversation.unread_through,
+            to_present,
+        ))
     });
     let _ = weak.upgrade_in_event_loop(move |ui| {
         if let Ok(lists) = lists {
@@ -690,10 +872,10 @@ fn refresh_messages(
                 ui.set_section("Chats".into());
             }
         }
-        if let Some((id, messages, unread_through)) = timeline
-            && ui.get_selected_conversation().as_str() == id.to_string()
+        if let Some((id, selection, window, unread_through, to_present)) = timeline
+            && is_current_timeline(&ui, id, selection)
         {
-            show_messages(&ui, messages);
+            update_timeline(&ui, window, to_present);
             ui.set_conversation_read_through(read_through_label(unread_through).into());
         }
     });
@@ -732,6 +914,7 @@ fn begin_selection(ui: &AppWindow) -> i32 {
     let selection = ui.get_storage_selection_token().wrapping_add(1);
     ui.set_storage_selection_token(selection);
     ui.set_conversation_loading(true);
+    ui.set_timeline_loading(false);
     ui.set_conversation_error("".into());
     selection
 }
@@ -843,7 +1026,8 @@ fn conversation_model(
 struct Detail {
     conversation: storage::Conversation,
     account_status: AccountStatus,
-    messages: Vec<storage::messaging::TimelineMessage>,
+    window: TimelineWindow,
+    anchor: Option<timeline::Anchor>,
     draft: String,
 }
 
@@ -852,7 +1036,8 @@ impl Detail {
         let Self {
             conversation,
             account_status,
-            messages,
+            window,
+            anchor,
             draft,
         } = self;
         ui.set_conversation_read_through("".into());
@@ -860,19 +1045,43 @@ impl Detail {
         ui.set_conversation_title(contact_title(conversation.display_name));
         ui.set_conversation_is_request(conversation.is_request);
         ui.set_conversation_peer_deleted(account_status == AccountStatus::Deleted);
-        show_messages(ui, messages);
+        show_window(ui, window);
+        if let Some(anchor) = anchor {
+            anchor.restore(ui);
+            advance_timeline_revision(ui);
+        } else {
+            pin_to_present(ui);
+        }
         ui.set_conversation_read_through(read_through_label(conversation.unread_through).into());
         ui.invoke_load_stored_draft(ui.get_selected_conversation(), draft.into());
     }
 }
 
-fn load_conversation(db: &storage::Database, id: i64) -> storage::Result<Detail> {
-    Ok(Detail {
-        conversation: db.conversation(id)?,
-        account_status: db.conversation_account_status(id)?,
-        messages: db.conversation_timeline(id)?,
-        draft: db.draft(id)?.unwrap_or_default(),
-    })
+fn load_conversation(
+    db: &storage::Database,
+    history: &mut History,
+    id: i64,
+    selection: i32,
+) -> storage::Result<Detail> {
+    let result = (|| {
+        let conversation = db.conversation(id)?;
+        let account_status = db.conversation_account_status(id)?;
+        let draft = db.draft(id)?.unwrap_or_default();
+        let (window, anchor) = history.open(db, id, selection)?;
+        Ok(Detail {
+            conversation,
+            account_status,
+            window,
+            anchor,
+            draft,
+        })
+    })();
+    if result.is_err()
+        && let Some(view) = &mut history.active
+    {
+        view.selection = selection;
+    }
+    result
 }
 
 pub(crate) fn track_local_calendar(ui: &AppWindow) -> slint::Timer {
@@ -895,9 +1104,14 @@ pub(crate) fn track_local_calendar(ui: &AppWindow) -> slint::Timer {
     timer
 }
 
-fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessage>) {
+fn show_window(ui: &AppWindow, window: TimelineWindow) {
+    let changed_edges = ui.get_timeline_has_older() != window.has_older
+        || ui.get_timeline_has_newer() != window.has_newer;
+    ui.set_timeline_has_older(window.has_older);
+    ui.set_timeline_has_newer(window.has_newer);
     let mut previous_day = None;
-    let messages: Vec<_> = messages
+    let messages: Vec<_> = window
+        .messages
         .into_iter()
         .map(|message| {
             let time = MessageTime::local(message.created_at);
@@ -909,6 +1123,7 @@ fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessa
                 heading = time.calendar_label();
             }
             StoredMessage {
+                key: message.cursor.key().into(),
                 body: storage::messaging::without_edge_blank_lines(&message.body)
                     .unwrap_or_default()
                     .into(),
@@ -929,7 +1144,39 @@ fn show_messages(ui: &AppWindow, messages: Vec<storage::messaging::TimelineMessa
             }
         })
         .collect();
-    ui.set_stored_messages(ModelRc::new(VecModel::from(messages)));
+    if reconcile_messages(ui, messages) || changed_edges {
+        advance_timeline_revision(ui);
+    }
+}
+
+fn reconcile_messages(ui: &AppWindow, messages: Vec<StoredMessage>) -> bool {
+    let model = ui.get_stored_messages();
+    let Some(model) = model.as_any().downcast_ref::<VecModel<StoredMessage>>() else {
+        ui.set_stored_messages(ModelRc::new(VecModel::from(messages)));
+        return true;
+    };
+    // The same stable key keeps an outgoing bubble through commit, retry, and receipt.
+    // Retained keys preserve their order across adjacent windows.
+    let keys: HashSet<_> = messages.iter().map(|row| row.key.clone()).collect();
+    let mut changed = false;
+    for index in (0..model.row_count()).rev() {
+        if model
+            .row_data(index)
+            .is_some_and(|row| !keys.contains(&row.key))
+        {
+            model.remove(index);
+            changed = true;
+        }
+    }
+    for (index, row) in messages.into_iter().enumerate() {
+        match model.row_data(index) {
+            Some(current) if current == row => continue,
+            Some(current) if current.key == row.key => model.set_row_data(index, row),
+            _ => model.insert(index, row),
+        }
+        changed = true;
+    }
+    changed
 }
 
 fn read_through_label(through: Option<i64>) -> String {
@@ -938,7 +1185,12 @@ fn read_through_label(through: Option<i64>) -> String {
         .unwrap_or_default()
 }
 
-fn show_conversation(weak: &Weak<AppWindow>, selection: i32, detail: storage::Result<Detail>) {
+fn show_conversation(
+    weak: &Weak<AppWindow>,
+    selection: i32,
+    from_requests: bool,
+    detail: storage::Result<Detail>,
+) {
     let _ = weak.upgrade_in_event_loop(move |ui| {
         if ui.get_storage_selection_token() != selection {
             return;
@@ -947,7 +1199,10 @@ fn show_conversation(weak: &Weak<AppWindow>, selection: i32, detail: storage::Re
         match detail {
             Ok(detail) => {
                 // A request selected while its reply was being queued may already be a chat.
-                if ui.get_section() == "Requests" && !detail.conversation.is_request {
+                if from_requests
+                    && ui.get_section() == "Requests"
+                    && !detail.conversation.is_request
+                {
                     ui.set_section("Chats".into());
                 }
                 detail.show(&ui);

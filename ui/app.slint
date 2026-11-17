@@ -2,7 +2,7 @@ import { CheckBox, LineEdit, ScrollView, Spinner, TextEdit } from "std-widgets.s
 
 export struct StoredConversation { id: string, title: string, preview: string, activity: string, unread: bool }
 export struct StoredContact { title: string, void-id: string }
-export struct StoredMessage { body: string, day: string, time: string, exact-time: string, outgoing: bool, status: string, retry-event: string }
+export struct StoredMessage { key: string, body: string, day: string, time: string, exact-time: string, outgoing: bool, status: string, retry-event: string }
 
 global Theme {
     out property <color> background: #0c1118;
@@ -836,6 +836,18 @@ export component AppWindow inherits Window {
     in property <[StoredConversation]> stored-requests;
     in property <[StoredContact]> stored-contacts;
     in property <[StoredMessage]> stored-messages;
+    in property <bool> timeline-has-older;
+    in property <bool> timeline-has-newer;
+    in property <bool> timeline-loading;
+    in property <int> timeline-revision;
+    in-out property <bool> timeline-following: true;
+    in-out property <string> timeline-anchor-key;
+    in-out property <length> timeline-anchor-offset;
+    private property <bool> timeline-visible: root.show-conversation && root.setup-page == 0
+        && !root.showing-account-removal;
+    callback page-timeline(bool);
+    callback jump-to-present();
+    callback restore-timeline(string);
     in property <string> selected-conversation;
     in property <string> conversation-title;
     in property <string> conversation-read-through;
@@ -913,18 +925,18 @@ export component AppWindow inherits Window {
         && ((root.section == "Requests" && root.conversation-is-request)
             || (root.section == "Chats" && !root.conversation-is-request));
     out property <bool> conversation-can-compose: root.show-conversation && !root.conversation-peer-deleted;
-    private property <bool> timeline-at-end: true;
     private property <string> timestamp-tip;
     private property <int> timestamp-tip-row: -1;
     private property <length> timestamp-tip-x;
     private property <length> timestamp-tip-y;
 
     changed stored-messages => { root.timestamp-tip = ""; }
+    changed timeline-revision => { root.timestamp-tip = ""; }
     changed width => { root.timestamp-tip = ""; }
     changed height => { root.timestamp-tip = ""; }
     private property <string> visible-read-through:
-        root.window-foreground && root.show-conversation && !root.conversation-loading
-            && root.setup-page == 0 && !root.showing-account-removal && root.timeline-at-end
+        root.window-foreground && root.timeline-visible && !root.conversation-loading
+            && root.timeline-following && !root.timeline-has-newer && !root.timeline-loading
         ? root.conversation-read-through : "";
     changed visible-read-through => {
         if root.visible-read-through != "" {
@@ -952,8 +964,6 @@ export component AppWindow inherits Window {
             root.section = section;
             root.creating-conversation = false;
             root.conversation-error = "";
-            root.storage-selection-token += 1;
-            root.conversation-loading = false;
         }
     }
 
@@ -1538,96 +1548,191 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                timeline := PaneScroll {
+                timeline-area := Rectangle {
                     min-height: 72px;
-                    private property <bool> follow-latest: true;
-                    private property <length> end-offset: min(0px, self.visible-height - self.content-height);
-                    private property <string> conversation: root.selected-conversation;
-
-                    init => { root.timeline-at-end = true; }
-                    changed follow-latest => { root.timeline-at-end = self.follow-latest; }
-                    changed conversation => {
-                        self.follow-latest = true;
-                        self.content-y = self.end-offset;
-                    }
-                    changed content-y => { root.timestamp-tip = ""; }
-                    changed end-offset => {
-                        if self.end-offset == 0px { self.follow-latest = true; }
-                        self.content-y = self.follow-latest ? self.end-offset
-                            : clamp(self.content-y, self.end-offset, 0px);
-                    }
-                    scrolled => {
-                        self.follow-latest = self.content-y <= self.end-offset + 8px;
-                    }
-
-                    content-height: max(self.visible-height, history.min-height);
-
-                    history := VerticalLayout {
-                        alignment: root.stored-messages.length == 0 ? center : end;
-                        padding-left: chat-pane.thread-gutter;
-                        padding-right: chat-pane.thread-gutter;
-                        padding-top: root.chat-gutter;
-                        padding-bottom: root.chat-gutter;
-                        spacing: 6px;
-                        if root.stored-messages.length == 0: Text {
-                            text: "No saved messages";
-                            color: Theme.secondary;
-                            font-size: 14px;
-                            horizontal-alignment: center;
+                    vertical-stretch: 1;
+                    // The scroll view passes through wheel input when it can't move further.
+                    TouchArea {
+                        scroll-event(event) => {
+                            let older = event.delta-y > 0px && timeline.content-y >= 0px && root.timeline-has-older;
+                            let newer = event.delta-y < 0px && timeline.content-y <= timeline.end-offset
+                                && root.timeline-has-newer;
+                            if (older || newer) && !root.timeline-loading && !root.conversation-loading {
+                                root.timeline-following = false;
+                                timeline.scroll-revision += 1;
+                                timeline.page-direction = older ? -1 : 1;
+                                return accept;
+                            }
+                            return reject;
                         }
-                        for message[index] in root.stored-messages: VerticalLayout {
-                            alignment: start;
-                            spacing: 4px;
-                            if message.day != "": HorizontalLayout {
-                                spacing: 10px;
-                                padding-top: 3px;
-                                padding-bottom: 3px;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    Rectangle {
-                                        y: (parent.height - self.height) / 2;
-                                        height: 1px;
-                                        background: Theme.divider;
-                                    }
-                                }
-                                Text {
-                                    text: message.day == root.timeline-today ? "Today"
-                                        : message.day == root.timeline-yesterday ? "Yesterday" : message.day;
-                                    color: Theme.secondary;
-                                    font-size: 11px;
-                                    horizontal-stretch: 0;
-                                }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    Rectangle {
-                                        y: (parent.height - self.height) / 2;
-                                        height: 1px;
-                                        background: Theme.divider;
-                                    }
+                    }
+                    timeline := PaneScroll {
+                        width: parent.width;
+                        height: parent.height;
+                        private property <length> end-offset: min(0px, self.visible-height - self.content-height);
+                        private property <length> tracked-y;
+                        private property <int> scroll-revision;
+                        private property <int> page-direction;
+                        private property <int> model-revision: root.timeline-revision;
+                        private property <bool> following: root.timeline-following;
+
+                        function place-content(offset: length) {
+                            let target = clamp(offset, self.end-offset, 0px);
+                            if abs(target - self.content-y) > 0.25px {
+                                self.tracked-y = target;
+                                self.content-y = target;
+                            }
+                        }
+
+                        function sync-viewport() {
+                            self.place-content(self.following ? self.end-offset : self.content-y);
+                        }
+
+                        function user-scrolled() {
+                            if self.content-y == self.tracked-y { return; }
+                            let older = self.content-y > self.tracked-y;
+                            self.tracked-y = self.content-y;
+                            root.timeline-following = !root.timeline-has-newer
+                                && self.content-y <= self.end-offset + 8px;
+                            if root.timeline-following {
+                                root.timeline-anchor-key = "";
+                                root.timeline-anchor-offset = 0px;
+                            } else {
+                                self.scroll-revision += 1;
+                            }
+                            if root.timeline-loading || root.conversation-loading { return; }
+                            self.page-direction = older && root.timeline-has-older && self.content-y >= -96px ? -1
+                                : !older && root.timeline-has-newer && self.content-y <= self.end-offset + 96px ? 1 : 0;
+                        }
+
+                        init => { self.sync-viewport(); }
+                        changed following => { self.sync-viewport(); }
+                        changed model-revision => { self.sync-viewport(); }
+                        changed end-offset => { self.sync-viewport(); }
+                        // Thumb clicks also move the viewport without emitting ScrollView.scrolled.
+                        changed content-y => {
+                            root.timestamp-tip = "";
+                            self.user-scrolled();
+                        }
+                        scrolled => { self.user-scrolled(); }
+
+                        Timer {
+                            interval: 8ms;
+                            running: timeline.page-direction != 0;
+                            triggered => {
+                                let older = timeline.page-direction < 0;
+                                timeline.page-direction = 0;
+                                if !root.timeline-loading && !root.conversation-loading
+                                    && (older ? root.timeline-has-older : root.timeline-has-newer) {
+                                    root.page-timeline(older);
                                 }
                             }
-                            HorizontalLayout {
-                                alignment: message.outgoing ? end : start;
-                                MessageBubble {
-                                    message: message;
-                                    width-limit: min(440px, (chat-pane.width - 2 * chat-pane.thread-gutter) * 0.86);
-                                    show-retry: !root.conversation-peer-deleted && message.retry-event != "";
-                                    retry-enabled: root.messaging-ready && !root.send-busy;
-                                    retry => { root.resend-message(message.retry-event); }
-                                    timestamp-hovered(label, x, y) => {
-                                        root.timestamp-tip-row = index;
-                                        root.timestamp-tip-x = x;
-                                        root.timestamp-tip-y = y;
-                                        root.timestamp-tip = label;
+                        }
+
+                        content-height: max(self.visible-height, history.min-height);
+
+                        history := VerticalLayout {
+                            alignment: root.stored-messages.length == 0 ? center : end;
+                            padding-left: chat-pane.thread-gutter;
+                            padding-right: chat-pane.thread-gutter;
+                            padding-top: root.chat-gutter;
+                            padding-bottom: root.chat-gutter;
+                            spacing: 6px;
+                            if root.stored-messages.length == 0: Text {
+                                text: "No saved messages";
+                                color: Theme.secondary;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+                            for message[index] in root.stored-messages: row := VerticalLayout {
+                                alignment: start;
+                                spacing: 4px;
+                                private property <length> bubble-top: self.y + bubble-row.y;
+                                private property <int> user-scroll: timeline.scroll-revision;
+                                private property <bool> anchored: message.key != ""
+                                    && message.key == root.timeline-anchor-key && !root.timeline-following;
+                                private property <{ y: length, revision: int }> anchor-placement: self.anchored
+                                    ? { y: clamp(root.timeline-anchor-offset - self.bubble-top, timeline.end-offset, 0px),
+                                        revision: root.timeline-revision }
+                                    : { y: 0px, revision: 0 };
+
+                                init => {
+                                    if self.anchored { timeline.place-content(self.anchor-placement.y); }
+                                }
+                                changed anchor-placement => {
+                                    if self.anchored { timeline.place-content(self.anchor-placement.y); }
+                                }
+                                changed user-scroll => {
+                                    // Keep the first on-screen message, including partial visibility.
+                                    // Store the bubble position so inserting a date marker doesn't move it.
+                                    let viewport-top = -timeline.content-y;
+                                    if !root.timeline-following && message.key != ""
+                                        && (index == 0 || self.y <= viewport-top + history.spacing)
+                                        && self.y + self.height > viewport-top {
+                                        root.timeline-anchor-key = message.key;
+                                        root.timeline-anchor-offset = self.bubble-top - viewport-top;
                                     }
-                                    timestamp-left => {
-                                        if root.timestamp-tip-row == index {
-                                            root.timestamp-tip = "";
+                                }
+                                if message.day != "": HorizontalLayout {
+                                    spacing: 10px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            height: 1px;
+                                            background: Theme.divider;
+                                        }
+                                    }
+                                    Text {
+                                        text: message.day == root.timeline-today ? "Today"
+                                            : message.day == root.timeline-yesterday ? "Yesterday" : message.day;
+                                        color: Theme.secondary;
+                                        font-size: 11px;
+                                        horizontal-stretch: 0;
+                                    }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            height: 1px;
+                                            background: Theme.divider;
+                                        }
+                                    }
+                                }
+                                bubble-row := HorizontalLayout {
+                                    alignment: message.outgoing ? end : start;
+                                    MessageBubble {
+                                        message: message;
+                                        width-limit: min(440px, (chat-pane.width - 2 * chat-pane.thread-gutter) * 0.86);
+                                        show-retry: !root.conversation-peer-deleted && message.retry-event != "";
+                                        retry-enabled: root.messaging-ready && !root.send-busy;
+                                        retry => { root.resend-message(message.retry-event); }
+                                        timestamp-hovered(label, x, y) => {
+                                            root.timestamp-tip-row = index;
+                                            root.timestamp-tip-x = x;
+                                            root.timestamp-tip-y = y;
+                                            root.timestamp-tip = label;
+                                        }
+                                        timestamp-left => {
+                                            if root.timestamp-tip-row == index {
+                                                root.timestamp-tip = "";
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                    }
+                    if root.timeline-has-newer || timeline.content-y > timeline.end-offset + 48px: Action {
+                        label: "Jump to Present";
+                        height: 36px;
+                        width: self.min-width;
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height - self.height - 12px;
+                        enabled: !root.timeline-loading && !root.conversation-loading;
+                        clicked => { root.jump-to-present(); }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.divider; }

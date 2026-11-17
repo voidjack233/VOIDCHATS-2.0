@@ -2,8 +2,11 @@ use super::{
     Database, DeliveryState, Error, Result,
     account_status::{self, AccountStatus},
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Row, params};
 use std::collections::HashMap;
+
+#[cfg(all(test, windows))]
+mod timeline_tests;
 
 pub(crate) fn without_edge_blank_lines(body: &str) -> Option<&str> {
     let first = body.find(|c: char| !c.is_whitespace())?;
@@ -66,7 +69,54 @@ impl SendState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum TimelineSource {
+    Saved,
+    Operation,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct TimelineCursor {
+    created_at: i64,
+    sort_id: String,
+    source: TimelineSource,
+}
+
+impl TimelineCursor {
+    pub(crate) fn key(&self) -> String {
+        let source = match self.source {
+            TimelineSource::Saved => 'm',
+            TimelineSource::Operation => 'o',
+        };
+        format!("{}:{source}:{}", self.created_at, self.sort_id)
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        let mut parts = key.splitn(3, ':');
+        let created_at = parts.next()?.parse().ok()?;
+        let source = match parts.next()? {
+            "m" => TimelineSource::Saved,
+            "o" => TimelineSource::Operation,
+            _ => return None,
+        };
+        Some(Self {
+            created_at,
+            sort_id: parts.next()?.into(),
+            source,
+        })
+    }
+}
+
+enum TimelinePage<'a> {
+    Recent,
+    Before(&'a TimelineCursor),
+    After(&'a TimelineCursor),
+    From(&'a TimelineCursor),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TimelineMessage {
+    pub(crate) cursor: TimelineCursor,
     pub(crate) body: String,
     pub(crate) created_at: i64,
     pub(crate) outgoing: bool,
@@ -221,46 +271,124 @@ impl Database {
         })
     }
 
+    pub(crate) fn timeline_before(
+        &self,
+        conversation_id: i64,
+        cursor: Option<&TimelineCursor>,
+        limit: usize,
+    ) -> Result<Vec<TimelineMessage>> {
+        self.timeline_page(
+            conversation_id,
+            cursor.map_or(TimelinePage::Recent, TimelinePage::Before),
+            limit,
+        )
+    }
+
+    pub(crate) fn timeline_after(
+        &self,
+        conversation_id: i64,
+        cursor: &TimelineCursor,
+        limit: usize,
+    ) -> Result<Vec<TimelineMessage>> {
+        self.timeline_page(conversation_id, TimelinePage::After(cursor), limit)
+    }
+
+    pub(crate) fn timeline_from(
+        &self,
+        conversation_id: i64,
+        cursor: &TimelineCursor,
+        limit: usize,
+    ) -> Result<Vec<TimelineMessage>> {
+        self.timeline_page(conversation_id, TimelinePage::From(cursor), limit)
+    }
+
+    #[cfg(test)]
     pub(crate) fn conversation_timeline(
         &self,
         conversation_id: i64,
     ) -> Result<Vec<TimelineMessage>> {
+        self.timeline_before(conversation_id, None, usize::MAX)
+    }
+
+    fn timeline_page(
+        &self,
+        conversation_id: i64,
+        page: TimelinePage<'_>,
+        limit: usize,
+    ) -> Result<Vec<TimelineMessage>> {
+        // Both IDs are stored as text, so retain their original lexical order at equal times.
+        // The source breaks ties if independent records happen to have exactly the same ID.
+        let (cursor, order, saved_cmp, operation_cmp) = match page {
+            TimelinePage::Recent => (None, "DESC", "", ""),
+            TimelinePage::Before(cursor) => (
+                Some(cursor),
+                "DESC",
+                if cursor.source == TimelineSource::Operation {
+                    "<="
+                } else {
+                    "<"
+                },
+                "<",
+            ),
+            TimelinePage::After(cursor) => (
+                Some(cursor),
+                "ASC",
+                ">",
+                if cursor.source == TimelineSource::Saved {
+                    ">="
+                } else {
+                    ">"
+                },
+            ),
+            TimelinePage::From(cursor) => (
+                Some(cursor),
+                "ASC",
+                if cursor.source == TimelineSource::Saved {
+                    ">="
+                } else {
+                    ">"
+                },
+                ">=",
+            ),
+        };
+        let (saved_bound, operation_bound) = if cursor.is_some() {
+            (
+                format!("AND (m.created_at, m.id) {saved_cmp} (?3, ?4)"),
+                format!("AND (o.created_at, o.event_id) {operation_cmp} (?3, ?4)"),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+        // Seek and limit using each table's conversation index before merging the two pages.
         let mut query = self.connection.prepare(&format!(
-            "SELECT body, created_at, outgoing, state, event_id FROM (
-               SELECT m.body, m.created_at, m.direction AS outgoing, NULL AS state, NULL AS event_id, m.id AS sort_id
-               FROM messages m WHERE m.conversation_id = ?1 AND {STANDALONE_MESSAGE}
-               UNION ALL
-               SELECT body, created_at, 1,
+            "WITH saved AS (
+               SELECT m.body, m.created_at, m.direction AS outgoing, NULL AS state, m.id AS sort_id, 0 AS source
+               FROM messages m WHERE m.conversation_id = ?1 {saved_bound} AND {STANDALONE_MESSAGE}
+               ORDER BY m.created_at {order}, m.id {order} LIMIT ?2
+             ), operations AS (
+               SELECT body, created_at, 1 AS outgoing,
                       CASE WHEN EXISTS (
                           SELECT 1 FROM receipt_inbox r WHERE r.original_event_id = o.event_id
-                      ) THEN 'delivered' ELSE state END, event_id, event_id
-               FROM outgoing_operations o WHERE conversation_id = ?1
-             ) ORDER BY created_at, sort_id"
+                      ) THEN 'delivered' ELSE state END AS state, event_id AS sort_id, 1 AS source
+               FROM outgoing_operations o WHERE o.conversation_id = ?1 {operation_bound}
+               ORDER BY o.created_at {order}, o.event_id {order} LIMIT ?2
+             )
+             SELECT * FROM saved UNION ALL SELECT * FROM operations
+             ORDER BY created_at {order}, sort_id {order}, source {order} LIMIT ?2"
         ))?;
-        let rows = query.query_map([conversation_id], |row| {
-            let state: Option<String> = row.get(3)?;
-            let status = match state.as_deref() {
-                Some("pending") => "Pending",
-                Some("sent") => "Sent to relay",
-                Some("delivered") => "Delivered",
-                Some("unconfirmed") => "Acceptance unconfirmed",
-                Some("failed") => "Send failed",
-                _ => "",
-            };
-            let retry_event = if matches!(state.as_deref(), Some("unconfirmed" | "failed")) {
-                row.get(4)?
-            } else {
-                String::new()
-            };
-            Ok(TimelineMessage {
-                body: row.get(0)?,
-                created_at: row.get(1)?,
-                outgoing: row.get(2)?,
-                status,
-                retry_event,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = match cursor {
+            Some(cursor) => query.query_map(
+                params![conversation_id, limit, cursor.created_at, cursor.sort_id],
+                timeline_message,
+            )?,
+            None => query.query_map(params![conversation_id, limit], timeline_message)?,
+        };
+        let mut messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        if order == "DESC" {
+            messages.reverse();
+        }
+        Ok(messages)
     }
 
     pub(crate) fn last_message_previews(
@@ -296,4 +424,39 @@ impl Database {
         }
         Ok(previews)
     }
+}
+
+fn timeline_message(row: &Row<'_>) -> rusqlite::Result<TimelineMessage> {
+    let state: Option<String> = row.get(3)?;
+    let status = match state.as_deref() {
+        Some("pending") => "Pending",
+        Some("sent") => "Sent to relay",
+        Some("delivered") => "Delivered",
+        Some("unconfirmed") => "Acceptance unconfirmed",
+        Some("failed") => "Send failed",
+        _ => "",
+    };
+    let sort_id: String = row.get(4)?;
+    let retry_event = if matches!(state.as_deref(), Some("unconfirmed" | "failed")) {
+        sort_id.clone()
+    } else {
+        String::new()
+    };
+    let created_at = row.get(1)?;
+    Ok(TimelineMessage {
+        cursor: TimelineCursor {
+            created_at,
+            sort_id,
+            source: if row.get::<_, bool>(5)? {
+                TimelineSource::Operation
+            } else {
+                TimelineSource::Saved
+            },
+        },
+        body: row.get(0)?,
+        created_at,
+        outgoing: row.get(2)?,
+        status,
+        retry_event,
+    })
 }
