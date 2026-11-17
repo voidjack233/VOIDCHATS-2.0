@@ -1,0 +1,85 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component Clickable inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> selected;
+    out property <bool> hovered: hit-area.has-hover;
+    out property <bool> pressed: hit-area.pressed;
+    out property <bool> keyboard-focused: key-focus.has-focus && !root.pointer-focus;
+    private property <bool> pointer-focus;
+    callback clicked;
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: key-focus;
+    border-radius: 10px;
+    border-width: root.keyboard-focused ? 2px : 0px;
+    border-color: Theme.accent;
+    background: root.pressed ? Theme.outgoing : root.selected ? Theme.selected : root.hovered ? Theme.elevated : transparent;
+
+    hit-area := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            key-focus.focus();
+            root.pointer-focus = true;
+            root.clicked();
+        }
+    }
+    key-focus := FocusScope {
+        width: 0;
+        enabled: root.enabled;
+        focus-gained(reason) => {
+            if reason != FocusReason.window-activation {
+                root.pointer-focus = reason == FocusReason.pointer-click;
+            }
+        }
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == Key.Space {
+                root.pointer-focus = false;
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+export component Action inherits Clickable {
+    in property <bool> primary;
+    in property <bool> destructive;
+    height: 44px;
+    min-width: action-text.preferred-width + 28px;
+    horizontal-stretch: 0;
+    private property <bool> filled: root.primary && !root.pressed && !root.hovered && !root.keyboard-focused;
+    background: !root.enabled ? Theme.elevated
+        : root.filled ? Theme.accent
+        : root.pressed ? Theme.outgoing : root.selected || root.hovered ? Theme.selected : Theme.elevated;
+
+    action-text := Text {
+        text: root.label;
+        color: !root.enabled ? Theme.secondary
+            : root.destructive ? Theme.error
+            : root.filled ? Theme.background : Theme.primary;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+export component PaneScroll inherits ScrollView {
+    min-height: 0px;
+    horizontal-scrollbar-policy: always-off;
+    content-width: self.visible-width;
+}
+
+export component WrappingText inherits Text {
+    min-width: 0px;
+    wrap: word-wrap;
+}

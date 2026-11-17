@@ -1,0 +1,77 @@
+import { TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Action, WrappingText } from "controls.slint";
+
+export component MessageComposer inherits VerticalLayout {
+    in property <length> thread-gutter;
+    in property <bool> draft-save-failed;
+    in property <string> draft-status;
+    in property <bool> conversation-loading;
+    in-out property <string> stored-draft;
+    in property <bool> send-busy;
+    in property <bool> can-send-draft;
+    callback save-stored-draft(string);
+    callback send-message();
+
+    alignment: start;
+    vertical-stretch: 0;
+    padding: 8px;
+    padding-left: root.thread-gutter;
+    padding-right: root.thread-gutter;
+    spacing: 8px;
+
+    if root.draft-save-failed: HorizontalLayout {
+        spacing: 8px;
+        WrappingText {
+            text: root.draft-status;
+            color: Theme.error;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Action {
+            label: "Retry saving";
+            enabled: !root.conversation-loading;
+            clicked => { root.save-stored-draft(root.stored-draft); }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        editor := TextEdit {
+            accessible-label: "Message. Enter to send. Shift+Enter for a new line.";
+            placeholder-text: "Write a message…";
+            height: clamp(draft-measure.preferred-height + 24px, 44px, 92px);
+            font-size: 14px;
+            wrap: word-wrap;
+            enabled: !root.conversation-loading;
+            text <=> root.stored-draft;
+            edited(text) => { root.save-stored-draft(text); }
+            key-pressed(event) => {
+                if event.text == Key.Return && !event.modifiers.shift {
+                    if root.can-send-draft { root.send-message(); }
+                    return accept;
+                }
+                return reject;
+            }
+        }
+        Rectangle {
+            width: 86px;
+            min-height: 44px;
+            Action {
+                label: root.send-busy ? "Sending…" : "Send";
+                y: parent.height - self.height;
+                width: parent.width;
+                primary: true;
+                enabled: root.can-send-draft;
+                clicked => { root.send-message(); }
+            }
+            draft-measure := WrappingText {
+                visible: false;
+                // Measure within the native input padding, including a trailing newline.
+                width: max(1px, editor.width - 24px);
+                text: root.stored-draft + " ";
+                font-size: editor.font-size;
+            }
+        }
+    }
+}

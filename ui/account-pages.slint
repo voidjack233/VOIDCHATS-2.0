@@ -1,0 +1,405 @@
+import { CheckBox, LineEdit, Spinner } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Action, PaneScroll, WrappingText } from "controls.slint";
+
+export component AccountRemovalPage inherits Rectangle {
+    in property <bool> permanent;
+    in property <bool> busy;
+    in property <string> status;
+    in property <string> error;
+    in property <string> phrase;
+    in property <bool> can-confirm;
+    in property <bool> can-go-back;
+    callback edit-phrase(string);
+    callback confirm();
+    callback cancel();
+    private property <length> gutter: max(24px, (root.width - 600px) / 2);
+
+    PaneScroll {
+        width: parent.width;
+        height: parent.height;
+        VerticalLayout {
+            alignment: start;
+            padding-left: root.gutter;
+            padding-right: root.gutter;
+            padding-top: clamp(root.height * 0.075, 24px, 48px);
+            padding-bottom: 28px;
+            spacing: 14px;
+            Text {
+                text: root.permanent ? "Delete account permanently" : "Remove from this device";
+                color: Theme.primary;
+                font-size: 30px;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+            if root.busy: HorizontalLayout {
+                spacing: 12px;
+                Spinner { width: 20px; height: 20px; }
+                WrappingText { text: root.status; color: Theme.secondary; }
+            }
+            if root.error != "": WrappingText { text: root.error; color: Theme.error; }
+            if !root.busy && root.error == "": VerticalLayout {
+                alignment: start;
+                spacing: 12px;
+                Text {
+                    text: root.permanent
+                        ? "Your VOID-ID will be permanently deactivated. Other users will no longer be able to message you. This cannot be undone."
+                        : "VOID will remove your saved credentials, encryption keys, conversations, and drafts from this Windows profile. This cannot be undone.";
+                    color: Theme.primary;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.permanent
+                        ? "VOID removes undelivered messages and published encryption keys from its servers. Messages already delivered can remain on other devices."
+                        : "Your VOID-ID and server account will remain registered. VOID will return to the welcome screen.";
+                    color: Theme.secondary;
+                    wrap: word-wrap;
+                }
+                if root.permanent: Text {
+                    text: "VOID will remove this device’s credentials, Signal keys, and conversations after the server confirms deletion.";
+                    color: Theme.secondary;
+                    wrap: word-wrap;
+                }
+                Text { text: "Type DELETE to confirm"; color: Theme.primary; font-weight: 600; }
+                LineEdit {
+                    accessible-label: "Type DELETE to confirm";
+                    height: 44px;
+                    text: root.phrase;
+                    edited(text) => { root.edit-phrase(text); }
+                }
+            }
+            if !root.busy: HorizontalLayout {
+                spacing: 8px;
+                if root.error == "" || root.can-go-back: Action {
+                    label: root.error == "" ? "Cancel" : "Back to setup";
+                    clicked => { root.cancel(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Action {
+                    label: root.error != "" ? (root.permanent ? "Retry deletion" : "Retry local removal")
+                        : root.permanent ? "Delete account permanently" : "Remove from this device";
+                    destructive: root.permanent;
+                    enabled: root.error != "" || root.can-confirm;
+                    clicked => { root.confirm(); }
+                }
+            }
+        }
+    }
+}
+
+component SetupStep inherits Rectangle {
+    in property <string> label;
+    in property <int> number;
+    in property <int> current-page;
+    private property <bool> current: root.number == root.current-page;
+    private property <bool> completed: root.number < root.current-page;
+
+    width: 28px;
+    height: 28px;
+    border-radius: 14px;
+    background: root.current ? Theme.accent : Theme.elevated;
+    accessible-role: text;
+    accessible-label: root.label + (root.current ? ", current step" : root.completed ? ", completed" : "");
+    animate background { duration: 160ms; easing: ease-out; }
+
+    Text {
+        text: root.completed ? "✓" : "" + root.number;
+        color: root.current ? Theme.background : root.completed ? Theme.accent : Theme.secondary;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+component SetupPage inherits Rectangle {
+    in property <int> page;
+    in property <int> current-page;
+    in property <bool> show-steps;
+    in property <bool> busy;
+    in property <bool> can-retry;
+    in property <bool> retry-storage;
+    in property <string> status;
+    in property <string> error;
+    in property <string> action;
+    in-out property <bool> security-acknowledged;
+    in-out property <bool> terms-acknowledged;
+    in property <length> gutter;
+    in property <length> reading-width;
+    in property <length> heading-size;
+    in property <length> top-padding;
+    callback submit();
+
+    private property <bool> active: root.page == root.current-page;
+    private property <bool> onboarding-step: root.show-steps && root.error == "";
+
+    changed active => {
+        if root.active { setup-content.content-y = 0px; }
+    }
+
+    setup-content := PaneScroll {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.active;
+        VerticalLayout {
+            padding-top: root.onboarding-step ? max(root.top-padding, setup-content.visible-height * 0.30)
+                : root.top-padding;
+            padding-bottom: 32px;
+            padding-left: root.gutter;
+            padding-right: root.gutter;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                max-width: root.reading-width;
+                min-height: step-content.min-height;
+                preferred-height: step-content.min-height;
+                vertical-stretch: 0;
+
+                step-content := VerticalLayout {
+                    alignment: start;
+                    spacing: root.onboarding-step ? 20px : 16px;
+
+                    Text {
+                        text: root.page == -1 ? "Opening VOID"
+                            : root.page == 1 ? "Welcome to VOID"
+                            : root.page == 2 ? "How VOID works"
+                            : root.page == 3 ? "Security notice"
+                            : root.page == 4 ? "Terms of service"
+                            : root.page == 6 ? "Set up encrypted messaging"
+                            : root.retry-storage ? "Open your local identity"
+                            : !root.can-retry ? "Account setup needs attention"
+                            : "Create your VOID account";
+                        color: Theme.primary;
+                        font-size: root.heading-size;
+                        font-weight: 700;
+                        horizontal-alignment: root.onboarding-step ? center : left;
+                        wrap: word-wrap;
+                    }
+
+                    if root.show-steps: Text {
+                        text: root.page == 1 ? "Create your VOID account to get a VOID-ID."
+                            : root.page == 2 ? "Your VOID-ID is the public identifier issued by VOID.\nYour private account key proves ownership."
+                            : root.page == 3 ? "Windows protects your private key under your Windows user profile.\nKeep your local VOID data. Account recovery is unavailable in this release."
+                            : root.page == 4 ? "The final Terms of Service are unavailable in this preview.\nThe next step lets you choose whether to register a real VOID account."
+                            : "VOID verifies ownership with your public key.\nYour private key stays on this device.";
+                        color: Theme.secondary;
+                        font-size: 16px;
+                        horizontal-alignment: root.onboarding-step ? center : left;
+                        wrap: word-wrap;
+                    }
+                    if root.page == 6: Text {
+                        text: "Your VOID-ID is saved. Messaging starts once your public encryption keys are confirmed.";
+                        color: Theme.secondary;
+                        font-size: 16px;
+                        wrap: word-wrap;
+                    }
+                    if root.page == 3: HorizontalLayout {
+                        alignment: center;
+                        CheckBox {
+                            min-height: 44px;
+                            enabled: root.active;
+                            text: "I understand how my account key is protected.";
+                            checked <=> root.security-acknowledged;
+                        }
+                    }
+                    if root.page == 4: HorizontalLayout {
+                        alignment: center;
+                        CheckBox {
+                            min-height: 44px;
+                            enabled: root.active;
+                            text: "I understand the current preview limitations.";
+                            checked <=> root.terms-acknowledged;
+                        }
+                    }
+                    if root.active && root.busy: HorizontalLayout {
+                        spacing: 12px;
+                        min-height: 44px;
+                        Spinner { width: 20px; height: 20px; }
+                        WrappingText {
+                            text: root.status;
+                            color: Theme.secondary;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.active && root.error != "": WrappingText {
+                        text: root.error;
+                        color: Theme.error;
+                        font-size: 15px;
+                    }
+                    if root.page == 5 && root.can-retry: HorizontalLayout {
+                        alignment: root.onboarding-step ? center : start;
+                        padding-top: root.onboarding-step ? 4px : 0px;
+                        Action {
+                            label: root.action;
+                            primary: true;
+                            preferred-width: root.onboarding-step ? 208px : self.min-width;
+                            enabled: root.active && !root.busy;
+                            clicked => { root.submit(); }
+                        }
+                    }
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+}
+
+export component AccountSetup inherits Rectangle {
+    in-out property <int> page;
+    in property <bool> busy;
+    in property <bool> can-retry;
+    in property <bool> retry-storage;
+    in property <string> status;
+    in property <string> error;
+    in property <string> action;
+    in property <bool> can-remove-local;
+    callback submit();
+    callback remove-local();
+
+    private property <bool> security-acknowledged;
+    private property <bool> terms-acknowledged;
+    private property <bool> show-steps: root.page > 0 && root.page <= 5 && !root.retry-storage && root.can-retry;
+    private property <length> gutter: max(24px, (root.width - root.reading-width) / 2);
+    private property <length> reading-width: 600px;
+    private property <float> slide-position: max(0, root.page);
+    animate slide-position { duration: 360ms; easing: ease-in-out; }
+
+    background: Theme.background;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        VerticalLayout {
+            Rectangle {
+                height: 80px;
+                background: Theme.sidebar;
+
+                HorizontalLayout {
+                    padding-left: root.gutter;
+                    padding-right: root.gutter;
+                    spacing: 12px;
+
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 10px;
+                        background: Theme.accent;
+                        Text {
+                            text: "V";
+                            color: Theme.sidebar;
+                            font-size: 21px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        text: "VOID";
+                        color: Theme.primary;
+                        font-size: 20px;
+                        font-weight: 800;
+                        letter-spacing: 2px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.divider; }
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+
+                // Move all pages together so outgoing and incoming content cannot overlap.
+                for step in [-1, 1, 2, 3, 4, 5, 6]: SetupPage {
+                    x: (max(0, step) - root.slide-position) * self.width;
+                    visible: self.x > -self.width && self.x < self.width;
+                    width: parent.width;
+                    height: parent.height;
+                    page: step;
+                    current-page: root.page;
+                    show-steps: root.show-steps;
+                    busy: root.busy;
+                    can-retry: root.can-retry;
+                    retry-storage: root.retry-storage;
+                    status: root.status;
+                    error: root.error;
+                    action: root.action;
+                    submit => { root.submit(); }
+                    security-acknowledged <=> root.security-acknowledged;
+                    terms-acknowledged <=> root.terms-acknowledged;
+                    gutter: root.gutter;
+                    reading-width: root.reading-width;
+                    heading-size: root.width < 960px ? 32px : 38px;
+                    top-padding: root.height < 600px ? 40px : 64px;
+                }
+            }
+
+            if root.page > 0 && (root.show-steps || (root.page == 6 && root.can-retry) || root.can-remove-local): Rectangle {
+                height: 84px;
+                background: Theme.sidebar;
+
+                Rectangle { y: 0; height: 1px; background: Theme.divider; }
+
+                if root.show-steps: HorizontalLayout {
+                    alignment: center;
+                    padding-top: 20px;
+                    padding-bottom: 20px;
+                    spacing: 8px;
+
+                    for step[index] in ["Welcome", "How VOID works", "Security notice", "Terms of service", "Create account"]: HorizontalLayout {
+                        spacing: 8px;
+                        if index > 0: Rectangle {
+                            width: 14px;
+                            height: 1px;
+                            y: (parent.height - self.height) / 2;
+                            background: index < root.page ? Theme.accent : Theme.divider;
+                        }
+                        SetupStep {
+                            y: (parent.height - self.height) / 2;
+                            label: step;
+                            number: index + 1;
+                            current-page: root.page;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: root.gutter;
+                    padding-right: root.gutter;
+                    padding-top: 20px;
+                    padding-bottom: 20px;
+                    spacing: 12px;
+
+                    if root.page > 1 && root.page <= 5 && (root.page < 5 || (root.error == "" && !root.retry-storage)): Action {
+                        label: "Back";
+                        enabled: !root.busy;
+                        clicked => { root.page -= 1; }
+                    }
+                    if root.can-remove-local: Action {
+                        label: "Remove from this device";
+                        clicked => { root.remove-local(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.page < 5: Action {
+                        label: root.page == 1 ? "Get started" : "Continue";
+                        primary: true;
+                        enabled: (root.page != 3 || root.security-acknowledged)
+                            && (root.page != 4 || root.terms-acknowledged);
+                        clicked => { root.page += 1; }
+                    }
+                    if root.page == 6 && root.can-retry: Action {
+                        label: root.action;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => { root.submit(); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,140 @@
+import { Theme } from "theme.slint";
+import { Action, Clickable, WrappingText } from "controls.slint";
+
+export struct StoredMessage { key: string, body: string, day: string, time: string, exact-time: string, outgoing: bool, status: string, retry-event: string }
+
+export component MessageBubble inherits Rectangle {
+    in property <StoredMessage> message;
+    in property <length> width-limit;
+    in property <bool> show-retry;
+    in property <bool> retry-enabled;
+    callback retry();
+    callback timestamp-hovered(string, length, length);
+    callback timestamp-left();
+    private property <length> inset: 9px;
+    private property <bool> reveal-retry;
+    private property <bool> pending-visible;
+    private property <string> status: root.message.outgoing ? root.message.status : "";
+    private property <bool> show-status-icon: root.status != "Pending" || root.pending-visible;
+    private property <string> status-label: root.status == "Pending" ? "Waiting to send"
+        : root.status == "Sent to relay" ? "Sent · accepted by relay" : root.status;
+    private property <image> status-icon: root.status == "Pending" ? @image-url("icons/delivery-pending.svg")
+        : root.status == "Sent to relay" ? @image-url("icons/delivery-sent.svg")
+        : root.status == "Delivered" ? @image-url("icons/delivery-confirmed.svg")
+        : root.status == "Acceptance unconfirmed" ? @image-url("icons/delivery-unconfirmed.svg")
+        : @image-url("icons/delivery-failed.svg");
+
+    Timer {
+        interval: 500ms;
+        running: root.status == "Pending" && !root.pending-visible;
+        triggered => { root.pending-visible = true; }
+    }
+    changed status => {
+        root.pending-visible = false;
+        root.reveal-retry = false;
+    }
+
+    width: min(root.width-limit,
+        max(body.preferred-width, footer.preferred-width, root.show-retry && root.reveal-retry ? 84px : 0px) + 2 * root.inset);
+    min-height: content.min-height;
+    preferred-height: content.min-height;
+    vertical-stretch: 0;
+    background: root.message.outgoing ? Theme.outgoing : Theme.elevated;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: root.message.outgoing ? Theme.selected : Theme.divider;
+
+    content := VerticalLayout {
+        alignment: start;
+        padding: root.inset;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 2px;
+        body := WrappingText {
+            text: root.message.body;
+            color: Theme.primary;
+            font-size: 14px;
+        }
+        footer := HorizontalLayout {
+            alignment: end;
+            spacing: 4px;
+
+            if root.message.time != "": Rectangle {
+                width: clock.preferred-width;
+                height: root.status != "" ? 18px : clock.preferred-height;
+
+                clock := Text {
+                    vertical-alignment: center;
+                    text: root.message.time;
+                    accessible-label: root.message.exact-time;
+                    color: Theme.secondary;
+                    font-size: 11px;
+                }
+
+                TouchArea {
+                    enabled: root.message.exact-time != "";
+                    changed has-hover => {
+                        if self.has-hover {
+                            root.timestamp-hovered(root.message.exact-time,
+                                self.absolute-position.x + self.width / 2, self.absolute-position.y);
+                        } else {
+                            root.timestamp-left();
+                        }
+                    }
+                }
+            }
+            if root.status != "" && !root.show-retry: Rectangle {
+                width: 14px;
+                height: 18px;
+                accessible-role: text;
+                accessible-label: root.show-status-icon ? root.status-label : "";
+                Image {
+                    width: 14px;
+                    height: 14px;
+                    y: (parent.height - self.height) / 2;
+                    visible: root.show-status-icon;
+                    source: root.status-icon;
+                    colorize: root.status == "Send failed" ? Theme.error : Theme.secondary;
+                    accessible-role: none;
+                }
+                TouchArea {
+                    enabled: root.show-status-icon;
+                    changed has-hover => {
+                        if self.has-hover {
+                            root.timestamp-hovered(root.status-label, self.absolute-position.x, self.absolute-position.y);
+                        } else { root.timestamp-left(); }
+                    }
+                }
+            }
+            if root.show-retry: Clickable {
+                width: 22px;
+                height: 18px;
+                border-radius: 5px;
+                label: root.status-label + " · Resend options";
+                clicked => { root.reveal-retry = !root.reveal-retry; }
+                changed hovered => {
+                    if self.hovered {
+                        root.timestamp-hovered(root.status-label, self.absolute-position.x, self.absolute-position.y);
+                    } else { root.timestamp-left(); }
+                }
+                Image {
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: root.status-icon;
+                    colorize: root.status == "Send failed" ? Theme.error : Theme.secondary;
+                    accessible-role: none;
+                }
+            }
+        }
+        if root.show-retry && root.reveal-retry: HorizontalLayout {
+            alignment: end;
+            Action {
+                label: "Resend";
+                enabled: root.retry-enabled;
+                clicked => { root.reveal-retry = false; root.retry(); }
+            }
+        }
+    }
+}
