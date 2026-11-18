@@ -1,6 +1,12 @@
 # Relay migration review and deployment
 
-Current activation: migration 008 and backend source `2faffd2`, activated on
+Current build: backend source `9eb1319`, deployed on 2026-11-18 at 19:49
+(Asia/Manila). Minimum protocol version remains 1; no migration or environment
+change was applied. The prior process stopped gracefully, all record digests
+matched across restart, and local/public checks passed. See the
+[minimum enforcement deployment record](VERSIONED_DELIVERY.md#minimum-enforcement-backend-deployment-2026-11-18-1949-asiamanila).
+
+Earlier activation: migration 008 and backend source `2faffd2`, activated on
 2026-11-18 at 13:04 (Asia/Manila) after the owner instructed "apply the change".
 All 18 accounts, 13 queued events, 12 prekey inventories and 6 claims were
 preserved. Local readiness and public WebSocket checks passed. See the

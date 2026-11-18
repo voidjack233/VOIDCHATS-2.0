@@ -68,12 +68,14 @@ A separate full `go test ./...` run passed against a newly initialized standalon
 
 These are backend transport/storage checks using synthetic opaque payloads. They do not validate native libsignal decryption, reply/reaction/delete application semantics, or client feature authorization.
 
-## Mandatory minimum protocol (prepared, not deployed)
+## Mandatory minimum protocol
 
 The backend also supports a server-wide minimum through `VOID_MIN_PROTOCOL_VERSION`.
 It defaults to `1`; accepted values are positive integers up to `2147483647`.
-The setting is read at startup and remains fixed for that process. This addition
-has not been deployed and does not activate a version 2 minimum.
+The setting is read at startup and remains fixed for that process. The
+enforcement-capable backend was deployed on 2026-11-18 at 19:49 (Asia/Manila),
+source `9eb131933a3c9e95cc8b5dba1bebae6400691419`, with minimum 1.
+The version 2 minimum is not active.
 
 At minimum 1, existing clients can authenticate and use messaging without a new
 command. At a higher minimum, authentication retains its existing frames, but
@@ -97,11 +99,38 @@ per-event required-version check and queue ordering remain in effect.
 
 For a coordinated release, first ship native support for post-authentication
 advertisement and `update_required` handling. Once that update is available,
-separately authorize deployment of this backend and setting
-`VOID_MIN_PROTOCOL_VERSION=2` in the deployment environment. Replace every old
+separately authorize setting `VOID_MIN_PROTOCOL_VERSION=2` in the deployment
+environment and restarting the enforcement-capable backend. Replace every old
 backend process, including existing authenticated sockets, so all connections
 must satisfy the same minimum. This is a startup setting, not a live reload.
 Check legacy rejection, updated-client delivery and queued recovery in release
 validation. No additional SQL migration or device-version storage is required.
 The server trusts the client's advertised protocol; this is compatibility
 enforcement, not verification of the installed application binary.
+
+
+## Minimum enforcement backend deployment: 2026-11-18 19:49 (Asia/Manila)
+
+After the owner instructed "deploy", source `9eb131933a3c9e95cc8b5dba1bebae6400691419`
+was built from clean committed source and installed after a graceful shutdown of
+the prior relay. The exact prior process environment was retained. The current
+configuration was checked with the new config loader before and after restart:
+minimum protocol version remains **1**. No migration, database role, environment
+file, credential, tunnel configuration or autostart setting was changed.
+
+A private full recovery dump and previous executable were retained before the
+replacement. All before/after row digests matched: 18 accounts, 13 queued events,
+12 prekey inventories and 6 claims. All three Go schema/access validators passed.
+Local health/readiness and local/public WebSocket unknown-account and new-command
+authorization rejection checks passed without creating or modifying live accounts,
+messages or prekeys as smoke tests. Authenticated messaging and minimum 2 behavior
+remain covered by isolated tests. The running executable matches the reviewed
+build; `.env` contents and permissions are unchanged.
+
+- Running binary SHA-256: `18cae34e3736259814bf8d5a707637b65b97630ab2651ba3dd4b49b9f4ad19cd`.
+- Activated PID: 68355; runtime output remains `/tmp/void-server.log`.
+- Private recovery/audit: `/home/void0000/.local/state/void-backend/deployments/20261118T194828+0800-minimum-protocol`.
+
+The existing owner-managed backup retention policy applies to the recovery dump.
+Enabling minimum 2 remains a separate coordinated release action; it was not
+part of this deployment.

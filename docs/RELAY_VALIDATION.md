@@ -1,6 +1,12 @@
 # Temporary relay verification and activation
 
-Current activation: migration 008 and backend source `2faffd2`, verified on
+Current build: source `9eb1319`, deployed and verified on 2026-11-18 at 19:49
+(Asia/Manila), with minimum application protocol version 1. Readiness, live
+schema/access validation and local/public WebSocket rejection checks passed.
+No schema or environment changes were made. See the
+[minimum enforcement deployment record](VERSIONED_DELIVERY.md#minimum-enforcement-backend-deployment-2026-11-18-1949-asiamanila).
+
+Earlier activation: migration 008 and backend source `2faffd2`, verified on
 2026-11-18 at 13:06 (Asia/Manila). Every account, message and prekey record was
 preserved at migration. The private full restore rehearsal, three Go schema
 validators, local health/readiness and local/public WebSocket checks passed.

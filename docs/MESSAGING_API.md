@@ -155,7 +155,7 @@ uses the same `send`/`event`/`ack` contract above. The recipient may be offline
 when its previously published public bundle is claimed. No existing frame or
 account-authentication transcript changes.
 
-## Mandatory application protocol minimum (prepared)
+## Mandatory application protocol minimum
 
 `VOID_MIN_PROTOCOL_VERSION` defaults to `1`. With a higher minimum, clients must
 send `protocol` after `auth_ok` and receive `protocol_ok` before using messaging.
@@ -165,5 +165,6 @@ negotiation returns `{"type":"error","code":"update_required","min_protocol_vers
 when writable, followed by disconnect. All messaging commands, ACKs and prekey
 operations are gated; the separate account-deletion exchange remains available.
 An idle unconfirmed connection receives no messages. Reconnects negotiate again.
-See [release activation and limits](VERSIONED_DELIVERY.md#mandatory-minimum-protocol-prepared-not-deployed).
-This enforcement addition is not deployed; the version 2 minimum is not active.
+See [release activation and limits](VERSIONED_DELIVERY.md#mandatory-minimum-protocol).
+The enforcement-capable backend was deployed on 2026-11-18 at 19:49 (Asia/Manila),
+source `9eb1319`, with minimum 1. The version 2 minimum is not active.
