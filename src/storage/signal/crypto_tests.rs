@@ -16,6 +16,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
 
+mod receiver;
+
 const ALICE: &str = "101";
 const BOB: &str = "202";
 const EC_ID: u32 = 3;
@@ -600,7 +602,7 @@ fn malformed_claims_and_changed_identities_cannot_pin_or_replace_a_session() {
 // A deferred foreign key fails only when SQLite attempts COMMIT, after crypto and
 // all event writes have run successfully inside the transaction.
 fn fail_next_event_commit(db: &Database, table: &str) {
-    assert!(matches!(table, "inbox" | "outbox"));
+    assert!(matches!(table, "inbox" | "outbox" | "control_event_inbox"));
     db.connection
         .execute_batch(&format!(
             "CREATE TABLE test_deferred_fk (
@@ -643,7 +645,7 @@ fn unsupported_transport_version_cannot_consume_signal_keys_or_bypass_duplicate_
     let event = relay_event(ALICE, &id, &payload);
     let mut versioned: Value = serde_json::from_slice(&event).unwrap();
     versioned["type"] = json!("event_versioned");
-    versioned["min_protocol_version"] = json!("2");
+    versioned["min_protocol_version"] = json!("3");
     let versioned = serde_json::to_vec(&versioned).unwrap();
 
     assert!(matches!(

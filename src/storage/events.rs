@@ -12,16 +12,36 @@
 //! Once committed, the exact payload can be retried using the same event ID. A failed
 //! callback must discard any in-memory protocol state derived from the failed write.
 
-use super::{Database, Direction, Error, Message, Result, records::insert_message};
+use super::{
+    Database, Direction, Error, Message, Result,
+    message_events::{self, DeleteEvent, MessageReference, ReactionEvent},
+    records::insert_message,
+};
+use crate::relay::ApplicationProtocolVersion;
 use rusqlite::{OptionalExtension, Transaction, params};
+use zeroize::Zeroizing;
 
 pub(super) enum Incoming {
     Message {
         message: Message,
         receipt_at: Option<i64>,
+        reply_to: Option<MessageReference>,
     },
     Receipt {
         original_event_id: String,
+    },
+    Reaction {
+        event: ReactionEvent,
+        plaintext: Zeroizing<Vec<u8>>,
+        min_protocol_version: ApplicationProtocolVersion,
+        received_at: i64,
+    },
+    Delete(DeleteEvent),
+    Deferred {
+        plaintext: Zeroizing<Vec<u8>>,
+        reason: String,
+        min_protocol_version: ApplicationProtocolVersion,
+        received_at: i64,
     },
 }
 
@@ -82,6 +102,7 @@ impl Database {
             Ok(Incoming::Message {
                 message: process(tx)?,
                 receipt_at: None,
+                reply_to: None,
             })
         })
     }
@@ -100,7 +121,9 @@ impl Database {
             let stored: Option<Vec<u8>> = tx.query_row(
                 "SELECT payload_digest FROM inbox WHERE sender_void_id = ?1 AND event_id = ?2
                  UNION ALL
-                 SELECT payload_digest FROM receipt_inbox WHERE sender_void_id = ?1 AND event_id = ?2",
+                 SELECT payload_digest FROM receipt_inbox WHERE sender_void_id = ?1 AND event_id = ?2
+                 UNION ALL
+                 SELECT payload_digest FROM control_event_inbox WHERE sender_void_id = ?1 AND event_id = ?2",
                 params![sender, event_id], |row| row.get(0),
             ).optional()?;
             if let Some(stored) = stored {
@@ -108,21 +131,53 @@ impl Database {
             }
 
             match process(tx)? {
-                Incoming::Message { message, receipt_at } => {
+                Incoming::Message { mut message, receipt_at, reply_to } => {
                     let peer: String = tx.query_row("SELECT peer_void_id FROM conversations WHERE id = ?1",
                         [message.conversation_id], |row| row.get(0))?;
                     if peer != sender || message.direction != Direction::Incoming {
                         return Err(Error::EventConflict);
                     }
+                    let deleted = message_events::tombstoned(tx, sender, &MessageReference {
+                        author_void_id: sender.into(), event_id: event_id.into(),
+                    })?;
+                    if deleted {
+                        message.body.clear();
+                    }
                     insert_message(tx, &message)?;
+                    if deleted {
+                        // The ordinary incoming-message trigger must not announce
+                        // content already removed by an earlier authenticated delete.
+                        tx.execute("DELETE FROM unread_messages WHERE message_id = ?1", [&message.id])?;
+                    }
                     tx.execute("INSERT INTO inbox (sender_void_id, event_id, payload_digest, message_id) VALUES (?1, ?2, ?3, ?4)",
                         params![sender, event_id, digest.as_slice(), message.id])?;
+                    if let Some(target) = reply_to {
+                        message_events::store_reply(tx, sender, event_id, &message.id, &target)?;
+                    }
                     if let Some(now) = receipt_at {
                         super::receipts::queue(tx, sender, event_id, now)?;
                     }
                 }
                 Incoming::Receipt { original_event_id } => {
                     super::receipts::verify(tx, sender, event_id, digest, &original_event_id)?;
+                }
+                Incoming::Reaction { event, plaintext, min_protocol_version, received_at } => {
+                    if message_events::apply_reaction(tx, sender, event_id, &event)? {
+                        message_events::store_control(tx, sender, event_id, digest, "reaction")?;
+                    } else {
+                        message_events::store_control(tx, sender, event_id, digest, "deferred")?;
+                        message_events::store_deferred(tx, sender, event_id, &plaintext,
+                            "reaction_revision_conflict", min_protocol_version, received_at)?;
+                    }
+                }
+                Incoming::Delete(event) => {
+                    message_events::apply_delete(tx, sender, event_id, &event)?;
+                    message_events::store_control(tx, sender, event_id, digest, "delete_for_everyone")?;
+                }
+                Incoming::Deferred { plaintext, reason, min_protocol_version, received_at } => {
+                    message_events::store_control(tx, sender, event_id, digest, "deferred")?;
+                    message_events::store_deferred(tx, sender, event_id, &plaintext,
+                        &reason, min_protocol_version, received_at)?;
                 }
             }
             Ok(IncomingOutcome::Stored)

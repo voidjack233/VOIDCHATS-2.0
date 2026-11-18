@@ -8,7 +8,7 @@ use super::{
     wire::{self, Routing, SignalBinding},
 };
 use crate::{
-    relay::SUPPORTED_APPLICATION_PROTOCOL,
+    relay::ApplicationProtocolVersion,
     storage::{
         Database, DeliveryState, Direction, Error, Message, Result,
         events::{Incoming, IncomingOutcome},
@@ -192,7 +192,7 @@ impl Database {
         let event = wire::decode_event(event_json, &local_id)?;
         // Gate before duplicate lookup, identity pinning, and any Signal ratchet changes.
         // Recognizing a transport envelope does not imply support for its encrypted events.
-        if event.min_protocol_version > SUPPORTED_APPLICATION_PROTOCOL {
+        if event.min_protocol_version > wire::RECEIVER_APPLICATION_PROTOCOL {
             return Err(Error::SignalEnvelope);
         }
         if expected_event_id.is_some_and(|id| id != event.event_id) {
@@ -265,7 +265,24 @@ impl Database {
                     sender: &event.sender,
                     recipient: &local_id,
                 };
-                match wire::decode_content(routing, &plaintext)? {
+                let content = wire::decode_content(routing, &plaintext)?;
+                // New content must be transported with its application minimum.
+                // Keep valid mis-versioned content recoverable, without applying
+                // an extension delivered through a legacy frame.
+                let requires_v2 = match &content {
+                    wire::Content::Message(message) => message.reply_to.is_some(),
+                    wire::Content::Reaction(_) | wire::Content::Delete(_) => true,
+                    _ => false,
+                };
+                if requires_v2 && event.min_protocol_version < ApplicationProtocolVersion::V2 {
+                    return Ok(Incoming::Deferred {
+                        plaintext,
+                        reason: "protocol_version_required".into(),
+                        min_protocol_version: event.min_protocol_version,
+                        received_at: now_ms,
+                    });
+                }
+                match content {
                     wire::Content::Message(content) => {
                         let conversation_id =
                             incoming_conversation(tx, &event.sender, content.created_at)?;
@@ -279,12 +296,26 @@ impl Database {
                                 delivery_state: DeliveryState::Received,
                             },
                             receipt_at: content.requests_receipt.then_some(now_ms),
+                            reply_to: content.reply_to,
                         })
                     }
                     wire::Content::Receipt(original_event_id) if pinned => {
                         Ok(Incoming::Receipt { original_event_id })
                     }
                     wire::Content::Receipt(_) => Err(Error::SignalPeer),
+                    wire::Content::Reaction(event_content) => Ok(Incoming::Reaction {
+                        event: event_content,
+                        plaintext,
+                        min_protocol_version: event.min_protocol_version,
+                        received_at: now_ms,
+                    }),
+                    wire::Content::Delete(event) => Ok(Incoming::Delete(event)),
+                    wire::Content::Unsupported { reason } => Ok(Incoming::Deferred {
+                        plaintext,
+                        reason,
+                        min_protocol_version: event.min_protocol_version,
+                        received_at: now_ms,
+                    }),
                 }
             })?;
         if outcome == IncomingOutcome::AlreadyStored && !pinned {

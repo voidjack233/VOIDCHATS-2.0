@@ -1,5 +1,6 @@
 use super::*;
 
+pub(crate) mod encrypted_events;
 pub(crate) mod relay_messaging;
 
 const PUBLIC_KEY: [u8; 32] = [5; 32];
@@ -234,7 +235,7 @@ fn migrations_and_message_transactions_roll_back_and_enforce_foreign_keys() {
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap()
     };
-    assert_eq!(version(&db.connection), 9);
+    assert_eq!(version(&db.connection), MIGRATIONS.len() as i64);
     assert!(db.save_draft(999, "missing conversation").is_err());
     assert!(db.set_request(999, true).is_err());
     assert!(db.save_message(&sample_message(999)).is_err());
@@ -378,7 +379,10 @@ fn existing_v1_history_survives_current_migrations_and_fk_diagnostics_detect_orp
     connection.close().unwrap();
 
     let db = Database::open(&root.0, OWNER).unwrap();
-    assert_eq!(schema_version(&db.connection, 9).unwrap(), 9);
+    assert_eq!(
+        schema_version(&db.connection, MIGRATIONS.len()).unwrap(),
+        MIGRATIONS.len()
+    );
     assert_eq!(db.messages(1).unwrap()[0].body, "Existing body");
     assert_eq!(db.conversation(1).unwrap().unread_through, None);
     assert_eq!(db.draft(1).unwrap().as_deref(), Some("Existing draft"));

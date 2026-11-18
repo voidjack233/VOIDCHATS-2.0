@@ -19,6 +19,7 @@ pub(crate) struct ApplicationProtocolVersion(i32);
 
 impl ApplicationProtocolVersion {
     pub(crate) const V1: Self = Self(1);
+    pub(crate) const V2: Self = Self(2);
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
         let version = value.parse::<i32>().ok()?;

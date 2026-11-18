@@ -1,5 +1,6 @@
 pub(crate) mod account_status;
 mod events;
+pub(crate) mod message_events;
 pub(crate) mod messaging;
 pub(crate) mod receipts;
 mod records;
@@ -35,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v7.sql"),
     include_str!("schema_v8.sql"),
     include_str!("schema_v9.sql"),
+    include_str!("schema_v10.sql"),
 ];
 
 #[derive(Clone, Copy)]

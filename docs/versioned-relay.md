@@ -21,9 +21,11 @@ ACKs remain contingent on successful local processing and durable storage.
 `event_versioned` is decoded with an explicit minimum version greater than 1.
 Its original envelope and version metadata remain available to Signal
 processing; the metadata is a relay routing hint, not an authenticated Signal
-plaintext field. Both transport and storage reject versions above the local
-supported version before delivery, duplicate acknowledgment, identity pinning,
-or ratchet changes. Rejection sends no ACK, leaving recovery to the relay's
+plaintext field. Transport rejects versions above the advertised version before
+worker delivery. The prepared Signal receiver has a separate version-2 ceiling
+and rejects higher versions before duplicate acknowledgment, identity pinning,
+or ratchet changes. Version 2 remains unadvertised; see
+[encrypted receiver contract](encrypted-event-receiver.md). Rejection sends no ACK, leaving recovery to the relay's
 retained queue. It does not preserve events beyond the backend's expiry policy.
 
 The typed `SendVersioned` request prepares serialization and acceptance
