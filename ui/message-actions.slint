@@ -1,0 +1,102 @@
+import { Theme } from "theme.slint";
+import { Action, Clickable, WrappingText } from "controls.slint";
+import { StoredReaction } from "message-bubble.slint";
+
+component MenuAction inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> destructive;
+    callback clicked();
+    min-height: 44px; max-height: 44px;
+    min-width: button.min-width;
+    button := Action { width: parent.width; label: root.label; enabled: root.enabled; destructive: root.destructive; clicked => {root.clicked();} }
+}
+component MenuText inherits WrappingText { height: self.preferred-height; vertical-stretch: 0; }
+
+export component MessageActions inherits Rectangle {
+    in-out property <string> mode;
+    in property <bool> outgoing;
+    in property <bool> deleted;
+    in property <bool> remote-enabled;
+    in property <[StoredReaction]> reactions;
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    callback dismiss();
+    callback reply();
+    callback react(string);
+    callback delete-message(bool);
+    private property <[string]> emojis: ["👍", "❤️", "😂", "🎉", "😮", "😢", "🙏", "🔥", "👎", "😀", "✅", "💯", "😊", "🤔", "👏", "😅", "✨", "👀", "💜", "💪", "🤝", "😎", "🙌", "💔"];
+    background: #00000035;
+    TouchArea { clicked => { root.dismiss(); } }
+    keyboard := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => { if event.text == Key.Escape { root.dismiss(); return accept; } return reject; }
+        panel := Rectangle {
+            x: clamp(root.anchor-x - self.width / 2, 12px, root.width - self.width - 12px);
+            y: clamp(root.anchor-y - self.height, 12px, root.height - self.height - 12px);
+            width: min(328px, root.width - 24px);
+            height: content.preferred-height;
+            background: Theme.surface; border-radius: 12px;
+            border-width: 1px; border-color: Theme.divider;
+            content := VerticalLayout {
+                padding: 14px; spacing: 10px; alignment: start;
+                HorizontalLayout {
+                    min-height: 28px;
+                    Text { text: root.mode == "react" ? "React to message" : root.mode == "confirm" ? "Delete for everyone?" : root.mode == "actions" ? "Message actions" : "Delete message"; color: Theme.primary; font-size: 14px; font-weight: 600; vertical-alignment: center; }
+                    Clickable {
+                        width: 28px; height: 28px; label: "Close message actions";
+                        clicked => { root.dismiss(); }
+                        Image { source: @image-url("icons/close.svg"); width: 16px; height: 16px; x: 6px; y: 6px; colorize: Theme.secondary; }
+                    }
+                }
+                if root.mode == "actions": VerticalLayout {
+                    spacing: 8px;
+                    MenuAction { label: "Reply"; enabled: root.remote-enabled; clicked => { root.reply(); } }
+                    MenuAction { label: "React"; enabled: root.remote-enabled; clicked => { root.mode = "react"; } }
+                    MenuAction { label: "Delete message…"; clicked => { root.mode = "delete"; } }
+                    if !root.remote-enabled: MenuText { text: root.deleted ? "Reply and reactions are unavailable for a deleted message." : "Reply and reactions require a compatible protocol V2 connection. They are unavailable in this build."; color: Theme.secondary; font-size: 12px; }
+                }
+                if root.mode == "react": VerticalLayout {
+                    spacing: 8px;
+                    if root.reactions.length > 0: HorizontalLayout {
+                        spacing: 4px;
+                        for reaction in root.reactions: Clickable {
+                            height: 28px; width: 26px; selected: reaction.mine;
+                            label: "Toggle existing reaction " + reaction.emoji;
+                            enabled: root.remote-enabled;
+                            clicked => { root.react(reaction.emoji); root.dismiss(); }
+                            Text { text: reaction.emoji; horizontal-alignment: center; vertical-alignment: center; font-size: 17px; }
+                        }
+                    }
+                    GridLayout {
+                        spacing: 4px;
+                        for emoji[index] in root.emojis: Clickable {
+                            row: floor(index / 6); col: mod(index, 6);
+                            height: 36px; label: "React " + emoji;
+                            enabled: root.remote-enabled && root.reactions.length < 10;
+                            clicked => { root.react(emoji); root.dismiss(); }
+                            Text { text: emoji; font-size: 21px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    MenuText { text: "Up to 10 distinct emojis per message. Click your reaction again to remove it."; color: Theme.secondary; font-size: 12px; }
+                }
+                if root.mode == "delete": VerticalLayout {
+                    spacing: 8px;
+                    MenuText { text: "Choose where to remove this message. This does not delete your account."; color: Theme.secondary; font-size: 12px; }
+                    MenuAction { label: "Delete for Me"; destructive: true; clicked => { root.delete-message(false); root.dismiss(); } }
+                    if root.outgoing: MenuAction { label: "Delete for Everyone"; destructive: true; enabled: root.remote-enabled; clicked => { root.mode = "confirm"; } }
+                    if root.outgoing && !root.remote-enabled: MenuText { text: "Delete for Everyone requires a compatible protocol V2 connection. It is unavailable in this build."; color: Theme.secondary; font-size: 12px; }
+                }
+                if root.mode == "confirm": VerticalLayout {
+                    spacing: 12px;
+                    MenuText { text: "Remove this message here and send an encrypted deletion request to the other person. Relay acceptance does not confirm removal on their device."; color: Theme.secondary; font-size: 13px; }
+                    HorizontalLayout {
+                        alignment: end; spacing: 8px;
+                        MenuAction { label: "Cancel"; clicked => { root.dismiss(); } }
+                        MenuAction { label: "Delete message"; destructive: true; enabled: root.remote-enabled; clicked => { root.delete-message(true); root.dismiss(); } }
+                    }
+                }
+            }
+        }
+    }
+}

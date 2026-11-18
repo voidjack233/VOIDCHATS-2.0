@@ -116,6 +116,7 @@ enum TimelinePage<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TimelineMessage {
+    pub(crate) reference: Option<super::message_events::MessageReference>,
     pub(crate) presentation: super::presentation::Presentation,
     pub(crate) cursor: TimelineCursor,
     pub(crate) body: String,
@@ -428,6 +429,7 @@ impl Database {
             if presentation_ready < 10 {
                 continue;
             }
+            message.reference = self.message_reference(conversation_id, &message.cursor.key())?;
             message.presentation =
                 self.message_presentation(conversation_id, &message.cursor.key())?;
             if message.presentation.deleted {
@@ -495,6 +497,7 @@ fn timeline_message(row: &Row<'_>) -> rusqlite::Result<TimelineMessage> {
     };
     let created_at = row.get(1)?;
     Ok(TimelineMessage {
+        reference: None,
         presentation: Default::default(),
         cursor: TimelineCursor {
             created_at,

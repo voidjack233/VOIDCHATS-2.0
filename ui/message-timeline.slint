@@ -20,6 +20,10 @@ export component MessageTimeline inherits Rectangle {
     in property <bool> conversation-peer-deleted;
     in property <bool> messaging-ready;
     in property <bool> send-busy;
+    in property <bool> remote-enabled;
+    in property <bool> action-busy;
+    callback message-action(StoredMessage, string, length, length);
+    callback toggle-reaction(string, string, string);
     callback page-timeline(bool);
     callback jump-to-present();
     callback resend-message(string);
@@ -199,6 +203,10 @@ export component MessageTimeline inherits Rectangle {
                     alignment: message.outgoing ? end : start;
                     MessageBubble {
                         message: message;
+                        remote-enabled: root.remote-enabled && !root.conversation-peer-deleted;
+                        actions-enabled: !root.conversation-loading && !root.action-busy;
+                        message-action(mode, x, y) => { root.message-action(message, mode, x, y); }
+                        row-width: root.pane-width - 2 * root.thread-gutter;
                         width-limit: min(440px, (root.pane-width - 2 * root.thread-gutter) * 0.86);
                         show-retry: !message.deleted && !root.conversation-peer-deleted && message.retry-event != "";
                         retry-enabled: root.messaging-ready && !root.send-busy;
@@ -215,12 +223,14 @@ export component MessageTimeline inherits Rectangle {
                     alignment: message.outgoing ? end : start;
                     GridLayout {
                         horizontal-stretch: 0; spacing: 4px;
-                        for reaction[index] in message.reactions: Rectangle {
+                        for reaction[index] in message.reactions: Clickable {
                             row: floor(index / 3); col: mod(index, 3);
                             width: 74px; height: 26px; border-radius: 13px;
                             background: reaction.mine ? Theme.selected : Theme.surface;
                             border-width: 1px; border-color: reaction.mine ? Theme.accent : Theme.divider;
-                            accessible-role: text;
+                            enabled: root.remote-enabled && !root.conversation-peer-deleted && !root.action-busy;
+                            label: "Toggle reaction " + reaction.emoji;
+                            clicked => { root.toggle-reaction(message.author-id, message.event-id, reaction.emoji); }
                             accessible-label: reaction.emoji + " " + reaction.count + (reaction.mine ? " including you" : "");
                             Text { text: reaction.emoji + " " + reaction.count; color: Theme.secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                         }

@@ -109,6 +109,22 @@ pub(super) struct ActiveTimeline {
 }
 
 impl ActiveTimeline {
+    pub(super) fn neighbor(&self, key: &str) -> Option<String> {
+        let index = self
+            .window
+            .messages
+            .iter()
+            .position(|m| m.cursor.key() == key)?;
+        self.window
+            .messages
+            .get(index + 1)
+            .or_else(|| {
+                index
+                    .checked_sub(1)
+                    .and_then(|i| self.window.messages.get(i))
+            })
+            .map(|m| m.cursor.key())
+    }
     pub(super) fn page(
         &mut self,
         db: &storage::Database,

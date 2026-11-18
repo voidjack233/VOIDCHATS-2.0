@@ -1,4 +1,4 @@
-//! Durable feature intents. No UI binding or automatic upload is installed.
+//! Durable feature intents used by the protocol-gated message action worker.
 use super::{
     Database, Error, Result,
     account_status::{self, AccountStatus},
@@ -8,7 +8,7 @@ use super::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Clone)]
-#[allow(dead_code)] // Used by the future explicit operation dispatcher, never logged.
+#[allow(dead_code)] // Persisted operation metadata; never logged.
 pub(crate) struct Control {
     pub id: String,
     pub conversation: i64,
@@ -85,8 +85,11 @@ fn unused_id(tx: &Transaction<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // Foundation for the next UI/worker phase.
+#[allow(dead_code)] // Storage API includes explicit recovery/inspection operations.
 impl Database {
+    pub(crate) fn local_void_id(&self) -> Result<String> {
+        local(&self.connection)
+    }
     pub(crate) fn reply_draft(&self, conversation: i64) -> Result<Option<MessageReference>> {
         Ok(self
             .connection

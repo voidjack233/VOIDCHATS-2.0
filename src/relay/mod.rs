@@ -143,9 +143,14 @@ pub(crate) struct Session {
 impl Session {
     /// No production feature dispatch until the coordinated mandatory V2 release.
     pub(crate) fn feature_sends_allowed(&self) -> bool {
+        self.feature_operations_supported() && self.is_active()
+    }
+    /// A previously negotiated V2 session can authorize saving a queued intent
+    /// even if its socket closes before the storage worker reaches the command.
+    pub(crate) fn feature_operations_supported(&self) -> bool {
         #[cfg(test)]
         {
-            self.isolated_v2 && self.is_active()
+            self.isolated_v2
         }
         #[cfg(not(test))]
         {

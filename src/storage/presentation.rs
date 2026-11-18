@@ -66,6 +66,67 @@ pub(crate) struct Presentation {
 }
 
 impl Database {
+    pub(crate) fn message_reference(
+        &self,
+        conversation: i64,
+        key: &str,
+    ) -> Result<Option<MessageReference>> {
+        let Some(cursor) = super::messaging::TimelineCursor::from_key(key) else {
+            return Ok(None);
+        };
+        let mut parts = key.splitn(3, ':');
+        parts.next();
+        let source = parts.next().unwrap_or_default();
+        let id = parts.next().unwrap_or_default();
+        let reference = if source == "o" {
+            self.connection.query_row("SELECT (SELECT void_id FROM local_account), event_id FROM outgoing_operations WHERE event_id=?1 AND conversation_id=?2",params![id,conversation],|r|Ok(MessageReference{author_void_id:r.get(0)?,event_id:r.get(1)?})).optional()?
+        } else {
+            self.connection.query_row("SELECT i.sender_void_id,i.event_id FROM inbox i JOIN messages m ON m.id=i.message_id WHERE m.id=?1 AND m.conversation_id=?2 UNION ALL SELECT (SELECT void_id FROM local_account),b.event_id FROM outbox b JOIN messages m ON m.id=b.message_id WHERE m.id=?1 AND m.conversation_id=?2",params![id,conversation],|r|Ok(MessageReference{author_void_id:r.get(0)?,event_id:r.get(1)?})).optional()?
+        };
+        Ok(reference.filter(|_| cursor.key() == key))
+    }
+
+    pub(crate) fn reply_draft_preview(&self, conversation: i64) -> Result<(String, String)> {
+        let Some(target) = self.reply_draft(conversation)? else {
+            return Ok((String::new(), String::new()));
+        };
+        let author = if target.author_void_id == super::outgoing::local(&self.connection)? {
+            "You".into()
+        } else {
+            self.conversation(conversation)?
+                .display_name
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "Contact".into())
+        };
+        let peer = self.conversation(conversation)?.peer_void_id;
+        let text = if self.message_deleted(&peer, &target)? {
+            "Message deleted".into()
+        } else if let Some(key) = self.reference_cursor(conversation, &target)? {
+            let mut parts = key.splitn(3, ':');
+            parts.next();
+            let source = parts.next().unwrap_or_default();
+            let id = parts.next().unwrap_or_default();
+            self.connection
+                .query_row(
+                    if source == "o" {
+                        "SELECT body FROM outgoing_operations WHERE event_id=?1"
+                    } else {
+                        "SELECT body FROM messages WHERE id=?1"
+                    },
+                    [id],
+                    |r| r.get::<_, String>(0),
+                )?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(120)
+                .collect()
+        } else {
+            "Message unavailable".into()
+        };
+        Ok((author, text))
+    }
     pub(crate) fn reference_cursor(
         &self,
         conversation: i64,

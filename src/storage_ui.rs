@@ -1,3 +1,4 @@
+mod actions;
 mod message_time;
 mod timeline;
 
@@ -37,6 +38,9 @@ enum Command {
     Relay(Activity),
     RefreshPeer(String),
     UploadReceipt,
+    MessageAction(i64, i32, actions::MessageAction, Option<ReadingPosition>),
+    DispatchControl,
+    RetryControls,
     Close,
 }
 
@@ -115,9 +119,15 @@ fn bind_with(
             let mut next_peer_refresh = Instant::now();
             let mut next_receipt = None;
             let mut receipt_not_before = Instant::now();
+            let mut controls = actions::Dispatch::default();
             while let Some(mut command) = queued.take().or_else(|| {
                 let peer_due = (!peer_refresh.is_empty()).then_some(next_peer_refresh);
-                let Some(due) = peer_due.into_iter().chain(next_receipt).min() else {
+                let Some(due) = peer_due
+                    .into_iter()
+                    .chain(next_receipt)
+                    .chain(controls.due)
+                    .min()
+                else {
                     return receiver.recv().ok();
                 };
                 // Give queued sends, deliveries, and draft edits priority and
@@ -126,6 +136,9 @@ fn bind_with(
                     Ok(command) => Some(command),
                     Err(mpsc::RecvTimeoutError::Timeout) if next_receipt == Some(due) => {
                         Some(Command::UploadReceipt)
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) if controls.due == Some(due) => {
+                        Some(Command::DispatchControl)
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         next_peer_refresh = Instant::now() + PEER_STATUS_INTERVAL;
@@ -325,6 +338,9 @@ fn bind_with(
                         if let Some(db) = &mut database {
                             messaging_ready = initialize_messaging(&weak, db, &session);
                             if messaging_ready {
+                                if session.feature_sends_allowed() {
+                                    actions::resume(&weak, &mut controls, db);
+                                }
                                 peer_refresh =
                                     db.peers_to_refresh(selected).unwrap_or_default().into();
                                 next_peer_refresh = Instant::now();
@@ -341,6 +357,9 @@ fn bind_with(
                             relay = None;
                             messaging_ready = false;
                             peer_refresh.clear();
+                            controls = actions::Dispatch::default();
+                            let _ = weak
+                                .upgrade_in_event_loop(|ui| ui.set_remote_actions_supported(false));
                         }
                     }
                     Command::RefreshPeer(peer) => {
@@ -367,6 +386,9 @@ fn bind_with(
                         {
                             messaging_ready = initialize_messaging(&weak, db, session);
                             if messaging_ready {
+                                if session.feature_sends_allowed() {
+                                    actions::resume(&weak, &mut controls, db);
+                                }
                                 peer_refresh =
                                     db.peers_to_refresh(selected).unwrap_or_default().into();
                                 next_peer_refresh = Instant::now();
@@ -394,7 +416,16 @@ fn bind_with(
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as i64;
-                            match db.queue_outgoing(id, &body, now) {
+                            let queued = db.reply_draft(id).and_then(|reply| {
+                                if reply.is_some()
+                                    && !relay.as_ref().is_some_and(Session::feature_sends_allowed)
+                                {
+                                    Err(storage::Error::FeatureUnavailable)
+                                } else {
+                                    db.queue_outgoing(id, &body, now)
+                                }
+                            });
+                            match queued {
                                 Ok((event_id, promoted)) => {
                                     let _ = weak.upgrade_in_event_loop(move |ui| {
                                         ui.invoke_draft_queued(
@@ -438,6 +469,99 @@ fn bind_with(
                             Err(storage::Error::Unavailable.into())
                         };
                         finish_send(&weak, result);
+                    }
+                    Command::MessageAction(id, selection, action, position) => {
+                        history.remember(position);
+                        if let Some(db) = &mut database {
+                            let remote = messaging_ready
+                                && relay
+                                    .as_ref()
+                                    .is_some_and(Session::feature_operations_supported);
+                            // Choose a surviving neighbor before hiding an anchored message.
+                            let removed =
+                                if let actions::MessageAction::Delete(target, false) = &action {
+                                    db.reference_cursor(id, target).ok().flatten()
+                                } else {
+                                    None
+                                };
+                            let neighbor = removed.as_ref().and_then(|key| {
+                                history
+                                    .active
+                                    .as_ref()
+                                    .filter(|v| v.conversation == id)
+                                    .and_then(|v| v.neighbor(key))
+                            });
+                            let result = actions::apply(db, id, action, remote);
+                            if result.is_ok() {
+                                let pending = db
+                                    .pending_controls()
+                                    .map(|ids| !ids.is_empty())
+                                    .unwrap_or(true);
+                                let _ = weak.upgrade_in_event_loop(move |ui| {
+                                    ui.set_pending_controls(pending)
+                                });
+                                if let (Some(removed), Some(neighbor)) = (removed, neighbor) {
+                                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                                        if is_current_timeline(&ui, id, selection)
+                                            && ui.get_timeline_anchor_key() == removed
+                                        {
+                                            ui.set_timeline_anchor_key(neighbor.into());
+                                        }
+                                    });
+                                }
+                                refresh_messages(&weak, db, &mut history, None, None);
+                                actions::show_reply(&weak, db, id, selection);
+                                if remote {
+                                    actions::resume(&weak, &mut controls, db);
+                                }
+                            }
+                            let error = result.err().map_or("", |e| e.open_message());
+                            let _ = weak.upgrade_in_event_loop(move |ui| {
+                                ui.set_action_busy(false);
+                                if is_current_timeline(&ui, id, selection)
+                                    && (!error.is_empty() || !ui.get_pending_controls())
+                                {
+                                    ui.set_message_action_error(error.into());
+                                }
+                            });
+                        } else {
+                            let _ = weak.upgrade_in_event_loop(|ui| {
+                                ui.set_action_busy(false);
+                                ui.set_message_action_error("Local storage is unavailable.".into());
+                            });
+                        }
+                    }
+                    Command::RetryControls => {
+                        controls = actions::Dispatch::default();
+                        if messaging_ready
+                            && relay.as_ref().is_some_and(Session::feature_sends_allowed)
+                            && let Some(db) = &database
+                        {
+                            actions::resume(&weak, &mut controls, db);
+                        }
+                    }
+                    Command::DispatchControl => {
+                        if let (Some(db), Some(session)) = (&mut database, &relay)
+                            && messaging_ready
+                            && session.feature_sends_allowed()
+                        {
+                            let result = controls.run(db, session);
+                            let pending = db
+                                .pending_controls()
+                                .map(|ids| !ids.is_empty())
+                                .unwrap_or(true);
+                            let error = result.err().map(|e| e.message());
+                            let _ = weak.upgrade_in_event_loop(move |ui| {
+                                ui.set_pending_controls(pending);
+                                if let Some(error) = error {
+                                    ui.set_message_action_error(error.into());
+                                } else if !pending {
+                                    ui.set_message_action_error("".into());
+                                }
+                            });
+                        } else {
+                            controls = actions::Dispatch::default();
+                        }
                     }
                     Command::Close => break,
                 }
@@ -531,6 +655,7 @@ fn bind_with(
 
     bind_drafts(ui, worker.sender.clone());
     bind_sending(ui, worker.sender.clone());
+    actions::bind(ui, worker.sender.clone());
     let weak = ui.as_weak();
     let sender = worker.sender.clone();
     ui.on_retry_messaging(move || {
@@ -641,6 +766,10 @@ fn bind_drafts(ui: &AppWindow, sender: Sender<Command>) {
             && ui.get_stored_draft() == submitted
         {
             ui.set_stored_draft("".into());
+            ui.set_reply_event_id("".into());
+            ui.set_reply_author_id("".into());
+            ui.set_reply_author("".into());
+            ui.set_reply_preview("".into());
             draft_feedback(&ui, None);
         }
         ui.set_unsaved_draft_failure(drafts.values().any(|draft| draft.failed));
@@ -661,6 +790,7 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
             || ui.get_conversation_loading()
             || ui.get_send_busy()
             || ui.get_stored_draft().trim().is_empty()
+            || (!ui.get_reply_event_id().is_empty() && !ui.get_remote_actions_supported())
         {
             return;
         }
@@ -724,6 +854,7 @@ fn initialize_messaging(
     let _ = weak.upgrade_in_event_loop(move |ui| {
         ui.set_publishing_keys(false);
         ui.set_messaging_ready(ready && session.is_active());
+        ui.set_remote_actions_supported(ready && session.feature_sends_allowed());
         if !interrupted || ui.get_publication_error().is_empty() {
             ui.set_publication_error(notice.into());
             ui.set_publication_retryable(retryable);
@@ -883,6 +1014,9 @@ fn refresh_messages(
     force_present: Option<i64>,
 ) {
     let selected = history.active.as_ref().map(|view| view.conversation);
+    if let Some(view) = &history.active {
+        actions::show_reply(weak, db, view.conversation, view.selection);
+    }
     show_selected_peer_status(weak, db, selected);
     let lists = load_lists(db);
     let timeline = history.active.as_mut().and_then(|view| {
@@ -1069,6 +1203,8 @@ struct Detail {
     window: TimelineWindow,
     anchor: Option<timeline::Anchor>,
     draft: String,
+    reply: Option<storage::message_events::MessageReference>,
+    reply_preview: (String, String),
 }
 
 impl Detail {
@@ -1079,6 +1215,8 @@ impl Detail {
             window,
             anchor,
             draft,
+            reply,
+            reply_preview,
         } = self;
         ui.set_conversation_read_through("".into());
         ui.set_selected_conversation(conversation.id.to_string().into());
@@ -1094,6 +1232,15 @@ impl Detail {
         }
         ui.set_conversation_read_through(read_through_label(conversation.unread_through).into());
         ui.invoke_load_stored_draft(ui.get_selected_conversation(), draft.into());
+        ui.set_reply_event_id(reply.as_ref().map_or("", |r| r.event_id.as_str()).into());
+        ui.set_reply_author_id(
+            reply
+                .as_ref()
+                .map_or("", |r| r.author_void_id.as_str())
+                .into(),
+        );
+        ui.set_reply_author(reply_preview.0.into());
+        ui.set_reply_preview(reply_preview.1.into());
     }
 }
 
@@ -1109,6 +1256,8 @@ fn load_conversation(
         let draft = db.draft(id)?.unwrap_or_default();
         let (window, anchor) = history.open(db, id, selection)?;
         Ok(Detail {
+            reply: db.reply_draft(id)?,
+            reply_preview: db.reply_draft_preview(id)?,
             conversation,
             account_status,
             window,
@@ -1163,6 +1312,16 @@ fn show_window(ui: &AppWindow, window: TimelineWindow) {
                 heading = time.calendar_label();
             }
             StoredMessage {
+                author_id: message
+                    .reference
+                    .as_ref()
+                    .map_or("", |r| r.author_void_id.as_str())
+                    .into(),
+                event_id: message
+                    .reference
+                    .as_ref()
+                    .map_or("", |r| r.event_id.as_str())
+                    .into(),
                 deleted: message.presentation.deleted,
                 quote: message.presentation.quote.into(),
                 quote_author: message.presentation.author.into(),
@@ -1279,6 +1438,7 @@ fn show_conversation(
 
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
+    mod message_actions;
     mod presentation;
     mod update_required;
     use super::*;
@@ -1286,7 +1446,7 @@ pub(crate) mod tests {
     use slint::{Model, Timer, TimerMode};
     use std::{cell::Cell, process::Command, time::Duration};
 
-    fn bind_fixture(
+    pub(crate) fn bind_fixture(
         ui: &AppWindow,
         owner: impl Fn(&str) -> (std::path::PathBuf, ed25519_dalek::SigningKey) + Send + 'static,
     ) -> io::Result<Worker> {

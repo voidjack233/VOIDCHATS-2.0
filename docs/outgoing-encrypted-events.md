@@ -1,7 +1,8 @@
 # Outgoing encrypted operations
 
 This foundation uses the frozen [receiver contract](encrypted-event-receiver.md).
-It adds no Slint actions, peer handshake, relay fields, or new Signal implementation.
+The [message actions UI](message-actions-ui.md) now connects these operations.
+No peer handshake, relay fields, or new Signal implementation is added.
 The message author and original event UUID identify a target independently of
 pagination, local row IDs, or display names.
 
@@ -71,9 +72,9 @@ applied the control. The current protocol defines delivery receipts for messages
 not reaction/deletion controls; no recipient-application acknowledgment is invented.
 
 `pending_controls` recovers unfinished UUIDs after restart. The explicit dispatcher
-can resume them with the saved payload. This phase adds no startup retransmission
-loop or user-facing action; connecting that dispatcher and its retry UX is future
-work. Accepted operations are idempotent no-ops on repeated dispatch.
+can resume them with the saved payload. The message-action worker now resumes controls on compatible V2 connections
+with bounded retries and a manual retry action. Ordinary messages are not
+automatically retransmitted. Accepted operations are idempotent no-ops on repeated dispatch.
 
 ## Verification and remaining integration
 
@@ -95,9 +96,9 @@ ignored in routine runs because it requires this explicitly provisioned environm
 The newer mandatory-minimum response is covered by the existing mock tests, not
 by changing this pinned Go fixture or connecting to production.
 
-Next: connect the existing Slint hover actions, reply banner, reaction picker and
-delete choices to the explicit worker APIs; update UI models while retaining the
-existing timeline anchors; coordinate the mandatory V2 release. Production and
+The Slint hover actions, reply banner, reaction picker and delete choices are
+connected to the worker APIs, preserving timeline anchors. Next: coordinate the
+mandatory V2 release. Production and
 existing account stores were not used for testing. The relay's existing 30-day
 retention remains: deletion/reaction events that expire before recipient processing
 cannot be claimed as applied. No longer retention, backend change or synchronization

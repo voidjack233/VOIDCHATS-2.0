@@ -1,6 +1,7 @@
 import { LineEdit } from "std-widgets.slint";
 import { AccountRemovalPage, AccountSetup } from "account-pages.slint";
 import { MessageTimeline } from "message-timeline.slint";
+import { MessageActions } from "message-actions.slint";
 import { MessageComposer } from "message-composer.slint";
 import { StoredMessage } from "message-bubble.slint";
 import { Theme } from "theme.slint";
@@ -186,6 +187,31 @@ export component AppWindow inherits Window {
             || root.connection-status == "Authentication failed");
     callback reconnect();
     in property <bool> messaging-ready;
+    in property <bool> remote-actions-supported;
+    in property <bool> action-busy;
+    in property <bool> pending-controls;
+    in property <string> message-action-error;
+    in property <string> reply-author-id;
+    in property <string> reply-event-id;
+    in property <string> reply-author;
+    in property <string> reply-preview;
+    callback choose-reply(string,string);
+    callback cancel-reply();
+    callback toggle-reaction(string,string,string);
+    callback delete-message(string,string,bool);
+    callback retry-controls();
+    callback open-message-actions(StoredMessage,string,length,length);
+    open-message-actions(message,mode,x,y) => {
+        if mode == "reply" { root.choose-reply(message.author-id,message.event-id); }
+        else { root.action-message = message; root.action-x = x; root.action-y = y; root.message-action-mode = mode; }
+    }
+    private property <string> message-action-mode;
+    private property <StoredMessage> action-message;
+    private property <length> action-x;
+    private property <length> action-y;
+    changed selected-conversation => { root.message-action-mode = ""; }
+    changed remote-actions-supported => { root.message-action-mode = ""; }
+    changed update-required => { root.message-action-mode = ""; }
     in property <bool> publishing-keys;
     in property <string> publication-error;
     in property <bool> publication-retryable;
@@ -235,7 +261,7 @@ export component AppWindow inherits Window {
     in-out property <string> stored-draft;
     pure callback has-message-content(string) -> bool;
     private property <bool> can-send-draft:
-        !root.send-busy && !root.conversation-loading && root.has-message-content(root.stored-draft);
+        !root.send-busy && !root.action-busy && !root.conversation-loading && root.has-message-content(root.stored-draft) && (root.reply-event-id == "" || root.remote-actions-supported);
     in property <string> draft-status;
     in property <bool> draft-save-failed;
     in property <bool> unsaved-draft-failure;
@@ -323,6 +349,7 @@ export component AppWindow inherits Window {
         ? "This user account has been deleted." : "";
 
     changed section => {
+        root.message-action-mode = "";
         root.cancel-permanent-deletion();
         root.cancel-local-removal();
         root.timestamp-tip = "";
@@ -926,6 +953,12 @@ export component AppWindow inherits Window {
 
                 MessageTimeline {
                     stored-messages: root.stored-messages;
+                    remote-enabled: root.remote-actions-supported;
+                    action-busy: root.action-busy;
+                    toggle-reaction(author,event,emoji) => { root.toggle-reaction(author,event,emoji); }
+                    message-action(message, mode, x, y) => {
+                        root.open-message-actions(message,mode,x,y);
+                    }
                     pane-width: chat-pane.width;
                     thread-gutter: chat-pane.thread-gutter;
                     chat-gutter: root.chat-gutter;
@@ -970,12 +1003,23 @@ export component AppWindow inherits Window {
                     Text { text: root.conversation-account-notice; color: Theme.primary; font-size: 14px; font-weight: 600; wrap: word-wrap; }
                     Text { text: "You can no longer send messages to this account."; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
                 }
+                if root.message-action-error != "": VerticalLayout {
+                    vertical-stretch: 0; padding: 8px; spacing: 4px;
+                    WrappingText { text: root.message-action-error; color: Theme.error; font-size: 12px; }
+                    if root.pending-controls && root.remote-actions-supported: Action { label: "Retry pending actions"; clicked => { root.retry-controls(); } }
+                }
                 if root.conversation-can-compose: MessageComposer {
                     thread-gutter: chat-pane.thread-gutter;
                     draft-save-failed: root.draft-save-failed;
                     draft-status: root.draft-status;
                     conversation-loading: root.conversation-loading;
                     stored-draft <=> root.stored-draft;
+                    reply-author: root.reply-author;
+                    reply-preview: root.reply-preview;
+                    replying: root.reply-event-id != "";
+                    reply-key: root.reply-event-id == "" ? "" : root.reply-author-id + ":" + root.reply-event-id;
+                    remote-enabled: root.remote-actions-supported;
+                    cancel-reply => { root.cancel-reply(); }
                     send-busy: root.send-busy;
                     can-send-draft: root.can-send-draft;
                     save-stored-draft(text) => { root.save-stored-draft(text); }
@@ -983,6 +1027,21 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    if root.message-action-mode != "" && root.setup-page == 0 && !root.update-required && root.show-conversation && !root.showing-account-removal: MessageActions {
+        z: 7;
+        width: root.width; height: root.height;
+        mode <=> root.message-action-mode;
+        anchor-x: root.action-x; anchor-y: root.action-y;
+        outgoing: root.action-message.outgoing && !root.action-message.deleted;
+        deleted: root.action-message.deleted;
+        reactions: root.action-message.reactions;
+        remote-enabled: root.remote-actions-supported && !root.action-busy && !root.conversation-peer-deleted && !root.action-message.deleted;
+        dismiss => { root.message-action-mode = ""; }
+        reply => { root.choose-reply(root.action-message.author-id,root.action-message.event-id); root.message-action-mode = ""; }
+        react(emoji) => { root.toggle-reaction(root.action-message.author-id,root.action-message.event-id,emoji); }
+        delete-message(everyone) => { root.delete-message(root.action-message.author-id,root.action-message.event-id,everyone); }
     }
 
     if !root.update-required && root.timestamp-tip != "" && root.show-conversation && root.setup-page == 0
