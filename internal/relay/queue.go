@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strconv"
 	"time"
 
 	"void-nothingness/internal/account"
@@ -88,17 +89,49 @@ func (client *session) handleCommand(fields map[string]string) bool {
 	ctx, cancel := context.WithTimeout(client.ctx, s.opts.ForwardTimeout)
 	defer cancel()
 	switch fields["type"] {
+	case "protocol":
+		if !exactFields(fields, "protocol", "version") {
+			break
+		}
+		version, ok := parseProtocolVersion(fields["version"])
+		if !ok {
+			break
+		}
+		// Serialize negotiation with delivery so the confirmation precedes any
+		// event that requires the new version. Downgrading could invalidate an
+		// in-flight frame; reconnect instead, starting at version 1.
+		client.deliveryMu.Lock()
+		defer client.deliveryMu.Unlock()
+		if version < client.protocolVersion {
+			break
+		}
+		if !client.activeTransmit(ctx, []string{client.voidID}, map[string]string{"type": "protocol_ok", "version": fields["version"]}) {
+			return false
+		}
+		client.protocolVersion = version
+		s.wakeRecipient(client.voidID)
+		return true
 	case "account_status":
 		return client.accountStatus(ctx, fields)
-	case "send":
-		if !exactFields(fields, "send", "event_id", "to_void_id", "payload_base64") || !queue.ValidEventID(fields["event_id"]) || !auth.ValidVoidID(fields["to_void_id"]) {
+	case "send", "send_versioned":
+		version := 1
+		if fields["type"] == "send_versioned" {
+			var ok bool
+			version, ok = parseProtocolVersion(fields["min_protocol_version"])
+			if !ok || !exactFields(fields, "send_versioned", "event_id", "to_void_id", "payload_base64", "min_protocol_version") {
+				break
+			}
+		} else if !exactFields(fields, "send", "event_id", "to_void_id", "payload_base64") {
+			break
+		}
+		if !queue.ValidEventID(fields["event_id"]) || !auth.ValidVoidID(fields["to_void_id"]) {
 			break
 		}
 		payload, err := decodeBase64(fields["payload_base64"], s.opts.MaxPayloadBytes)
 		if err != nil {
 			break
 		}
-		event, err := s.opts.Queue.Send(ctx, client.voidID, fields["event_id"], fields["to_void_id"], payload)
+		event, err := s.opts.Queue.SendVersioned(ctx, client.voidID, fields["event_id"], fields["to_void_id"], payload, version)
 		if err != nil {
 			client.queueError(ctx, err)
 			return true
@@ -152,6 +185,14 @@ func (client *session) handleCommand(fields map[string]string) bool {
 	}
 	client.sendError(ctx, "invalid_frame")
 	return false
+}
+
+func parseProtocolVersion(value string) (int, bool) {
+	version, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || !queue.ValidProtocolVersion(int(version)) || strconv.FormatInt(version, 10) != value {
+		return 0, false
+	}
+	return int(version), true
 }
 
 func (s *Server) wakeRecipient(actor string) {
@@ -221,10 +262,22 @@ func (client *session) deliverOne() bool {
 		return true
 	}
 	event := rows[0]
+	// Read only the existing queue head. Skipping incompatible ciphertext can
+	// advance a Signal session past withheld messages. Leave it stored and
+	// hold the entire recipient queue until support increases or it expires.
+	if event.MinProtocolVersion > client.protocolVersion {
+		client.inFlightSender, client.inFlightID = "", ""
+		return true
+	}
 	client.inFlightSender, client.inFlightID, client.inFlightExpiry = event.SenderVoidID, event.EventID, event.ExpiresAt
+	frame := map[string]string{"type": "event", "event_id": event.EventID, "from_void_id": event.SenderVoidID, "payload_base64": base64.StdEncoding.EncodeToString(event.Payload), "created_at": event.CreatedAt.Format(time.RFC3339Nano), "expires_at": event.ExpiresAt.Format(time.RFC3339Nano)}
+	if event.MinProtocolVersion > 1 {
+		frame["type"] = "event_versioned"
+		frame["min_protocol_version"] = strconv.Itoa(event.MinProtocolVersion)
+	}
 	eventCtx, expireCancel := context.WithDeadline(ctx, event.ExpiresAt)
 	err = s.withActive(eventCtx, []string{client.voidID, event.SenderVoidID}, func() error {
-		return client.transmit(eventCtx, map[string]string{"type": "event", "event_id": event.EventID, "from_void_id": event.SenderVoidID, "payload_base64": base64.StdEncoding.EncodeToString(event.Payload), "created_at": event.CreatedAt.Format(time.RFC3339Nano), "expires_at": event.ExpiresAt.Format(time.RFC3339Nano)})
+		return client.transmit(eventCtx, frame)
 	})
 	expireCancel()
 	if errors.Is(err, account.ErrDeleted) {

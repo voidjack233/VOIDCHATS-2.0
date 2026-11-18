@@ -73,16 +73,17 @@ type session struct {
 	cancel context.CancelFunc
 	out    chan outbound
 	// conn is assigned after admission; shutdown may happen during the upgrade.
-	connMu         sync.Mutex
-	conn           socket
-	voidID         string // Set once at activation before publishing in the registry.
-	deliveryMu     sync.Mutex
-	inFlightSender string
-	inFlightID     string
-	inFlightExpiry time.Time
-	wake           chan struct{}
-	queuedBytes    atomic.Int64
-	deleting       atomic.Bool
+	connMu          sync.Mutex
+	conn            socket
+	voidID          string // Set once at activation before publishing in the registry.
+	deliveryMu      sync.Mutex
+	protocolVersion int // Guarded by deliveryMu; connection-local, defaults to 1.
+	inFlightSender  string
+	inFlightID      string
+	inFlightExpiry  time.Time
+	wake            chan struct{}
+	queuedBytes     atomic.Int64
+	deleting        atomic.Bool
 }
 
 // The transport contract also permits deterministic slow-write tests without
@@ -159,7 +160,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A standalone context is required after HTTP hijacking; request contexts
 	// are not a reliable lifetime for upgraded connections.
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &session{server: s, ctx: ctx, cancel: cancel, out: make(chan outbound, s.opts.QueueSize), wake: make(chan struct{}, 1)}
+	client := &session{server: s, ctx: ctx, cancel: cancel, out: make(chan outbound, s.opts.QueueSize), wake: make(chan struct{}, 1), protocolVersion: 1}
 	s.mu.Lock()
 	if s.closed || len(s.connections) >= s.opts.MaxConnections {
 		s.mu.Unlock()
@@ -275,7 +276,7 @@ func (client *session) authenticate() bool {
 		client.deleteAccount(fields)
 		return false
 	}
-	if fields["type"] == "send" || fields["type"] == "prekeys_publish" || fields["type"] == "prekeys_claim" {
+	if fields["type"] == "send" || fields["type"] == "send_versioned" || fields["type"] == "protocol" || fields["type"] == "prekeys_publish" || fields["type"] == "prekeys_claim" {
 		client.sendError(ctx, "unauthorized")
 		return false
 	}

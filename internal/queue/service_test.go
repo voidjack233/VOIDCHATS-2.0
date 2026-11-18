@@ -216,3 +216,107 @@ func TestInputOwnershipCancellationAndSafeErrors(t *testing.T) {
 		t.Fatal("storage diagnostics leaked", err)
 	}
 }
+
+func TestProtocolMetadataSurvivesRecoveryWithoutReordering(t *testing.T) {
+	ctx := context.Background()
+	s, store := testService(t)
+	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	payload := []byte{0, 255, 2, 254}
+	first, err := s.SendVersioned(ctx, "1", testID(1), "2", payload, 2)
+	if err != nil || first.MinProtocolVersion != 2 || first.ExpiresAt.Sub(first.CreatedAt) != Retention {
+		t.Fatalf("versioned send: %+v, %v", first, err)
+	}
+	payload[0] = 99
+	now = now.Add(time.Second)
+	legacy, err := s.Send(ctx, "1", testID(2), "2", []byte("later ciphertext"))
+	if err != nil || legacy.MinProtocolVersion != 1 {
+		t.Fatalf("legacy send: %+v, %v", legacy, err)
+	}
+	// A retry cannot downgrade the required version or replace ciphertext.
+	if _, err := s.SendVersioned(ctx, "1", testID(1), "3", []byte("changed"), 1); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate versioned send: %v", err)
+	}
+	restarted, err := New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.now = func() time.Time { return now }
+	rows, err := restarted.Pending(ctx, "2", 1)
+	if err != nil || len(rows) != 1 || rows[0].EventID != first.EventID || rows[0].MinProtocolVersion != 2 || !bytes.Equal(rows[0].Payload, []byte{0, 255, 2, 254}) || !rows[0].ExpiresAt.Equal(first.ExpiresAt) {
+		t.Fatalf("recovery changed or skipped the queue head: %+v, %v", rows, err)
+	}
+	if err := restarted.Ack(ctx, "3", "1", first.EventID); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = restarted.Pending(ctx, "2", 100)
+	if err != nil || len(rows) != 2 || rows[0].EventID != first.EventID || rows[1].EventID != legacy.EventID || rows[1].MinProtocolVersion != 1 {
+		t.Fatalf("mixed-version queue order or ACK ownership changed: %+v, %v", rows, err)
+	}
+	if err := restarted.Ack(ctx, "2", "1", first.EventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Ack(ctx, "2", "1", first.EventID); err != nil {
+		t.Fatal("repeated versioned ACK", err)
+	}
+	rows, err = restarted.Pending(ctx, "2", 1)
+	if err != nil || len(rows) != 1 || rows[0].EventID != legacy.EventID {
+		t.Fatalf("ACK did not release the next event: %+v, %v", rows, err)
+	}
+}
+
+func TestLegacyStoreEventsDefaultToProtocolVersionOne(t *testing.T) {
+	ctx := context.Background()
+	s, store := testService(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	event := Event{EventID: testID(1), SenderVoidID: "1", RecipientVoidID: "2", Payload: []byte("legacy ciphertext"), CreatedAt: now, ExpiresAt: now.Add(Retention)}
+	if err := store.Enqueue(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+	rows, err := s.Pending(ctx, "2", 1)
+	if err != nil || len(rows) != 1 || rows[0].MinProtocolVersion != 1 || !bytes.Equal(rows[0].Payload, event.Payload) {
+		t.Fatalf("legacy metadata default changed ciphertext: %+v, %v", rows, err)
+	}
+}
+
+func TestProtocolVersionBoundsAndExpiry(t *testing.T) {
+	ctx := context.Background()
+	s, store := testService(t)
+	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	overflow := int64(1 << 31)
+	for _, version := range []int{-1, 0, int(overflow)} {
+		if ValidProtocolVersion(version) {
+			t.Fatalf("accepted invalid version %d", version)
+		}
+		if _, err := s.SendVersioned(ctx, "1", testID(1), "2", []byte("opaque"), version); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid version %d: %v", version, err)
+		}
+	}
+	for _, version := range []int{-1, int(overflow)} {
+		event := Event{EventID: testID(1), SenderVoidID: "1", RecipientVoidID: "2", Payload: []byte("opaque"), MinProtocolVersion: version, CreatedAt: now, ExpiresAt: now.Add(Retention)}
+		if err := store.Enqueue(ctx, event); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("store accepted invalid version %d: %v", version, err)
+		}
+	}
+	for i, version := range []int{1, 2, 1<<31 - 1} {
+		if !ValidProtocolVersion(version) {
+			t.Fatalf("rejected valid version %d", version)
+		}
+		if _, err := s.SendVersioned(ctx, "1", testID(i+1), "2", []byte("opaque"), version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(Retention - time.Microsecond)
+	if rows, err := s.Pending(ctx, "2", 100); err != nil || len(rows) != 3 {
+		t.Fatalf("premature versioned expiration: %+v, %v", rows, err)
+	}
+	now = now.Add(time.Microsecond)
+	if rows, err := s.Pending(ctx, "2", 100); err != nil || len(rows) != 0 {
+		t.Fatalf("expired versioned events remained pending: %+v, %v", rows, err)
+	}
+	if n, err := s.Cleanup(ctx, 100); err != nil || n != 3 || len(store.events) != 0 {
+		t.Fatalf("version metadata changed expiration cleanup: %d, %v", n, err)
+	}
+}

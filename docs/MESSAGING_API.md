@@ -8,6 +8,22 @@ VOID-IDs are canonical decimal positive int64 strings. They are public addresses
 
 Use the Ed25519 `auth_begin` → `auth_challenge` → `auth_proof` → `auth_ok` flow documented in [WEBSOCKET.md](../WEBSOCKET.md). Production proofs bind the registered public key, VOID-ID, canonical audience, challenge, expiry and nonce. One active connection is maintained per account. Authentication must complete before commands or pending delivery.
 
+### Application protocol support
+
+Prepared backend addition: deployment requires [migration 008 and a coordinated backend replacement](VERSIONED_DELIVERY.md). Every authenticated connection starts at application protocol version 1. This is separate from the authentication proof's `authenticate:v2` transcript, which is unchanged. After `auth_ok`, a capable client advertises its highest supported application protocol version:
+
+```json
+{"type":"protocol","version":"2"}
+```
+
+```json
+{"type":"protocol_ok","version":"2"}
+```
+
+Versions are canonical decimal strings from `1` through `2147483647`; numeric JSON values, leading zeros, signs and whitespace are invalid. Support means the client can process events requiring any version up to its advertised version. Versions can increase or repeat during a connection; decreasing the advertised version returns `invalid_frame` and closes the socket. The confirmation is sent before newly enabled delivery resumes. Ordinary version 1 events may arrive before that confirmation, including immediately after authentication.
+
+Version support belongs only to this connection. Every reconnect or authenticated replacement starts at version 1 and must advertise again; neither the account nor the queue stores a recipient capability. An old client sends no new command and continues using the existing frames. Advertising support does not change a sender's queued events or their required version.
+
 ```json
 {"type":"lookup","void_id":"202"}
 ```
@@ -41,6 +57,24 @@ The current recipient connection receives:
 ```
 
 The payload is forwarded unchanged. The synthetic bytes above are not a valid MLS object or an encryption format. Encrypted edits, deletions, reactions and other device instructions use this identical opaque mechanism; the backend does not parse their meaning.
+
+### Versioned encrypted events
+
+Legacy `send` always requires recipient application protocol version 1. Use `send_versioned` to attach a minimum recipient version outside the ciphertext:
+
+```json
+{"type":"send_versioned","event_id":"00000000-0000-4000-8000-000000000002","to_void_id":"202","payload_base64":"AAECAw==","min_protocol_version":"2"}
+```
+
+It uses the same version range, payload limits, persisted acceptance, duplicate detection, 30-day retention and ACK contract as `send`. The `accepted` response remains unchanged. The sender does not need to advertise a receive version before sending a versioned event. A duplicate sender/event ID cannot overwrite the existing ciphertext, version or timestamps.
+
+A connection supporting version 2 or higher receives this version 2 event as:
+
+```json
+{"type":"event_versioned","event_id":"00000000-0000-4000-8000-000000000002","from_void_id":"101","payload_base64":"AAECAw==","created_at":"2026-11-02T06:00:00Z","expires_at":"2026-12-02T06:00:00Z","min_protocol_version":"2"}
+```
+
+Events requiring version 1 retain the original six-field `event` frame, including when sent with `send_versioned` or delivered to a newer connection. The required version is generic routing metadata; it does not identify a reply, reaction or deletion. Go never decrypts Signal plaintext, parses reply references or emojis, or authorizes deletion targets. VOID Native handles all three feature types through this same encrypted delivery path and implements their local effects. Queue ACK deletion remains transport cleanup and does not implement Delete for Everyone.
 
 ## Recipient acknowledgment and deletion
 
@@ -88,9 +122,11 @@ These objects are never inserted into the queue, inventoried, claimed or interpr
 
 After successful authentication, the server offers the first remaining unexpired event, ordered by `(created_at,sender_void_id,event_id)`. One event is in flight per recipient connection. Its ACK or expiry opens the delivery window. The server wakes this pump after committed sends and periodically checks for new work; it never advances a permanent sync cursor.
 
+The pump reads the queue head before checking its required version. If that head exceeds the connection's support, it retains the event and holds delivery for the entire recipient queue, including later version 1 events and events from other senders. It never filters incompatible rows out of the queue scan or bypasses withheld ciphertext. Advertising sufficient support wakes delivery; reconnecting with an older client leaves the block in place. An expired head stops being eligible under the unchanged retention policy, allowing the next eligible event to proceed.
+
 Unacknowledged events remain after a transport write. Reconnection offers them again. There is no resend/backoff timer, persistent deduplication or exactly-once guarantee. A lost recipient ACK can hold the window until reconnect or expiry. A lost sender acceptance response is ambiguous: the event may already be queued, processed or deleted. After deletion, the same ID can be accepted again with new server timestamps. Devices must handle duplicate processing safely; advanced retry/dedup engineering remains future work.
 
-The ordering above is a queue scan order, not a global commit order or MLS causal sequence. Devices own encryption/application ordering and their local history. Removing server conversations means the backend cannot prove an encrypted payload belongs to an established MLS group; that is a client responsibility.
+The ordering above is the existing queue scan order, not a global commit order or Signal causal sequence. Timestamps are assigned before persistence, so concurrent sends can commit in a different order. The version gate preserves this existing behavior without introducing a new ciphertext skip. Tests use opaque synthetic bytes to establish queue retention and delivery order; they do not establish libsignal decryption interoperability or justify bypassing an incompatible event. Devices own encryption/application ordering, safe ACK timing and their local history.
 
 Expired records are never dispatched. An in-process task deletes expired rows on startup and each minute in bounded batches. No external worker/service is introduced. Outages or a cleanup backlog can delay physical deletion, and database MVCC/WAL/backups have separate retention. Thirty days is the maximum delivery eligibility; no promise of exact wall-clock disk erasure is made.
 

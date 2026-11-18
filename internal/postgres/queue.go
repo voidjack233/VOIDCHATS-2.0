@@ -90,7 +90,10 @@ func (s *QueueStore) Lookup(ctx context.Context, id string) (queue.Person, error
 }
 
 func (s *QueueStore) Enqueue(ctx context.Context, event queue.Event) error {
-	if !auth.ValidVoidID(event.SenderVoidID) || !auth.ValidVoidID(event.RecipientVoidID) || !queue.ValidEventID(event.EventID) || len(event.Payload) < 1 || len(event.Payload) > queue.MaxPayloadBytes || event.CreatedAt.IsZero() || event.ExpiresAt.Sub(event.CreatedAt) != queue.Retention {
+	if event.MinProtocolVersion == 0 {
+		event.MinProtocolVersion = 1
+	}
+	if !queue.ValidProtocolVersion(event.MinProtocolVersion) || !auth.ValidVoidID(event.SenderVoidID) || !auth.ValidVoidID(event.RecipientVoidID) || !queue.ValidEventID(event.EventID) || len(event.Payload) < 1 || len(event.Payload) > queue.MaxPayloadBytes || event.CreatedAt.IsZero() || event.ExpiresAt.Sub(event.CreatedAt) != queue.Retention {
 		return queue.ErrInvalid
 	}
 	if s.db == nil {
@@ -138,7 +141,7 @@ func (s *QueueStore) Enqueue(ctx context.Context, event queue.Event) error {
 			return queue.ErrCapacity
 		}
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO public.messages(event_id,sender_void_id,recipient_void_id,payload,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(sender_void_id,event_id) DO NOTHING`, queueUUID(event.EventID), queueNumber(event.SenderVoidID), queueNumber(event.RecipientVoidID), event.Payload, event.CreatedAt, event.ExpiresAt)
+	tag, err := tx.Exec(ctx, `INSERT INTO public.messages(event_id,sender_void_id,recipient_void_id,payload,created_at,expires_at,min_protocol_version) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(sender_void_id,event_id) DO NOTHING`, queueUUID(event.EventID), queueNumber(event.SenderVoidID), queueNumber(event.RecipientVoidID), event.Payload, event.CreatedAt, event.ExpiresAt, event.MinProtocolVersion)
 	if err != nil {
 		return queueError(ctx, err)
 	}
@@ -164,7 +167,7 @@ func (s *QueueStore) Pending(ctx context.Context, recipient string, now time.Tim
 	if err = lockActiveAccounts(ctx, tx, recipient); err != nil {
 		return nil, queueError(ctx, err)
 	}
-	rows, err := tx.Query(ctx, `SELECT event_id::text,sender_void_id::text,recipient_void_id::text,payload,created_at,expires_at FROM public.messages WHERE recipient_void_id=$1 AND expires_at>$2 ORDER BY created_at,sender_void_id,event_id LIMIT $3`, queueNumber(recipient), now, limit)
+	rows, err := tx.Query(ctx, `SELECT event_id::text,sender_void_id::text,recipient_void_id::text,payload,created_at,expires_at,min_protocol_version FROM public.messages WHERE recipient_void_id=$1 AND expires_at>$2 ORDER BY created_at,sender_void_id,event_id LIMIT $3`, queueNumber(recipient), now, limit)
 	if err != nil {
 		return nil, queueError(ctx, err)
 	}
@@ -172,7 +175,7 @@ func (s *QueueStore) Pending(ctx context.Context, recipient string, now time.Tim
 	out := []queue.Event{}
 	for rows.Next() {
 		var event queue.Event
-		if err = rows.Scan(&event.EventID, &event.SenderVoidID, &event.RecipientVoidID, &event.Payload, &event.CreatedAt, &event.ExpiresAt); err != nil {
+		if err = rows.Scan(&event.EventID, &event.SenderVoidID, &event.RecipientVoidID, &event.Payload, &event.CreatedAt, &event.ExpiresAt, &event.MinProtocolVersion); err != nil {
 			return nil, queueError(ctx, err)
 		}
 		event.CreatedAt = event.CreatedAt.UTC()
@@ -227,14 +230,15 @@ func (s *QueueStore) Expire(ctx context.Context, now time.Time, limit int) (int6
 }
 
 // Validate is read-only. It permits the base schema or the reviewed prekey extension,
-// whose additional tables are separately checked by PrekeyStore.Validate. It verifies payload/expiry bounds,
-// ownership FKs, composite key, delivery/expiry indexes and effective privileges.
+// whose additional tables are separately checked by PrekeyStore.Validate. It verifies
+// protocol metadata, payload/expiry bounds, ownership FKs, composite key,
+// delivery/expiry indexes and effective privileges.
 func (s *QueueStore) Validate(ctx context.Context) error {
 	if s.db == nil {
 		return ErrQueueSchema
 	}
 	var okay bool
-	err := s.db.QueryRow(ctx, `SELECT c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND has_table_privilege(c.oid,'SELECT') AND has_table_privilege(c.oid,'INSERT') AND has_table_privilege(c.oid,'DELETE') AND (SELECT array_agg(t.relname::text ORDER BY t.relname COLLATE "C") IN (ARRAY['accounts','messages']::text[],ARRAY['accounts','messages','signal_prekey_claims','signal_prekey_inventory']::text[]) FROM pg_catalog.pg_class t JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND t.relkind IN ('r','p')) AND (SELECT count(*)=6 AND bool_and(a.attnotnull AND a.attidentity='' AND a.attgenerated='' AND NOT a.atthasdef AND a.atttypid=CASE a.attname WHEN 'event_id' THEN 'uuid'::regtype WHEN 'sender_void_id' THEN 'bigint'::regtype WHEN 'recipient_void_id' THEN 'bigint'::regtype WHEN 'payload' THEN 'bytea'::regtype WHEN 'created_at' THEN 'timestamptz'::regtype WHEN 'expires_at' THEN 'timestamptz'::regtype ELSE 0::oid END) FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public.messages')`).Scan(&okay)
+	err := s.db.QueryRow(ctx, `SELECT c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity AND has_table_privilege(c.oid,'SELECT') AND has_table_privilege(c.oid,'INSERT') AND has_table_privilege(c.oid,'DELETE') AND (SELECT array_agg(t.relname::text ORDER BY t.relname COLLATE "C") IN (ARRAY['accounts','messages']::text[],ARRAY['accounts','messages','signal_prekey_claims','signal_prekey_inventory']::text[]) FROM pg_catalog.pg_class t JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND t.relkind IN ('r','p')) AND (SELECT count(*)=7 AND bool_and(a.attnotnull AND a.attidentity='' AND a.attgenerated='' AND CASE WHEN a.attname='min_protocol_version' THEN a.atthasdef AND (SELECT pg_catalog.pg_get_expr(d.adbin,d.adrelid)='1' FROM pg_catalog.pg_attrdef d WHERE d.adrelid=a.attrelid AND d.adnum=a.attnum) ELSE NOT a.atthasdef END AND a.atttypid=CASE a.attname WHEN 'event_id' THEN 'uuid'::regtype WHEN 'sender_void_id' THEN 'bigint'::regtype WHEN 'recipient_void_id' THEN 'bigint'::regtype WHEN 'payload' THEN 'bytea'::regtype WHEN 'created_at' THEN 'timestamptz'::regtype WHEN 'expires_at' THEN 'timestamptz'::regtype WHEN 'min_protocol_version' THEN 'integer'::regtype ELSE 0::oid END) FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) FROM pg_catalog.pg_class c WHERE c.oid=pg_catalog.to_regclass('public.messages')`).Scan(&okay)
 	if err != nil || !okay {
 		return ErrQueueSchema
 	}
@@ -263,6 +267,8 @@ func (s *QueueStore) Validate(ctx context.Context) error {
 				key = "payload"
 			case "expires_at=created_at+'720:00:00'::interval", "expires_at=created_at+'720hours'::interval":
 				key = "expiry"
+			case "min_protocol_version>=1":
+				key = "protocol_version"
 			}
 		}
 		if key == "" || !valid || deferred || seen[key] {
@@ -273,7 +279,7 @@ func (s *QueueStore) Validate(ctx context.Context) error {
 	}
 	err = rows.Err()
 	rows.Close()
-	if err != nil || len(seen) != 5 {
+	if err != nil || len(seen) != 6 {
 		return ErrQueueSchema
 	}
 	rows, err = s.db.Query(ctx, `SELECT ARRAY(SELECT a.attname::text FROM unnest(i.indkey::smallint[]) WITH ORDINALITY k(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num ORDER BY k.ord),i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indnkeyatts=i.indnatts AND am.amname='btree' FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE i.indrelid=pg_catalog.to_regclass('public.messages')`)

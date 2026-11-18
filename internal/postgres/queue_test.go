@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,15 +172,48 @@ func TestQueueEnqueueLocksAffectedAccountsAndCommitsBeforeAcceptance(t *testing.
 		t.Fatal("recipient quota is not scoped")
 	}
 	insert := tx.calls[8]
-	if !strings.HasPrefix(insert.sql, "INSERT INTO public.messages(event_id,sender_void_id,recipient_void_id,payload,created_at,expires_at)") || !strings.Contains(insert.sql, "ON CONFLICT(sender_void_id,event_id) DO NOTHING") {
+	if !strings.HasPrefix(insert.sql, "INSERT INTO public.messages(event_id,sender_void_id,recipient_void_id,payload,created_at,expires_at,min_protocol_version)") || !strings.Contains(insert.sql, "ON CONFLICT(sender_void_id,event_id) DO NOTHING") {
 		t.Fatal(insert.sql)
 	}
-	if insert.args[0] != queueUUID(event.EventID) || insert.args[1] != int64(9223372036854775807) || insert.args[2] != int64(101) || !bytes.Equal(insert.args[3].([]byte), event.Payload) || insert.args[4] != event.CreatedAt || insert.args[5] != event.ExpiresAt {
+	if insert.args[0] != queueUUID(event.EventID) || insert.args[1] != int64(9223372036854775807) || insert.args[2] != int64(101) || !bytes.Equal(insert.args[3].([]byte), event.Payload) || insert.args[4] != event.CreatedAt || insert.args[5] != event.ExpiresAt || insert.args[6] != 1 {
 		t.Fatal("event data or typed parameters changed")
 	}
 	encoded, err := pgtype.NewMap().Encode(pgtype.UUIDOID, pgtype.BinaryFormatCode, insert.args[0], nil)
 	if err != nil || len(encoded) != 16 {
 		t.Fatal("UUID not binary-safe", err)
+	}
+}
+
+func TestQueueEnqueueProtocolVersions(t *testing.T) {
+	for _, version := range []int{0, 1, 2, 2147483647} {
+		s, tx := queueEnqueueStore()
+		event := queueSampleEvent()
+		event.MinProtocolVersion = version
+		if err := s.Enqueue(context.Background(), event); err != nil {
+			t.Fatalf("version %d: %v", version, err)
+		}
+		want := max(1, version)
+		insert := tx.calls[len(tx.calls)-1]
+		if insert.args[6] != want {
+			t.Fatalf("version %d stored as %v, want %d", version, insert.args[6], want)
+		}
+		encoded, err := pgtype.NewMap().Encode(pgtype.Int4OID, pgtype.BinaryFormatCode, insert.args[6], nil)
+		if err != nil || len(encoded) != 4 {
+			t.Fatalf("version %d cannot be encoded as PostgreSQL integer: %v", version, err)
+		}
+	}
+	invalidVersions := []int{-1}
+	if strconv.IntSize == 64 {
+		tooLarge := int64(2147483648)
+		invalidVersions = append(invalidVersions, int(tooLarge))
+	}
+	for _, version := range invalidVersions {
+		db := &queueTestDB{}
+		event := queueSampleEvent()
+		event.MinProtocolVersion = version
+		if err := (&QueueStore{db: db}).Enqueue(context.Background(), event); !errors.Is(err, queue.ErrInvalid) || db.beginCount != 0 {
+			t.Fatalf("invalid version %d reached persistence: %v", version, err)
+		}
 	}
 }
 
@@ -268,8 +302,9 @@ func TestQueueACKDeletesOnlyAuthenticatedRecipientRecord(t *testing.T) {
 
 func TestQueuePendingFiltersExpiredAndCopiesOpaqueBytes(t *testing.T) {
 	event := queueSampleEvent()
+	event.MinProtocolVersion = 2
 	original := append([]byte(nil), event.Payload...)
-	db := &queueTestDB{rowsResults: []pgx.Rows{queueRows([]any{event.EventID, event.SenderVoidID, event.RecipientVoidID, original, event.CreatedAt.In(time.FixedZone("synthetic", 8*3600)), event.ExpiresAt.In(time.FixedZone("synthetic", 8*3600))})}}
+	db := &queueTestDB{rowsResults: []pgx.Rows{queueRows([]any{event.EventID, event.SenderVoidID, event.RecipientVoidID, original, event.CreatedAt.In(time.FixedZone("synthetic", 8*3600)), event.ExpiresAt.In(time.FixedZone("synthetic", 8*3600)), 2})}}
 	tx := &queueTestTx{queueTestDB: *db}
 	tx.accounts = map[int64]*time.Time{101: nil}
 	s := &QueueStore{db: &queueTestDB{tx: tx}}
@@ -311,6 +346,7 @@ func queueValidSchemaStore() (*QueueStore, *queueTestDB) {
 		[]any{"f", true, false, []string{"recipient_void_id"}, true, ""},
 		[]any{"c", true, false, []string{"payload"}, false, "((octet_length(payload) >= 1) AND (octet_length(payload) <= 1048576))"},
 		[]any{"c", true, false, []string{"expires_at", "created_at"}, false, "(expires_at = (created_at + '720:00:00'::interval))"},
+		[]any{"c", true, false, []string{"min_protocol_version"}, false, "(min_protocol_version >= 1)"},
 	)
 	indexes := queueRows(
 		[]any{[]string{"sender_void_id", "event_id"}, true},
@@ -334,8 +370,13 @@ func TestQueueValidationUsesOnlyCatalogReads(t *testing.T) {
 			t.Fatal("validation performs non-catalog mutation/read", call.sql)
 		}
 	}
-	if !strings.Contains(db.calls[0].sql, "has_table_privilege(c.oid,'DELETE')") || !strings.Contains(db.calls[0].sql, "count(*)=6") || !strings.Contains(db.calls[0].sql, "ARRAY['accounts','messages']") {
+	if !strings.Contains(db.calls[0].sql, "has_table_privilege(c.oid,'DELETE')") || !strings.Contains(db.calls[0].sql, "count(*)=7") || !strings.Contains(db.calls[0].sql, "ARRAY['accounts','messages']") {
 		t.Fatal("legacy schema or missing delete privilege could pass")
+	}
+	for _, fragment := range []string{"WHEN 'min_protocol_version' THEN 'integer'::regtype", "a.attnotnull", "a.attname='min_protocol_version' THEN a.atthasdef", "pg_catalog.pg_get_expr(d.adbin,d.adrelid)='1'"} {
+		if !strings.Contains(db.calls[0].sql, fragment) {
+			t.Fatalf("protocol column type, nullability or default is not validated: %s", fragment)
+		}
 	}
 }
 
@@ -352,6 +393,15 @@ func TestQueueValidationRejectsLegacyOrIncompleteSchema(t *testing.T) {
 		{"wrong_owner_fk", func(db *queueTestDB) { db.rowsResults[0].(*queueTestRows).values[1][4] = false }},
 		{"overlong_retention", func(db *queueTestDB) {
 			db.rowsResults[0].(*queueTestRows).values[4][5] = "expires_at>created_at AND expires_at<=created_at+'31 days'::interval"
+		}},
+		{"missing_protocol_check", func(db *queueTestDB) {
+			db.rowsResults[0].(*queueTestRows).values = db.rowsResults[0].(*queueTestRows).values[:5]
+		}},
+		{"zero_protocol_allowed", func(db *queueTestDB) {
+			db.rowsResults[0].(*queueTestRows).values[5][5] = "min_protocol_version >= 0"
+		}},
+		{"unvalidated_protocol_check", func(db *queueTestDB) {
+			db.rowsResults[0].(*queueTestRows).values[5][1] = false
 		}},
 		{"missing_expiry_index", func(db *queueTestDB) {
 			db.rowsResults[1].(*queueTestRows).values = db.rowsResults[1].(*queueTestRows).values[:2]

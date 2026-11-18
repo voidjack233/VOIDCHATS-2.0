@@ -34,19 +34,23 @@ type Person struct {
 	AuthPublicKey string `json:"auth_public_key"`
 }
 
-// Event is exactly one queue record. Payload is never inspected as MLS or
+// Event is exactly one queue record. Payload is never inspected as Signal or
 // application content, and no delivered/history/tombstone state is stored.
 type Event struct {
-	EventID         string    `json:"event_id"`
-	SenderVoidID    string    `json:"sender_void_id"`
-	RecipientVoidID string    `json:"recipient_void_id"`
-	Payload         []byte    `json:"-"`
-	CreatedAt       time.Time `json:"created_at"`
-	ExpiresAt       time.Time `json:"expires_at"`
+	EventID            string    `json:"event_id"`
+	SenderVoidID       string    `json:"sender_void_id"`
+	RecipientVoidID    string    `json:"recipient_void_id"`
+	Payload            []byte    `json:"-"`
+	MinProtocolVersion int       `json:"min_protocol_version"`
+	CreatedAt          time.Time `json:"created_at"`
+	ExpiresAt          time.Time `json:"expires_at"`
 }
 
-// Store.Enqueue returns only after persistence commits. Pending excludes
-// expired rows. Ack deletes only rows addressed to its authenticated recipient.
+// Store.Enqueue returns only after persistence commits and treats a zero minimum
+// protocol version as legacy version 1. Pending excludes expired rows and returns
+// all protocol versions ordered by creation time, numeric sender ID, then event
+// ID. Callers must hold delivery at an incompatible head rather than skipping it.
+// Ack deletes only rows addressed to its authenticated recipient.
 // Implementations bound pending count/bytes per sender and recipient atomically.
 type Store interface {
 	Lookup(context.Context, string) (Person, error)
@@ -87,6 +91,10 @@ func ValidEventID(id string) bool {
 	return true
 }
 
+// ValidProtocolVersion accepts positive versions representable by PostgreSQL's
+// integer type. Application versions describe client support, not ciphertext.
+func ValidProtocolVersion(version int) bool { return version >= 1 && version <= 1<<31-1 }
+
 func (s *Service) Lookup(ctx context.Context, actor, target string) (Person, error) {
 	if !auth.ValidVoidID(actor) || !auth.ValidVoidID(target) {
 		return Person{}, ErrInvalid
@@ -102,11 +110,17 @@ func (s *Service) Lookup(ctx context.Context, actor, target string) (Person, err
 // Duplicate IDs still present in the queue are rejected; advanced retries and
 // idempotency after deletion are deliberately outside this first version.
 func (s *Service) Send(ctx context.Context, actor, eventID, target string, payload []byte) (Event, error) {
-	if !auth.ValidVoidID(actor) || !auth.ValidVoidID(target) || !ValidEventID(eventID) || len(payload) == 0 || len(payload) > MaxPayloadBytes {
+	return s.SendVersioned(ctx, actor, eventID, target, payload, 1)
+}
+
+// SendVersioned stores the recipient's required application protocol version
+// separately from opaque ciphertext. It does not interpret application events.
+func (s *Service) SendVersioned(ctx context.Context, actor, eventID, target string, payload []byte, minProtocolVersion int) (Event, error) {
+	if !auth.ValidVoidID(actor) || !auth.ValidVoidID(target) || !ValidEventID(eventID) || len(payload) == 0 || len(payload) > MaxPayloadBytes || !ValidProtocolVersion(minProtocolVersion) {
 		return Event{}, ErrInvalid
 	}
 	now := s.now().UTC().Truncate(time.Microsecond)
-	event := Event{EventID: eventID, SenderVoidID: actor, RecipientVoidID: target, Payload: append([]byte(nil), payload...), CreatedAt: now, ExpiresAt: now.Add(Retention)}
+	event := Event{EventID: eventID, SenderVoidID: actor, RecipientVoidID: target, Payload: append([]byte(nil), payload...), MinProtocolVersion: minProtocolVersion, CreatedAt: now, ExpiresAt: now.Add(Retention)}
 	if err := s.store.Enqueue(ctx, event); err != nil {
 		return Event{}, safeError(ctx, err)
 	}

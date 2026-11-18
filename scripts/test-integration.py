@@ -64,6 +64,28 @@ def connection_url(env, database, user=None, password=None):
             + "?" + urlencode({"sslmode": env.get("PGSSLMODE", "prefer")}))
 
 
+def migrate_queue_protocol(env, migration):
+    # Seed the pre-migration queue with unexpired and expired opaque ciphertext.
+    # This database was just created by this runner and contains no real users.
+    psql(env, """
+        INSERT INTO public.accounts(void_id,auth_public_key)
+            VALUES (1,decode(repeat('11',32),'hex')),
+                   (2,decode(repeat('22',32),'hex'));
+        INSERT INTO public.messages(event_id,sender_void_id,recipient_void_id,payload,created_at,expires_at)
+            VALUES ('10000000-0000-4000-8000-000000000001',1,2,decode('00ff800102','hex'),
+                    CURRENT_TIMESTAMP,CURRENT_TIMESTAMP+INTERVAL '720 hours'),
+                   ('10000000-0000-4000-8000-000000000002',2,1,decode('ff00800304','hex'),
+                    CURRENT_TIMESTAMP-INTERVAL '721 hours',CURRENT_TIMESTAMP-INTERVAL '1 hour');
+    """)
+    before = psql(env, "SELECT jsonb_agg(to_jsonb(m) ORDER BY sender_void_id,event_id) FROM public.messages m;")
+    psql(env, migration.read_text(encoding="utf-8"))
+    after = psql(env, "SELECT jsonb_agg(to_jsonb(m)-'min_protocol_version' ORDER BY sender_void_id,event_id) FROM public.messages m;")
+    if before != after or psql(env, "SELECT count(*) FROM public.messages WHERE min_protocol_version=1;") != "2":
+        raise RuntimeError("Queue migration changed existing event data or failed to default protocol version to 1")
+    psql(env, "DELETE FROM public.messages;")
+    print("Verified migration preserves existing ciphertext, routing, IDs, timestamps and version 1 defaults", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-database-admin", action="store_true",
@@ -148,7 +170,11 @@ def main():
         grants = (migration_dir / "007_account_deletion_privileges.sql").read_text(encoding="utf-8")
         psql(test_admin, grants.replace(':"runtime_role"', role_sql))
         psql(test_admin, f"GRANT SELECT,INSERT,DELETE ON public.messages TO {role_sql};")
-        test_env = os.environ.copy()
+        migrate_queue_protocol(test_admin, migration_dir / "008_message_protocol_version.sql")
+        # Go integration tests use only the guarded disposable URLs below.
+        # Administrative connection settings must not leak into config tests.
+        test_env = {key: value for key, value in os.environ.items()
+                    if not key.startswith("PG") and key != "DATABASE_URL"}
         test_env["VOID_TEST_DATABASE_URL"] = connection_url(admin, database) if args.existing_login else connection_url(admin, database, role, password)
         if args.existing_login:
             test_env["VOID_TEST_OWNER_LOGIN"] = "1"

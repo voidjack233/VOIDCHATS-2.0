@@ -47,6 +47,12 @@ func (s *MemoryStore) Enqueue(ctx context.Context, event Event) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if event.MinProtocolVersion == 0 {
+		event.MinProtocolVersion = 1
+	}
+	if !ValidProtocolVersion(event.MinProtocolVersion) {
+		return ErrInvalid
+	}
 	if _, ok := s.people[event.SenderVoidID]; !ok {
 		return ErrNotFound
 	}
