@@ -1,8 +1,36 @@
-# Version-aware encrypted delivery preparation
+# Version-aware encrypted delivery
 
-This backend change prepares the generic encrypted delivery path for VOID Native Reply, Reactions and Delete for Everyone. It does not deploy the backend or apply a production migration. The exact new frames and reconnect behavior are specified in [MESSAGING_API.md](MESSAGING_API.md#application-protocol-support).
+Activated on 2026-11-18 at 13:04 (Asia/Manila), after the owner instructed "apply the change". Migration 008 and backend source `2faffd27f12d1d02ec28e4be298610d4fee50856` are running against the existing PostgreSQL 18.6 database `void2-0e2ee`. This enables the generic encrypted delivery path for VOID Native Reply, Reactions and Delete for Everyone. The exact frames and reconnect behavior are specified in [MESSAGING_API.md](MESSAGING_API.md#application-protocol-support).
 
-## Deployment prerequisites
+## Activation and preservation
+
+The existing PostgreSQL 18 cluster and backend were stopped at inspection. The owner started PostgreSQL after the session could not perform administrator authentication. No old relay process or other database client was connected during migration. A full private recovery dump was restored into a newly initialized, isolated PostgreSQL 18 cluster. The exact migration preserved every restored record, defaulted all queued events to version 1, and passed all three Go schema/access validators. The isolated cluster was removed afterward.
+
+The live migration then committed while the backend remained stopped. All before/after row digests matched:
+
+| Table | Records | Preservation |
+| --- | ---: | --- |
+| `accounts` | 18 | Every identity, authentication key, timestamp and account deletion state unchanged |
+| `messages` | 13 | Every existing ID, route, ciphertext and timestamp unchanged; required version defaults to 1 |
+| `signal_prekey_inventory` | 12 | Every public inventory record unchanged |
+| `signal_prekey_claims` | 6 | Every claim record unchanged |
+
+All three live Go schema/access validators passed before restart. The reviewed executable was atomically installed and started on the existing `127.0.0.1:8080` listener. The existing Cloudflared service was started with its existing configuration. Local health/readiness returned HTTP 200. Local and public WebSocket checks passed ordinary and deletion-only rejection for a verified nonexistent ID, plus `unauthorized` rejection for the new `protocol` and `send_versioned` commands. No real account, message or prekey writes were made as smoke tests. Authenticated negotiation/delivery was verified in isolated tests, not by using live private keys.
+
+The running executable matches the reviewed build, and `.env` contents and permissions are unchanged. No credentials, roles, grants, account schema, tunnel configuration or retention settings were modified. The backend continues its existing queue/prekey cleanup behavior after startup. No new service or autostart configuration was installed.
+
+Private recovery and audit directory (owner-only access):
+
+`/home/void0000/.local/state/void-backend/deployments/20261118T124857+0800-versioned-delivery`
+
+It contains the full pre-migration recovery dump, previous and new executables, exact migration copy, before/after schema and row digests, rehearsal and validator logs, local/public probe results, and activation metadata. Recovery artifacts retain the owner's existing private backup retention policy. Runtime output remains in `/tmp/void-server.log`; the activated process started with PID 21497.
+
+- Installed binary SHA-256: `30ab9d1d8d263841d9eaf891995e133285eed450d8d79701d1028afbe35b1c5d`.
+- Migration 008 SHA-256: `9f23615078cc2dc2216af291242c5ff26f76320335f203b7a785851f8c0d2bb2`.
+
+## Future deployment and recovery
+
+Migration 008 is already applied to this database; do not replay it. The following prerequisites apply to separately approved deployments in other environments:
 
 1. Review and separately authorize [migration 008](../migrations/008_message_protocol_version.sql) for the intended database. Follow the existing backup/recovery procedure before applying it.
 2. Stop and drain every old backend reader and writer before permitting versioned traffic. An already-running old binary ignores the additive version column and can deliver unsupported ciphertext. Its old strict schema validator also rejects the migrated layout on restart, so mixed-version operation is unsuitable.
@@ -10,7 +38,7 @@ This backend change prepares the generic encrypted delivery path for VOID Native
 4. Start only the new backend build. Its read-only schema validator requires the new column, default and validated constraint as well as effective access. Startup never applies migrations.
 5. Verify legacy send/receive/ACK and the native client's reconnect advertisement before enabling version 2 feature sends. Native clients must support the `event_versioned` envelope and preserve local Signal processing order.
 
-No deployment, service restart or production database change is part of this preparation. Do not roll back to an old backend while any event requiring a newer protocol remains queued: old readers cannot enforce the compatibility gate. Do not discard or relabel queued ciphertext to make rollback appear safe. Coordinate recovery with a version-aware build and the client's encryption state.
+Do not roll back to an old backend while any event requiring a newer protocol remains queued: old readers cannot enforce the compatibility gate. Do not discard or relabel queued ciphertext to make rollback appear safe. Coordinate recovery with a version-aware build and the client's encryption state. Restoring an older backup must also preserve/replay committed account deletion state before admitting traffic.
 
 ## Ordering decision and limits
 

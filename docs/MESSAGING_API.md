@@ -10,7 +10,7 @@ Use the Ed25519 `auth_begin` → `auth_challenge` → `auth_proof` → `auth_ok`
 
 ### Application protocol support
 
-Prepared backend addition: deployment requires [migration 008 and a coordinated backend replacement](VERSIONED_DELIVERY.md). Every authenticated connection starts at application protocol version 1. This is separate from the authentication proof's `authenticate:v2` transcript, which is unchanged. After `auth_ok`, a capable client advertises its highest supported application protocol version:
+Activated on 2026-11-18 at 13:04 (Asia/Manila), with [migration 008 and backend source `2faffd2`](VERSIONED_DELIVERY.md). Every authenticated connection starts at application protocol version 1. This is separate from the authentication proof's `authenticate:v2` transcript, which is unchanged. After `auth_ok`, a capable client advertises its highest supported application protocol version:
 
 ```json
 {"type":"protocol","version":"2"}

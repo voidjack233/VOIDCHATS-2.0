@@ -285,3 +285,28 @@ credential, environment, frontend or network change was needed. Matching source
 `15458d70e2bedf4986e2be5ad4c83bff08ee8d7e` is running; six HTTP/readiness and two WebSocket checks passed.
 No live account/message/prekey rows were inserted by verification. Private
 backup/audit: `/home/void0000/.local/state/void-backend/deployments/20261103T113511+0800-signal-prekeys`. Temporary connection state and helpers were removed.
+
+
+## Version-aware encrypted delivery activated: 2026-11-18 13:04 (Asia/Manila)
+
+After the owner instructed "apply the change", the exact reviewed migration 008
+added `messages.min_protocol_version integer NOT NULL DEFAULT 1` and its positive
+version constraint. All 18 accounts, 13 queued ciphertext events, 12 public prekey
+inventories and 6 claims matched their pre-migration digests. Every existing
+queued event defaults to version 1. Accounts, authentication keys, roles, grants,
+indexes and the 30-day retention policy were unchanged.
+
+A private full recovery dump was restored into an isolated PostgreSQL 18 cluster
+before live application. Both the rehearsal and live database passed all three
+Go schema/access validators. No old backend was running during migration. Source
+`2faffd27f12d1d02ec28e4be298610d4fee50856` was atomically installed and started;
+local health/readiness and local/public WebSocket checks passed without live
+account, message or prekey writes. The environment file and existing tunnel
+configuration were unchanged.
+
+Migration SHA-256:
+`9f23615078cc2dc2216af291242c5ff26f76320335f203b7a785851f8c0d2bb2`.
+Private recovery/audit:
+`/home/void0000/.local/state/void-backend/deployments/20261118T124857+0800-versioned-delivery`.
+Do not replay migration 008 or return to an old reader while newer-version
+ciphertext remains queued. See the [activation and recovery record](docs/VERSIONED_DELIVERY.md).

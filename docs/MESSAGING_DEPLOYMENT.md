@@ -1,7 +1,14 @@
 # Relay migration review and deployment
 
+Current activation: migration 008 and backend source `2faffd2`, activated on
+2026-11-18 at 13:04 (Asia/Manila) after the owner instructed "apply the change".
+All 18 accounts, 13 queued events, 12 prekey inventories and 6 claims were
+preserved. Local readiness and public WebSocket checks passed. See the
+[version-aware delivery activation and recovery record](VERSIONED_DELIVERY.md).
+The entries below describe earlier activations.
+
 Permanent account deletion was activated on 2026-11-16 at 16:59 (Asia/Manila),
-after explicit owner approval. Migration 007 and source `9e6b6d5` are running;
+after explicit owner approval. That activation used migration 007 and source `9e6b6d5`;
 all 13 existing accounts and all queued/prekey data were preserved. See the
 [complete activation and recovery record](ACCOUNT_DELETION_DEPLOYMENT.md).
 The earlier dated records below describe prior activations.

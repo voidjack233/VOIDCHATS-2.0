@@ -1,6 +1,12 @@
 # Temporary relay verification and activation
 
-Current activation: migration 007 and backend source `9e6b6d5`, verified on
+Current activation: migration 008 and backend source `2faffd2`, verified on
+2026-11-18 at 13:06 (Asia/Manila). Every account, message and prekey record was
+preserved at migration. The private full restore rehearsal, three Go schema
+validators, local health/readiness and local/public WebSocket checks passed.
+See the [version-aware delivery activation record](VERSIONED_DELIVERY.md).
+
+Earlier activation: migration 007 and backend source `9e6b6d5`, verified on
 2026-11-16 (Asia/Manila). All 13 account identities and all message/prekey rows
 were preserved. Local readiness and public WebSocket rejection checks passed.
 See the [account deletion activation record](ACCOUNT_DELETION_DEPLOYMENT.md).
