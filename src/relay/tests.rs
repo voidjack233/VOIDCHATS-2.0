@@ -20,6 +20,92 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 const AUDIENCE: &str = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz";
 const VOID_ID: &str = "123";
 const WAIT: Duration = Duration::from_secs(5);
+
+#[tokio::test]
+async fn mandatory_update_ends_worker_without_online_commands_or_reconnects() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let (status, mut statuses) = tokio::sync::mpsc::unbounded_channel();
+    let (activity, mut activities) = tokio::sync::mpsc::unbounded_channel();
+    let (relay, worker) = Connection::spawn_with_activity(
+        endpoint.clone(),
+        |_| Ok(identity()),
+        move |value| {
+            let _ = status.send(value);
+        },
+        move |value| {
+            let _ = activity.send(value);
+        },
+    )
+    .unwrap();
+    assert!(relay.connect(VOID_ID.into()));
+    let mut socket = next_attempt(&listener).await;
+    assert_status(&mut statuses, ConnectionStatus::Connecting).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    send_json(&mut socket, json!({"type":"auth_ok","void_id":VOID_ID})).await;
+    assert_eq!(
+        receive_json(&mut socket).await,
+        json!({"type":"protocol","version":"1"})
+    );
+    send_json(
+        &mut socket,
+        json!({"type":"error","code":"update_required","min_protocol_version":"2"}),
+    )
+    .await;
+    assert_status(
+        &mut statuses,
+        ConnectionStatus::UpdateRequired(super::ApplicationProtocolVersion::V2),
+    )
+    .await;
+    assert!(matches!(
+        activities.recv().await,
+        Some(Activity::Offline(_))
+    ));
+    assert!(activities.recv().await.is_none());
+    assert!(
+        !relay.connect(VOID_ID.into()),
+        "manual reconnect cannot revive incompatible worker"
+    );
+    expect_no_command(&mut socket).await;
+    assert!(
+        timeout(Duration::from_millis(2300), listener.accept())
+            .await
+            .is_err()
+    );
+    worker.finish();
+    // A new process/worker does not persist the terminal state. Minimum V1
+    // can authenticate and negotiate normally on the same endpoint.
+    let (relay, worker) =
+        Connection::spawn_with_activity(endpoint, |_| Ok(identity()), |_| {}, |_| {}).unwrap();
+    assert!(relay.connect(VOID_ID.into()));
+    let mut socket = next_attempt(&listener).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    finish_authentication(&mut socket, VOID_ID).await;
+    worker.finish();
+}
+
+#[tokio::test]
+async fn contradictory_update_minimum_is_not_trusted() {
+    let (endpoint, server) = mock_relay(|mut socket| async move {
+        verify_proof(&mut socket, &identity().key.verifying_key()).await;
+        send_json(&mut socket, json!({"type":"auth_ok","void_id":VOID_ID})).await;
+        assert_eq!(
+            receive_json(&mut socket).await,
+            json!({"type":"protocol","version":"1"})
+        );
+        send_json(
+            &mut socket,
+            json!({"type":"error","code":"update_required","min_protocol_version":"1"}),
+        )
+        .await;
+        expect_no_command(&mut socket).await;
+    })
+    .await;
+    let (end, seen) = connect(&endpoint, &identity(), Duration::from_secs(2)).await;
+    server.await.unwrap();
+    assert_eq!(end, ConnectionStatus::Disconnected);
+    assert!(seen.is_empty());
+}
 pub(crate) type Socket = WebSocketStream<TcpStream>;
 
 #[test]

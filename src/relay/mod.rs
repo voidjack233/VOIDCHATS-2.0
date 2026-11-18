@@ -49,6 +49,7 @@ pub(crate) enum ConnectionStatus {
     Disconnected,
     Reconnecting,
     AuthenticationFailed,
+    UpdateRequired(ApplicationProtocolVersion),
 }
 
 impl ConnectionStatus {
@@ -59,6 +60,7 @@ impl ConnectionStatus {
             Self::Disconnected => "Disconnected",
             Self::Reconnecting => "Reconnecting",
             Self::AuthenticationFailed => "Authentication failed",
+            Self::UpdateRequired(_) => "Update required",
         }
     }
 }
@@ -341,6 +343,10 @@ async fn run_worker(
             retry_step = 0;
         }
         match terminal {
+            Some(status @ ConnectionStatus::UpdateRequired(_)) => {
+                report(status);
+                return;
+            }
             Some(ConnectionStatus::Disconnected) => {
                 report(ConnectionStatus::Reconnecting);
                 let delay = reconnect_delay(retry_step, rand::random_range(0..=25));
@@ -543,6 +549,9 @@ async fn negotiate_protocol(
                         json: text.to_string(),
                     });
                 }
+                Some(ServerFrame::UpdateRequired(version)) if version > application_version => {
+                    return Err(ConnectionStatus::UpdateRequired(version));
+                }
                 Some(ServerFrame::OnlineDelivery) => {}
                 Some(ServerFrame::Error(code)) => {
                     report_rejection("protocol", &code);
@@ -685,6 +694,7 @@ async fn monitor_authenticated<F: Fn(Activity)>(
                             (mode.activity)(Activity::Delivery { generation: mode.session.generation, sender, event_id, json: text.to_string() });
                         }
                     }
+                    Some(ServerFrame::UpdateRequired(version)) if version > application_version => return ConnectionStatus::UpdateRequired(version),
                     // Online setup frames from earlier protocols are outside queued Signal messaging.
                     Some(ServerFrame::OnlineDelivery) => {}
                     Some(ServerFrame::Reply(reply)) if pending.as_ref().is_some_and(|request| request.request.matches(&reply)) => {

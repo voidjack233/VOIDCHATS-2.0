@@ -56,6 +56,7 @@ pub(super) enum ServerFrame {
         deleted_at: String,
     },
     Error(String),
+    UpdateRequired(ApplicationProtocolVersion),
     Delivery {
         sender: String,
         event_id: String,
@@ -328,6 +329,12 @@ fn present_string<'de, D: serde::Deserializer<'de>>(
     String::deserialize(deserializer).map(Some)
 }
 
+fn present_version<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ApplicationProtocolVersion>, D::Error> {
+    ApplicationProtocolVersion::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WireFrame {
@@ -360,6 +367,8 @@ enum WireFrame {
     },
     Error {
         code: String,
+        #[serde(default, deserialize_with = "present_version")]
+        min_protocol_version: Option<ApplicationProtocolVersion>,
     },
     Person {
         void_id: String,
@@ -459,9 +468,16 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
             Some(ServerFrame::AuthOk(void_id))
         }
         WireFrame::ProtocolOk { version } => Some(ServerFrame::ProtocolOk(version)),
-        WireFrame::Error { code }
-            if (1..=64).contains(&code.len())
-                && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
+        WireFrame::Error {
+            code,
+            min_protocol_version: Some(version),
+        } if code == "update_required" => Some(ServerFrame::UpdateRequired(version)),
+        WireFrame::Error {
+            code,
+            min_protocol_version: None,
+        } if (1..=64).contains(&code.len())
+            && code != "update_required"
+            && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
         {
             Some(ServerFrame::Error(code))
         }
@@ -641,6 +657,43 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
+
+    #[test]
+    fn update_requirement_has_an_exact_typed_minimum() {
+        assert!(matches!(
+            decode(r#"{"type":"error","code":"update_required","min_protocol_version":"2"}"#),
+            Some(ServerFrame::UpdateRequired(ApplicationProtocolVersion::V2))
+        ));
+        for bad in [
+            json!(null),
+            json!(2),
+            json!("0"),
+            json!("02"),
+            json!("+2"),
+            json!(" 2"),
+            json!("2147483648"),
+        ] {
+            assert!(
+                decode(
+                    &json!({"type":"error","code":"update_required","min_protocol_version":bad})
+                        .to_string()
+                )
+                .is_none()
+            );
+        }
+        for bad in [
+            r#"{"type":"error","code":"update_required"}"#,
+            r#"{"type":"error","code":"unavailable","min_protocol_version":"2"}"#,
+            r#"{"type":"error","code":"update_required","min_protocol_version":"2","extra":"x"}"#,
+            r#"{"type":"error","code":"update_required","min_protocol_version":"2","min_protocol_version":"3"}"#,
+        ] {
+            assert!(decode(bad).is_none());
+        }
+        assert!(matches!(
+            decode(r#"{"type":"error","code":"unavailable"}"#),
+            Some(ServerFrame::Error(_))
+        ));
+    }
 
     #[test]
     fn application_versions_are_canonical_positive_decimal_strings() {

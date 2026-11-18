@@ -177,8 +177,11 @@ export component AppWindow inherits Window {
     in property <string> setup-action: "Create account";
     callback submit-setup();
     callback account-registered();
+    in property <string> required-protocol-version;
+    out property <bool> update-required: root.required-protocol-version != "";
+    callback close-for-update();
     in property <string> connection-status: "Disconnected";
-    out property <bool> can-reconnect: root.storage-ready
+    out property <bool> can-reconnect: !root.update-required && root.storage-ready
         && (root.connection-status == "Disconnected" || root.connection-status == "Reconnecting"
             || root.connection-status == "Authentication failed");
     callback reconnect();
@@ -375,7 +378,7 @@ export component AppWindow inherits Window {
         : root.connection-status == "Authentication failed" ? "VOID could not authenticate with the relay. Retry to continue enrollment."
         : root.publication-error;
 
-    if root.showing-account-removal: AccountRemovalPage {
+    if !root.update-required && root.showing-account-removal: AccountRemovalPage {
         permanent: root.permanent-deletion-open || root.removal-permanent;
         busy: root.removal-busy;
         status: root.removal-status;
@@ -398,7 +401,7 @@ export component AppWindow inherits Window {
         confirm => { root.request-account-removal(self.permanent); }
     }
 
-    if root.setup-page != 0 && !root.showing-account-removal: AccountSetup {
+    if !root.update-required && root.setup-page != 0 && !root.showing-account-removal: AccountSetup {
         page <=> root.setup-page;
         busy: root.enrolling ? root.enrollment-busy : root.setup-busy;
         can-retry: root.enrolling ? root.enrollment-can-retry : root.setup-can-retry;
@@ -423,7 +426,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.setup-page == 0 && !root.showing-account-removal: Rectangle {
+    if !root.update-required && root.setup-page == 0 && !root.showing-account-removal: Rectangle {
         sidebar := Rectangle {
             private property <bool> section-hovered: main-navigation.has-hover || settings-navigation.has-hover;
             private property <length> expanded-width: 168px;
@@ -982,7 +985,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    if root.timestamp-tip != "" && root.show-conversation && root.setup-page == 0
+    if !root.update-required && root.timestamp-tip != "" && root.show-conversation && root.setup-page == 0
         && !root.showing-account-removal: Rectangle {
         z: 5;
         width: tooltip-text.preferred-width + 20px;
@@ -1002,4 +1005,20 @@ export component AppWindow inherits Window {
             vertical-alignment: center;
         }
     }
+    if root.update-required: Rectangle {
+        background: Theme.background;
+        VerticalLayout {
+            alignment: center;
+            padding-left: max(24px, (root.width - 520px) / 2);
+            padding-right: max(24px, (root.width - 520px) / 2);
+            spacing: 18px;
+            Text { text: "Update Required"; color: Theme.primary; font-size: 30px; font-weight: 700; horizontal-alignment: center; }
+            Text { text: "This version of VOID Native is no longer supported. Please update to continue messaging."; color: Theme.secondary; font-size: 15px; wrap: word-wrap; horizontal-alignment: center; }
+            Text { text: "Required protocol version: " + root.required-protocol-version; color: Theme.secondary; font-size: 13px; horizontal-alignment: center; }
+            HorizontalLayout { alignment: center;
+                Action { label: "Close application"; primary: true; clicked => { root.close-for-update(); } }
+            }
+        }
+    }
+
 }

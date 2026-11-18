@@ -16,6 +16,9 @@ use std::{cell::RefCell, rc::Rc};
 slint::include_modules!();
 
 fn connect_relay(ui: &AppWindow, relay: &Connection) {
+    if ui.get_update_required() {
+        return;
+    }
     let void_id = ui.get_account_void_id();
     if !matches!(ui.get_setup_page(), 0 | account::ENROLLMENT_PAGE)
         || !ui.get_storage_ready()
@@ -101,6 +104,12 @@ fn report_relay_status(ui: &AppWindow) -> impl Fn(ConnectionStatus) + Send + 'st
     let weak = ui.as_weak();
     move |status| {
         let _ = weak.upgrade_in_event_loop(move |ui| {
+            if ui.get_update_required() {
+                return;
+            }
+            if let ConnectionStatus::UpdateRequired(version) = status {
+                ui.set_required_protocol_version(String::from(version).into());
+            }
             if status != ConnectionStatus::Connected {
                 ui.set_messaging_ready(false);
             }
@@ -239,6 +248,9 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     let ui = AppWindow::new()?;
+    ui.on_close_for_update(|| {
+        let _ = slint::quit_event_loop();
+    });
     let messaging = Rc::new(RefCell::new(None::<MessagingWorkers>));
     let runtime = messaging.clone();
     let weak = ui.as_weak();

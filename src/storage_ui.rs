@@ -655,7 +655,8 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_storage_ready()
+        if ui.get_update_required()
+            || !ui.get_storage_ready()
             || !ui.get_conversation_can_compose()
             || ui.get_conversation_loading()
             || ui.get_send_busy()
@@ -685,7 +686,8 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if !ui.get_messaging_ready()
+        if ui.get_update_required()
+            || !ui.get_messaging_ready()
             || ui.get_send_busy()
             || event_id.is_empty()
             || ui.get_conversation_peer_deleted()
@@ -1278,6 +1280,7 @@ fn show_conversation(
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
     mod presentation;
+    mod update_required;
     use super::*;
     use crate::storage::{Database, DeliveryState, Direction, Message, Owner, tests::TestDir};
     use slint::{Model, Timer, TimerMode};
