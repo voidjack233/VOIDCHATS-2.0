@@ -71,6 +71,9 @@ impl Database {
         conversation: i64,
         target: &MessageReference,
     ) -> Result<Option<String>> {
+        if super::outgoing::schema_ready(&self.connection)? && self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_message_hides WHERE conversation_id=?1 AND author_void_id=?2 AND event_id=?3)",
+            params![conversation,target.author_void_id,target.event_id],|r|r.get::<_,bool>(0))? { return Ok(None); }
         let local: String =
             self.connection
                 .query_row("SELECT void_id FROM local_account", [], |r| r.get(0))?;
@@ -130,9 +133,16 @@ impl Database {
         if result.deleted {
             return Ok(result);
         }
-        if let Some(message_id) = message_id
-            && let Some(target) = self.reply_reference(&message_id)?
-        {
+        let reply = if source == "o" {
+            self.outgoing_reply(id)?
+        } else {
+            None
+        }
+        .or(match message_id {
+            Some(id) => self.reply_reference(&id)?,
+            None => None,
+        });
+        if let Some(target) = reply {
             result.author = if target.author_void_id == local {
                 "You".into()
             } else {

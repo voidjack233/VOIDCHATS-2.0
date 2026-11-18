@@ -28,6 +28,56 @@ use std::{future::Future, time::SystemTime};
 use zeroize::Zeroizing;
 
 impl Database {
+    /// Encrypt each durable control once, committing the ratchet with its payload.
+    /// A retry reads these exact bytes; no network operation runs in this write.
+    #[allow(dead_code)]
+    pub(crate) fn encrypt_signal_control(
+        &mut self,
+        peer: &TrustedPeer,
+        id: &str,
+    ) -> Result<Vec<u8>> {
+        let operation = self.control(id)?;
+        if peer.void_id() != operation.peer {
+            return Err(Error::SignalPeer);
+        }
+        peer::require_pinned(&self.connection, peer)?;
+        if let Some(payload) = operation.payload {
+            return Ok(payload);
+        }
+        self.write(|tx| {
+            let (own, _) = local_account(tx)?;
+            let routing = Routing {
+                event_id: id,
+                sender: &own,
+                recipient: peer.void_id(),
+            };
+            let mut value = serde_json::json!({"v":2,"type":operation.kind,"client_message_id":id,
+                "from_void_id":own,"to_void_id":peer.void_id(),"target":operation.target});
+            if operation.kind == "reaction" {
+                value["emoji"] = serde_json::json!(operation.emoji);
+                value["active"] = serde_json::json!(operation.active);
+                value["revision"] = serde_json::json!(operation.revision);
+            }
+            let bytes =
+                Zeroizing::new(serde_json::to_vec(&value).map_err(|_| Error::SignalEnvelope)?);
+            // Use the existing receiver contract as the final structural validator.
+            if !matches!(
+                wire::decode_content(routing, &bytes)?,
+                wire::Content::Reaction(_) | wire::Content::Delete(_)
+            ) {
+                return Err(Error::SignalEnvelope);
+            }
+            let payload = encrypt_content(tx, peer, routing, &bytes)?;
+            if tx.execute(
+                "UPDATE outgoing_controls SET payload=?2 WHERE event_id=?1 AND payload IS NULL",
+                params![id, payload],
+            )? != 1
+            {
+                return Err(Error::EventConflict);
+            }
+            Ok(payload)
+        })
+    }
     pub(crate) fn has_signal_session(&mut self, peer: &TrustedPeer) -> Result<bool> {
         self.write(|tx| {
             let remote = address(peer.void_id());
@@ -101,6 +151,9 @@ impl Database {
         if !wire::valid_event_id(event_id) {
             return Err(Error::SignalEnvelope);
         }
+        if self.outgoing_message_blocked(event_id)? {
+            return Err(Error::EventConflict);
+        }
         let (local_id, _) = local_account(&self.connection)?;
         let conversation = self.conversation(conversation_id)?;
         if conversation.peer_void_id != peer.void_id() || peer.void_id() == local_id {
@@ -122,8 +175,14 @@ impl Database {
             sender: &local_id,
             recipient: peer.void_id(),
         };
+        let reply = self.outgoing_reply(event_id)?;
         self.commit_outgoing(conversation_id, event_id, true, |tx| {
-            let plaintext = wire::encode_content(routing, body, created_at)?;
+            let plaintext = match reply {
+                Some(reference) => {
+                    wire::encode_content_with_reply(routing, body, created_at, Some(reference))?
+                }
+                None => wire::encode_content(routing, body, created_at)?,
+            };
             let payload = encrypt_content(tx, peer, routing, &plaintext)?;
             Ok((
                 Message {

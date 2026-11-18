@@ -136,6 +136,15 @@ const STANDALONE_MESSAGE: &str =
                  WHERE b.message_id = m.id)";
 
 impl Database {
+    fn visibility_filters(&self) -> Result<(&'static str, &'static str)> {
+        if !super::outgoing::schema_ready(&self.connection)? {
+            return Ok(("", ""));
+        }
+        Ok((
+            "AND NOT EXISTS(SELECT 1 FROM local_message_hides h WHERE h.message_id=m.id)",
+            "AND NOT EXISTS(SELECT 1 FROM local_message_hides h WHERE h.conversation_id=o.conversation_id AND h.event_id=o.event_id AND h.author_void_id=(SELECT void_id FROM local_account))",
+        ))
+    }
     pub(crate) fn recover_interrupted_sends(&self) -> Result<()> {
         self.connection.execute(
             "UPDATE outgoing_operations SET state = CASE
@@ -156,18 +165,43 @@ impl Database {
         submitted: &str,
         created_at: i64,
     ) -> Result<(String, bool)> {
+        let reply = if super::outgoing::schema_ready(&self.connection)?
+            && self.draft(conversation_id)?.as_deref() == Some(submitted)
+        {
+            self.reply_draft(conversation_id)?
+        } else {
+            None
+        };
+        self.queue_outgoing_with_reply(conversation_id, submitted, created_at, reply.as_ref())
+    }
+
+    #[allow(dead_code)] // Connected to UI in the next phase.
+    pub(crate) fn queue_outgoing_with_reply(
+        &mut self,
+        conversation_id: i64,
+        submitted: &str,
+        created_at: i64,
+        reply: Option<&super::message_events::MessageReference>,
+    ) -> Result<(String, bool)> {
         let body = without_edge_blank_lines(submitted).ok_or(Error::SignalEnvelope)?;
         if !super::signal::valid_content(body, created_at) {
             return Err(Error::SignalEnvelope);
         }
         let event_id = new_event_id()?;
         let promoted = self.write(|tx| {
+            if let Some(reference) = reply { super::outgoing::validate_target(tx, conversation_id, reference, true)?; }
             if account_status::conversation_status(tx, conversation_id)? == AccountStatus::Deleted {
                 return Err(Error::PeerDeleted);
             }
             tx.execute("INSERT INTO outgoing_operations (event_id, conversation_id, body, created_at, state)
                 VALUES (?1, ?2, ?3, ?4, 'pending')", params![event_id, conversation_id, body, created_at])?;
+            if let Some(reference) = reply {
+                tx.execute("INSERT INTO outgoing_reply_refs VALUES (?1,?2,?3)",params![event_id, reference.author_void_id, reference.event_id])?;
+            }
             tx.execute("DELETE FROM drafts WHERE conversation_id = ?1 AND body = ?2", params![conversation_id, submitted])?;
+            if super::outgoing::schema_ready(tx)? {
+                tx.execute("DELETE FROM draft_reply_refs WHERE conversation_id=?1 AND NOT EXISTS(SELECT 1 FROM drafts WHERE conversation_id=?1)",[conversation_id])?;
+            }
             tx.execute("UPDATE conversations SET last_activity_at = max(last_activity_at, ?2) WHERE id = ?1",
                 params![conversation_id, created_at])?;
             Ok(tx.execute("DELETE FROM requests WHERE conversation_id = ?1", [conversation_id])? != 0)
@@ -360,18 +394,19 @@ impl Database {
         } else {
             (String::new(), String::new())
         };
+        let (saved_visible, operation_visible) = self.visibility_filters()?;
         // Seek and limit using each table's conversation index before merging the two pages.
         let mut query = self.connection.prepare(&format!(
             "WITH saved AS (
                SELECT m.body, m.created_at, m.direction AS outgoing, NULL AS state, m.id AS sort_id, 0 AS source
-               FROM messages m WHERE m.conversation_id = ?1 {saved_bound} AND {STANDALONE_MESSAGE}
+               FROM messages m WHERE m.conversation_id = ?1 {saved_bound} AND {STANDALONE_MESSAGE} {saved_visible}
                ORDER BY m.created_at {order}, m.id {order} LIMIT ?2
              ), operations AS (
                SELECT body, created_at, 1 AS outgoing,
                       CASE WHEN EXISTS (
                           SELECT 1 FROM receipt_inbox r WHERE r.original_event_id = o.event_id
                       ) THEN 'delivered' ELSE state END AS state, event_id AS sort_id, 1 AS source
-               FROM outgoing_operations o WHERE o.conversation_id = ?1 {operation_bound}
+               FROM outgoing_operations o WHERE o.conversation_id = ?1 {operation_bound} {operation_visible}
                ORDER BY o.created_at {order}, o.event_id {order} LIMIT ?2
              )
              SELECT * FROM saved UNION ALL SELECT * FROM operations
@@ -410,14 +445,15 @@ impl Database {
         &self,
         conversation_ids: impl IntoIterator<Item = i64>,
     ) -> Result<HashMap<i64, MessagePreview>> {
+        let (saved_visible, operation_visible) = self.visibility_filters()?;
         let mut query = self.connection.prepare(&format!(
             "WITH last_saved AS (
                SELECT m.body, m.created_at, m.id AS sort_id
-               FROM messages m WHERE m.conversation_id = ?1 AND {STANDALONE_MESSAGE}
+               FROM messages m WHERE m.conversation_id = ?1 AND {STANDALONE_MESSAGE} {saved_visible}
                ORDER BY m.created_at DESC, m.id DESC LIMIT 1
              ), last_outgoing AS (
                SELECT body, created_at, event_id AS sort_id
-               FROM outgoing_operations WHERE conversation_id = ?1
+               FROM outgoing_operations o WHERE conversation_id = ?1 {operation_visible}
                ORDER BY created_at DESC, event_id DESC LIMIT 1
              )
              SELECT * FROM last_saved UNION ALL SELECT * FROM last_outgoing

@@ -136,9 +136,22 @@ fn report_rejection(command: &str, code: &str) {
 pub(crate) struct Session {
     pub(crate) generation: u64,
     commands: mpsc::Sender<PendingRequest>,
+    #[cfg(test)]
+    isolated_v2: bool,
 }
 
 impl Session {
+    /// No production feature dispatch until the coordinated mandatory V2 release.
+    pub(crate) fn feature_sends_allowed(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.isolated_v2 && self.is_active()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
     pub(crate) fn is_active(&self) -> bool {
         !self.commands.is_closed()
     }
@@ -303,6 +316,8 @@ async fn run_worker(
         let session = Session {
             generation,
             commands,
+            #[cfg(test)]
+            isolated_v2: application_version == ApplicationProtocolVersion::V2,
         };
         let mut connected_at = None;
         let attempt = async {

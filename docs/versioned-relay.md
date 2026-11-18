@@ -28,8 +28,9 @@ or ratchet changes. Version 2 remains unadvertised; see
 [encrypted receiver contract](encrypted-event-receiver.md). Rejection sends no ACK, leaving recovery to the relay's
 retained queue. It does not preserve events beyond the backend's expiry policy.
 
-The typed `SendVersioned` request prepares serialization and acceptance
-correlation only. No application feature sends it yet. Sender receive-version
+The typed `SendVersioned` request provides serialization and acceptance
+correlation. [Outgoing feature operations](outgoing-encrypted-events.md) use it only
+in isolated test configurations; production feature sends remain blocked. Sender receive-version
 negotiation is not evidence of peer capability and is not a backend prerequisite
 for sending. Reply, Reaction, and Delete payloads are not enabled by this change.
 
@@ -42,7 +43,7 @@ point still always uses version 1; there is no runtime override.
 Do not raise `SUPPORTED_APPLICATION_PROTOCOL` until the Rust receiver can safely
 process or durably defer every encrypted event allowed at that version, including
 duplicate and out-of-order events, with correct post-commit ACKs. Feature senders
-also need a reliable peer compatibility policy; this relay negotiation does not
+use the chosen coordinated mandatory-update policy; this relay negotiation does not
 provide peer capability discovery. Unsupported queue heads block later events,
 including legacy messages, until acknowledgment or expiry.
 

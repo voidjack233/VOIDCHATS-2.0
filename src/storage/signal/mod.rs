@@ -6,6 +6,7 @@ mod publication;
 mod recovery;
 mod wire;
 pub(crate) use wire::valid_content;
+pub(crate) use wire::valid_event_id;
 #[cfg(all(test, windows))]
 mod crypto_tests;
 #[cfg(all(test, windows))]

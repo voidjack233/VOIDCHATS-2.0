@@ -12,6 +12,281 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 const WAIT: Duration = Duration::from_secs(20);
 const BACKEND_COMMIT: &str = "2faffd27f12d1d02ec28e4be298610d4fee50856";
 
+#[test]
+fn outgoing_control_lost_acceptance_reconnect_reuses_ciphertext_without_automatic_send() {
+    use crate::relay::tests::{receive_json, send_json, verify_account_proof};
+    use futures_util::StreamExt;
+    use tokio_tungstenite::accept_async;
+    let alice = TestAccount::new(ALICE, 121);
+    let bob = TestAccount::new(BOB, 122);
+    let mut a = alice.open();
+    let mut b = bob.open();
+    a.establish_signal_session(&bob.trusted(), BOB, &encode(&claim(&mut b, false)), at())
+        .unwrap();
+    let chat = a.create_conversation(BOB, NOW_MS).unwrap();
+    let id = event_id(900);
+    a.encrypt_signal_message(&bob.trusted(), chat, &id, "Original", NOW_MS)
+        .unwrap();
+    let target = MessageReference {
+        author_void_id: ALICE.into(),
+        event_id: id,
+    };
+    let control = event_id(901);
+    a.queue_reaction(chat, &control, &target, "👍", true, NOW_MS)
+        .unwrap();
+    let (checked, check) = mpsc::channel();
+    let (endpoint, mock) = crate::storage::tests::relay_messaging::mock_relay(
+        move |listener| async move {
+            let mut saved = None;
+            for round in 0..2 {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(tcp).await.unwrap();
+                assert_eq!(
+                    receive_json(&mut socket).await,
+                    json!({"type":"auth_begin","void_id":ALICE})
+                );
+                verify_account_proof(
+                    &mut socket,
+                    &SigningKey::from_bytes(&[121; 32]).verifying_key(),
+                    ALICE,
+                )
+                .await;
+                send_json(&mut socket, json!({"type":"auth_ok","void_id":ALICE})).await;
+                assert_eq!(
+                    receive_json(&mut socket).await,
+                    json!({"type":"protocol","version":"2"})
+                );
+                send_json(&mut socket, json!({"type":"protocol_ok","version":"2"})).await;
+                if round == 1 {
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(350), socket.next())
+                            .await
+                            .is_err(),
+                        "reconnect automatically sent an unfinished control"
+                    );
+                    checked.send(()).unwrap();
+                }
+                assert_eq!(
+                    receive_json(&mut socket).await,
+                    json!({"type":"lookup","void_id":BOB})
+                );
+                send_json(&mut socket,json!({"type":"person","void_id":BOB,"auth_public_key":STANDARD.encode(SigningKey::from_bytes(&[122;32]).verifying_key().as_bytes())})).await;
+                let frame = receive_json(&mut socket).await;
+                assert_eq!(frame["type"], "send_versioned");
+                assert_eq!(frame["min_protocol_version"], "2");
+                if round == 0 {
+                    saved = Some(frame);
+                } else {
+                    assert!(
+                        saved.as_ref() == Some(&frame),
+                        "transport retry changed the committed event or ciphertext"
+                    );
+                    send_json(
+                        &mut socket,
+                        json!({"type":"error","code":"duplicate_event"}),
+                    )
+                    .await;
+                }
+                // First socket closes after receiving the send, before acceptance.
+            }
+        },
+    );
+    let mut client = Client::start(
+        &endpoint,
+        "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz",
+        ALICE,
+        121,
+        ApplicationProtocolVersion::V2,
+    );
+    assert!(crate::messaging::send_control(&mut a, &client.session, &control).is_err());
+    assert_eq!(a.control(&control).unwrap().state, "unconfirmed");
+    let payload = a.control(&control).unwrap().payload.unwrap();
+    let ratchet = session(&a, BOB);
+    a.close().unwrap();
+    let mut a = alice.open();
+    loop {
+        if let Activity::Online(session) = client.events.recv_timeout(WAIT).unwrap() {
+            client.session = session;
+            break;
+        }
+    }
+    check.recv_timeout(WAIT).unwrap();
+    assert!(
+        matches!(crate::messaging::send_control(&mut a,&client.session,&control),Err(crate::messaging::Error::Relay(crate::relay::RequestError::Rejected{code,..})) if code=="duplicate_event")
+    );
+    assert!(ratchet == session(&a, BOB));
+    assert!(payload == a.control(&control).unwrap().payload.unwrap());
+    assert_eq!(a.control(&control).unwrap().state, "unconfirmed");
+    drop(client);
+    mock.join().unwrap();
+}
+
+#[test]
+#[ignore = "requires isolated Go backend 2faffd2 and disposable PostgreSQL fixture; never production"]
+fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receipts() {
+    assert_eq!(std::env::var("VOID_TEST_DISPOSABLE").as_deref(), Ok("1"));
+    assert_eq!(
+        std::env::var("VOID_TEST_BACKEND_COMMIT").as_deref(),
+        Ok(BACKEND_COMMIT)
+    );
+    let endpoint = std::env::var("VOID_TEST_RELAY_URL").unwrap();
+    let audience = std::env::var("VOID_TEST_RELAY_AUDIENCE").unwrap();
+    let alice = TestAccount::new(ALICE, 121);
+    let bob = TestAccount::new(BOB, 122);
+    let mut a = alice.open();
+    let mut b = bob.open();
+    let a1 = Client::start(
+        &endpoint,
+        &audience,
+        ALICE,
+        121,
+        ApplicationProtocolVersion::V1,
+    );
+    let mut bc = Client::start(
+        &endpoint,
+        &audience,
+        BOB,
+        122,
+        ApplicationProtocolVersion::V2,
+    );
+    crate::messaging::publish(&mut a, &a1.session).unwrap();
+    crate::messaging::publish(&mut b, &bc.session).unwrap();
+    let chat = a.create_conversation(BOB, NOW_MS).unwrap();
+    let (original, _) = a
+        .queue_outgoing(chat, "Original through Go", NOW_MS)
+        .unwrap();
+    crate::messaging::send(&mut a, Some(&a1.session), &original).unwrap();
+    let json = bc.delivery(&original, false);
+    process(&mut b, &bc, ALICE, &original, &json);
+    let target = MessageReference {
+        author_void_id: ALICE.into(),
+        event_id: original.clone(),
+    };
+    let (reply, _) = a
+        .queue_outgoing_with_reply(chat, "Quoted reply", NOW_MS + 1, Some(&target))
+        .unwrap();
+    let add = event_id(801);
+    a.queue_reaction(chat, &add, &target, "👍", true, NOW_MS)
+        .unwrap();
+    let ratchet = session(&a, BOB);
+    assert!(matches!(
+        crate::messaging::send(&mut a, Some(&a1.session), &reply),
+        Err(crate::messaging::Error::Storage(Error::FeatureUnavailable))
+    ));
+    assert!(matches!(
+        crate::messaging::send_control(&mut a, &a1.session, &add),
+        Err(crate::messaging::Error::Storage(Error::FeatureUnavailable))
+    ));
+    assert!(a.control(&add).unwrap().payload.is_none());
+    assert!(a.committed_outgoing(&reply).unwrap().is_none());
+    assert!(ratchet == session(&a, BOB));
+    drop(a1);
+    let mut ac = Client::start(
+        &endpoint,
+        &audience,
+        ALICE,
+        121,
+        ApplicationProtocolVersion::V2,
+    );
+    crate::messaging::send(&mut a, Some(&ac.session), &reply).unwrap();
+    let json = bc.delivery(&reply, true);
+    process(&mut b, &bc, ALICE, &reply, &json);
+    let bchat = b.conversations(true).unwrap()[0].id;
+    assert_eq!(
+        b.timeline_before(bchat, None, 1).unwrap()[0]
+            .presentation
+            .quote,
+        "Original through Go"
+    );
+    // Original and reply keep ordinary, encrypted delivery receipts.
+    while let Some(due) = b.next_receipt_attempt(0).unwrap() {
+        let rid = b.claim_receipt(due).unwrap().unwrap();
+        let id = rid.event_id.clone();
+        let payload = b.encrypt_signal_receipt(rid).unwrap();
+        send(&bc, ALICE, &id, &payload, false);
+        let json = ac.delivery(&id, false);
+        process(&mut a, &ac, BOB, &id, &json);
+        b.finish_receipt(&id).unwrap();
+    }
+    assert!(a.has_verified_delivery(&reply).unwrap());
+    drop(bc); // Recipient offline, with its independent protected SQLCipher store.
+    // Simulate losing acceptance after transport succeeds: retain the durable
+    // unconfirmed intent rather than promoting it based on a guessed outcome.
+    let payload = a.encrypt_signal_control(&bob.trusted(), &add).unwrap();
+    a.set_control_state(&add, "unconfirmed").unwrap();
+    send(&ac, BOB, &add, &payload, true);
+    assert!(
+        matches!(crate::messaging::send_control(&mut a,&ac.session,&add),Err(crate::messaging::Error::Relay(crate::relay::RequestError::Rejected{code,..})) if code=="duplicate_event")
+    );
+    assert_eq!(a.control(&add).unwrap().state, "unconfirmed");
+    let remove = event_id(802);
+    a.queue_reaction(chat, &remove, &target, "👍", false, NOW_MS)
+        .unwrap();
+    let deletion = event_id(803);
+    a.queue_delete_everyone(chat, &deletion, &target, NOW_MS)
+        .unwrap();
+    assert!(crate::messaging::send(&mut a, Some(&ac.session), &original).is_err());
+    let state = session(&a, BOB);
+    a.close().unwrap();
+    let mut a = alice.open();
+    assert!(state == session(&a, BOB));
+    assert!(payload == a.control(&add).unwrap().payload.unwrap());
+    assert!(a.pending_controls().unwrap().contains(&deletion));
+    crate::messaging::send_control(&mut a, &ac.session, &remove).unwrap();
+    crate::messaging::send_control(&mut a, &ac.session, &deletion).unwrap();
+    assert_eq!(a.control(&remove).unwrap().revision, Some(2));
+    assert_eq!(a.control(&deletion).unwrap().state, "accepted");
+    b.close().unwrap();
+    let mut b = bob.open();
+    let mut bc = Client::start(
+        &endpoint,
+        &audience,
+        BOB,
+        122,
+        ApplicationProtocolVersion::V2,
+    );
+    for id in [&add, &remove, &deletion] {
+        let json = bc.delivery(id, true);
+        process(&mut b, &bc, ALICE, id, &json);
+        // Duplicate encrypted delivery is safe without ratcheting again.
+        assert_eq!(
+            b.decrypt_signal_event(&alice.trusted(), json.as_bytes(), SystemTime::now())
+                .unwrap(),
+            IncomingOutcome::AlreadyStored
+        );
+    }
+    assert!(b.message_deleted(ALICE, &target).unwrap());
+    assert_eq!(count(&b, "SELECT count(*) FROM messages"), 2);
+    let rows = b.timeline_before(bchat, None, 120).unwrap();
+    assert!(rows[0].presentation.deleted);
+    assert_eq!(rows[1].presentation.quote, "Message deleted");
+    ac.reconnect();
+    bc.reconnect();
+    // Existing text uses legacy send after reconnect, without extra bubbles.
+    let (plain, _) = a
+        .queue_outgoing(chat, "Legacy after controls", NOW_MS + 2)
+        .unwrap();
+    crate::messaging::send(&mut a, Some(&ac.session), &plain).unwrap();
+    let json = bc.delivery(&plain, false);
+    process(&mut b, &bc, ALICE, &plain, &json);
+    b.delete_for_me(
+        bchat,
+        &MessageReference {
+            author_void_id: ALICE.into(),
+            event_id: reply,
+        },
+    )
+    .unwrap();
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
+    b.close().unwrap();
+    let b = bob.open();
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
+    assert_eq!(
+        crate::relay::SUPPORTED_APPLICATION_PROTOCOL,
+        ApplicationProtocolVersion::V1
+    );
+}
+
 struct Client {
     connection: Connection,
     worker: Option<Worker>,

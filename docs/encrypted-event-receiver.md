@@ -139,12 +139,14 @@ failed application and quarantine simply causes revalidation next time.
 
 ## Before advertising version 2
 
-Keep transport negotiation at version 1 for this receiver-only release. A later
-release must review/freeze the complete version-2 event contract and integrate
-the feature presentation. Isolated relay verification is documented separately
-in [receiver V2 verification](receiver-v2-verification.md). Feature sends need their own persistent outgoing
-control queue, monotonic revision allocation, retry semantics, and peer
-compatibility rules; local receiver support does not prove peer support.
+Keep production transport negotiation at version 1. The existing event formats
+remain unchanged. Read-only presentation and the
+[durable outgoing foundation](outgoing-encrypted-events.md) now use this contract;
+Slint sending actions and the coordinated mandatory-update V2 release remain
+separate work. Isolated receiver relay verification is documented in
+[receiver V2 verification](receiver-v2-verification.md). Local receiver support
+does not prove peer support; the release policy requires compatible application
+updates instead of a peer capability handshake.
 
 No retention extension or Go/database deployment is introduced. A delete that
 expires from the relay before recipient processing is still not guaranteed to

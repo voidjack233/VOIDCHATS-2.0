@@ -164,7 +164,7 @@ struct ReceiptContent<'a> {
     to_void_id: Cow<'a, str>,
 }
 
-pub(super) fn valid_event_id(id: &str) -> bool {
+pub(crate) fn valid_event_id(id: &str) -> bool {
     id.len() == 36
         && id != "00000000-0000-0000-0000-000000000000"
         && id.bytes().enumerate().all(|(index, byte)| match index {
@@ -303,7 +303,22 @@ pub(super) fn encode_content(
     body: &str,
     created_at: i64,
 ) -> Result<Zeroizing<Vec<u8>>> {
+    encode_content_with_reply(routing, body, created_at, None)
+}
+
+pub(super) fn encode_content_with_reply(
+    routing: Routing<'_>,
+    body: &str,
+    created_at: i64,
+    reply: Option<MessageReference>,
+) -> Result<Zeroizing<Vec<u8>>> {
     if !routing.valid() || !valid_content(body, created_at) {
+        return Err(Error::SignalEnvelope);
+    }
+    if reply
+        .as_ref()
+        .is_some_and(|r| !reference_valid(r, routing.sender, routing.recipient, routing.event_id))
+    {
         return Err(Error::SignalEnvelope);
     }
     let content = MessageContent {
@@ -314,7 +329,7 @@ pub(super) fn encode_content(
         body: body.into(),
         created_at,
         request_delivery_receipt: Some(1),
-        reply_to: None,
+        reply_to: reply,
     };
     let mut bytes = Zeroizing::new(Vec::new());
     serde_json::to_writer(&mut *bytes, &content).map_err(|_| Error::SignalEnvelope)?;

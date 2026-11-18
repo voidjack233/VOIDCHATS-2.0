@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
 
 mod go_relay;
+mod outgoing;
 mod receiver;
 mod recovery;
 

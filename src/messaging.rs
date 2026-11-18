@@ -49,7 +49,7 @@ impl Error {
                         "Relay authentication failed. Use Reconnect to try signing in again."
                     }
                     (_, "not_found") => "The peer’s VOID-ID was not found.",
-                    ("send", "duplicate_event") => {
+                    ("send" | "send_versioned", "duplicate_event") => {
                         "The relay already has this event. Acceptance is unconfirmed."
                     }
                     ("prekeys_claim", "prekeys_invalid") => {
@@ -64,16 +64,16 @@ impl Error {
                     ("prekeys_claim", "prekey_claim_expired") => {
                         "The prekey claim expired. Choose Resend to request a new claim."
                     }
-                    ("send", "queue_full") => {
+                    ("send" | "send_versioned", "queue_full") => {
                         "The relay’s encrypted queue is full. Choose Resend later."
                     }
                     (_, "prekeys_capacity" | "rate_limited" | "overloaded") => {
                         "The relay is at capacity. Try again later."
                     }
-                    ("send", "invalid_frame") => {
+                    ("send" | "send_versioned", "invalid_frame") => {
                         "The relay rejected the encrypted message format. Check for a VOID update."
                     }
-                    ("send", _) => {
+                    ("send" | "send_versioned", _) => {
                         "The relay could not accept the encrypted message. Choose Resend later."
                     }
                     ("lookup", _) => "The relay could not look up this VOID-ID. Try again later.",
@@ -181,6 +181,13 @@ fn lookup(db: &Database, session: &Session, void_id: &str) -> Result<TrustedPeer
 }
 
 pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str) -> Result<()> {
+    if db.outgoing_message_blocked(event_id)? {
+        return Err(StorageError::EventConflict.into());
+    }
+    let versioned = db.outgoing_reply(event_id)?.is_some();
+    if versioned && !session.is_some_and(Session::feature_sends_allowed) {
+        return Err(StorageError::FeatureUnavailable.into());
+    }
     let operation = db.outgoing_operation(event_id)?;
     if operation.state == "sent" || db.has_verified_delivery(event_id)? {
         return Ok(());
@@ -265,10 +272,19 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
             db,
             session,
             &operation.peer,
-            Request::Send {
-                event_id: event_id.into(),
-                to_void_id: operation.peer.clone(),
-                payload_base64,
+            if versioned {
+                Request::SendVersioned {
+                    event_id: event_id.into(),
+                    to_void_id: operation.peer.clone(),
+                    payload_base64,
+                    min_protocol_version: crate::relay::ApplicationProtocolVersion::V2,
+                }
+            } else {
+                Request::Send {
+                    event_id: event_id.into(),
+                    to_void_id: operation.peer.clone(),
+                    payload_base64,
+                }
             },
         );
         match reply {
@@ -293,6 +309,78 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
         db.set_send_state(event_id, outcome)?;
     }
     attempt
+}
+
+/// Explicit worker operation, deliberately not scheduled at production startup.
+/// Acceptance is only relay acceptance, never proof of recipient application.
+#[allow(dead_code)]
+pub(crate) fn send_control(db: &mut Database, session: &Session, id: &str) -> Result<()> {
+    if !session.feature_sends_allowed() {
+        return Err(StorageError::FeatureUnavailable.into());
+    }
+    let operation = db.control(id)?;
+    if operation.state == "accepted" {
+        return Ok(());
+    }
+    if db.peer_account_status(&operation.peer)? == AccountStatus::Deleted {
+        return Err(StorageError::PeerDeleted.into());
+    }
+    let peer = lookup(db, session, &operation.peer)?;
+    let session_exists = db.has_signal_session(&peer)?;
+    if operation.payload.is_some() && !session_exists {
+        // The committed ciphertext belongs to the original ratchet. Never
+        // repair missing state by creating a different session underneath it.
+        return Err(StorageError::SignalState.into());
+    }
+    if !session_exists {
+        let claim = peer_request(
+            db,
+            session,
+            &operation.peer,
+            Request::PrekeysClaim {
+                request_id: operation.claim_id.clone(),
+                void_id: operation.peer.clone(),
+            },
+        );
+        match claim {
+            Ok(Reply::Bundle {
+                request_id,
+                void_id,
+                payload_base64,
+            }) if request_id == operation.claim_id && void_id == operation.peer => {
+                db.establish_signal_session(&peer, &void_id, &payload_base64, SystemTime::now())?;
+            }
+            Err(error) => {
+                if matches!(&error,Error::Relay(RequestError::Rejected{code,..}) if code=="prekey_claim_expired")
+                {
+                    db.renew_control_claim(id)?;
+                }
+                return Err(error);
+            }
+            _ => return Err(RequestError::Interrupted.into()),
+        }
+    }
+    let payload_base64 = String::from_utf8(db.encrypt_signal_control(&peer, id)?)
+        .map_err(|_| StorageError::Unreadable)?;
+    // Durable before any transport write: a crash must retain uncertain intent.
+    db.set_control_state(id, "unconfirmed")?;
+    match peer_request(
+        db,
+        session,
+        &operation.peer,
+        Request::SendVersioned {
+            event_id: id.into(),
+            to_void_id: operation.peer.clone(),
+            payload_base64,
+            min_protocol_version: crate::relay::ApplicationProtocolVersion::V2,
+        },
+    ) {
+        Ok(Reply::Accepted { event_id }) if event_id == id => {
+            Ok(db.set_control_state(id, "accepted")?)
+        }
+        Err(error) => Err(error), // Includes duplicate_event: acceptance stays uncertain.
+        _ => Err(RequestError::Interrupted.into()),
+    }
 }
 
 pub(crate) fn upload_due_receipt(db: &mut Database, session: &Session, now: i64) -> Result<()> {

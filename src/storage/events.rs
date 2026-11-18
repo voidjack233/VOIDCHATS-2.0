@@ -81,6 +81,10 @@ impl Database {
                 return Err(Error::EventConflict);
             }
             insert_message(tx, &message)?;
+            if let Some(reference) = super::outgoing::queued_reply(tx, event_id)? {
+                tx.execute("INSERT INTO message_reply_refs VALUES (?1,?2,?3)",
+                    params![message.id,reference.author_void_id,reference.event_id])?;
+            }
             tx.execute("INSERT INTO outbox (event_id, message_id, payload, receipt_requested) VALUES (?1, ?2, ?3, ?4)",
                 params![event_id, message.id, payload, receipt_requested])?;
             Ok(payload)

@@ -2,6 +2,7 @@ pub(crate) mod account_status;
 mod events;
 pub(crate) mod message_events;
 pub(crate) mod messaging;
+pub(crate) mod outgoing;
 pub(crate) mod presentation;
 pub(crate) mod receipts;
 mod records;
@@ -39,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_v9.sql"),
     include_str!("schema_v10.sql"),
     include_str!("schema_v11.sql"),
+    include_str!("schema_v12.sql"),
 ];
 
 #[derive(Clone, Copy)]
@@ -62,6 +64,8 @@ pub(crate) enum Error {
     UnsupportedSchema,
     Database,
     EventConflict,
+    FeatureUnavailable,
+    ReactionLimit,
     SignalState,
     SignalPeer,
     SignalClaim,
@@ -103,6 +107,10 @@ impl Error {
                 "Local storage could not be opened. Check the VOID data directory and try again."
             }
             Self::EventConflict => "The event conflicts with its stored message or payload.",
+            Self::FeatureUnavailable => {
+                "This operation requires an enabled version-2 messaging connection."
+            }
+            Self::ReactionLimit => "A message can have at most 10 distinct reaction emojis.",
             Self::SignalState => {
                 "Local Signal keys could not be initialized or verified. Keep your VOID files and restore a matching backup if available."
             }
