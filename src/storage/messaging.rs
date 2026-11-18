@@ -116,6 +116,7 @@ enum TimelinePage<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TimelineMessage {
+    pub(crate) presentation: super::presentation::Presentation,
     pub(crate) cursor: TimelineCursor,
     pub(crate) body: String,
     pub(crate) created_at: i64,
@@ -385,6 +386,20 @@ impl Database {
             None => query.query_map(params![conversation_id, limit], timeline_message)?,
         };
         let mut messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let presentation_ready: i64 =
+            self.connection
+                .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        for message in &mut messages {
+            if presentation_ready < 10 {
+                continue;
+            }
+            message.presentation =
+                self.message_presentation(conversation_id, &message.cursor.key())?;
+            if message.presentation.deleted {
+                message.body = "Message deleted".into();
+                message.retry_event.clear();
+            }
+        }
         if order == "DESC" {
             messages.reverse();
         }
@@ -444,6 +459,7 @@ fn timeline_message(row: &Row<'_>) -> rusqlite::Result<TimelineMessage> {
     };
     let created_at = row.get(1)?;
     Ok(TimelineMessage {
+        presentation: Default::default(),
         cursor: TimelineCursor {
             created_at,
             sort_id,

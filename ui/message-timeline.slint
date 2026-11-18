@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Action, PaneScroll } from "controls.slint";
+import { Action, PaneScroll, Clickable } from "controls.slint";
 import { MessageBubble, StoredMessage } from "message-bubble.slint";
 
 export component MessageTimeline inherits Rectangle {
@@ -23,6 +23,7 @@ export component MessageTimeline inherits Rectangle {
     callback page-timeline(bool);
     callback jump-to-present();
     callback resend-message(string);
+    callback open-quote(string);
     callback clear-timestamp-tip();
     callback timestamp-hovered(int, string, length, length);
     callback timestamp-left(int);
@@ -179,12 +180,27 @@ export component MessageTimeline inherits Rectangle {
                         }
                     }
                 }
+                if message.quote != "" && !message.deleted: HorizontalLayout {
+                    alignment: message.outgoing ? end : start;
+                    Clickable {
+                        width: min(260px, root.pane-width - 2 * root.thread-gutter);
+                        height: 46px; background: Theme.surface; border-radius: 8px;
+                        enabled: message.quote-target != "";
+                        label: "Jump to quoted message: " + message.quote;
+                        clicked => { root.open-quote(message.quote-target); }
+                        VerticalLayout {
+                            padding: 7px; spacing: 2px;
+                            Text { text: message.quote-author; color: Theme.accent; font-size: 11px; overflow: elide; }
+                            Text { text: message.quote; color: Theme.secondary; font-size: 12px; overflow: elide; }
+                        }
+                    }
+                }
                 bubble-row := HorizontalLayout {
                     alignment: message.outgoing ? end : start;
                     MessageBubble {
                         message: message;
                         width-limit: min(440px, (root.pane-width - 2 * root.thread-gutter) * 0.86);
-                        show-retry: !root.conversation-peer-deleted && message.retry-event != "";
+                        show-retry: !message.deleted && !root.conversation-peer-deleted && message.retry-event != "";
                         retry-enabled: root.messaging-ready && !root.send-busy;
                         retry => { root.resend-message(message.retry-event); }
                         timestamp-hovered(label, x, y) => {
@@ -192,6 +208,21 @@ export component MessageTimeline inherits Rectangle {
                         }
                         timestamp-left => {
                             root.timestamp-left(index);
+                        }
+                    }
+                }
+                if !message.deleted && message.reactions.length > 0: HorizontalLayout {
+                    alignment: message.outgoing ? end : start;
+                    GridLayout {
+                        horizontal-stretch: 0; spacing: 4px;
+                        for reaction[index] in message.reactions: Rectangle {
+                            row: floor(index / 3); col: mod(index, 3);
+                            width: 74px; height: 26px; border-radius: 13px;
+                            background: reaction.mine ? Theme.selected : Theme.surface;
+                            border-width: 1px; border-color: reaction.mine ? Theme.accent : Theme.divider;
+                            accessible-role: text;
+                            accessible-label: reaction.emoji + " " + reaction.count + (reaction.mine ? " including you" : "");
+                            Text { text: reaction.emoji + " " + reaction.count; color: Theme.secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }

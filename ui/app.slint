@@ -220,6 +220,7 @@ export component AppWindow inherits Window {
     callback page-timeline(bool);
     callback jump-to-present();
     callback restore-timeline(string);
+    callback open-quote(string);
     in property <string> selected-conversation;
     in property <string> conversation-title;
     in property <string> conversation-read-through;
@@ -940,6 +941,7 @@ export component AppWindow inherits Window {
                     send-busy: root.send-busy;
                     page-timeline(older) => { root.page-timeline(older); }
                     jump-to-present => { root.jump-to-present(); }
+                    open-quote(key) => { root.open-quote(key); }
                     resend-message(event) => { root.resend-message(event); }
                     clear-timestamp-tip => { root.timestamp-tip = ""; }
                     timestamp-hovered(index, label, x, y) => {

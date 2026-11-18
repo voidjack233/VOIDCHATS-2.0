@@ -27,6 +27,7 @@ enum Command {
     Page(i64, i32, bool),
     Present(i64, i32),
     Restore(i64, i32, TimelineCursor),
+    Quote(i64, i32, TimelineCursor),
     MarkRead(i64, i64),
     Create(String, i32, Option<ReadingPosition>),
     SaveDraft(i64, String, i32),
@@ -221,6 +222,31 @@ fn bind_with(
                                 Err(error) => (Err(error), false),
                             };
                             show_timeline_result(&weak, id, selection, result, to_present);
+                        }
+                    }
+                    Command::Quote(id, selection, cursor) => {
+                        if let (Some(db), Some(view)) = (&database, history.current(id, selection))
+                        {
+                            let result = view.restore(db, &cursor);
+                            let key = cursor.key();
+                            let _ = weak.upgrade_in_event_loop(move |ui| {
+                                if !is_current_timeline(&ui, id, selection) {
+                                    return;
+                                }
+                                ui.set_timeline_loading(false);
+                                match result {
+                                    Ok(Some(window)) => {
+                                        ui.set_timeline_following(false);
+                                        ui.set_timeline_anchor_key(key.into());
+                                        ui.set_timeline_anchor_offset(16.0);
+                                        show_window(&ui, window);
+                                        advance_timeline_revision(&ui);
+                                    }
+                                    _ => ui.set_conversation_error(
+                                        "Original message is unavailable.".into(),
+                                    ),
+                                }
+                            });
                         }
                     }
                     Command::MarkRead(id, through) => {
@@ -749,6 +775,15 @@ fn bind_timeline(ui: &AppWindow, sender: Sender<Command>) {
         }
     });
     let weak = ui.as_weak();
+    let quote = sender.clone();
+    ui.on_open_quote(move |key| {
+        if let (Some(ui), Some(cursor)) = (weak.upgrade(), TimelineCursor::from_key(&key)) {
+            request_timeline(&ui, &quote, |id, selection| {
+                Command::Quote(id, selection, cursor)
+            });
+        }
+    });
+    let weak = ui.as_weak();
     ui.on_restore_timeline(move |key| {
         if let (Some(ui), Some(cursor)) = (weak.upgrade(), TimelineCursor::from_key(&key)) {
             request_timeline(&ui, &sender, |id, selection| {
@@ -1126,6 +1161,22 @@ fn show_window(ui: &AppWindow, window: TimelineWindow) {
                 heading = time.calendar_label();
             }
             StoredMessage {
+                deleted: message.presentation.deleted,
+                quote: message.presentation.quote.into(),
+                quote_author: message.presentation.author.into(),
+                quote_target: message.presentation.target.into(),
+                reactions: ModelRc::new(VecModel::from(
+                    message
+                        .presentation
+                        .reactions
+                        .into_iter()
+                        .map(|(emoji, count, mine)| crate::StoredReaction {
+                            emoji: emoji.into(),
+                            count,
+                            mine,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
                 key: message.cursor.key().into(),
                 body: storage::messaging::without_edge_blank_lines(&message.body)
                     .unwrap_or_default()
@@ -1171,7 +1222,14 @@ fn reconcile_messages(ui: &AppWindow, messages: Vec<StoredMessage>) -> bool {
             changed = true;
         }
     }
-    for (index, row) in messages.into_iter().enumerate() {
+    for (index, mut row) in messages.into_iter().enumerate() {
+        if let Some(current) = model.row_data(index) {
+            if current.reactions.iter().collect::<Vec<_>>()
+                == row.reactions.iter().collect::<Vec<_>>()
+            {
+                row.reactions = current.reactions;
+            }
+        }
         match model.row_data(index) {
             Some(current) if current == row => continue,
             Some(current) if current.key == row.key => model.set_row_data(index, row),
@@ -1219,6 +1277,7 @@ fn show_conversation(
 
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
+    mod presentation;
     use super::*;
     use crate::storage::{Database, DeliveryState, Direction, Message, Owner, tests::TestDir};
     use slint::{Model, Timer, TimerMode};

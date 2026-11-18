@@ -4,6 +4,99 @@ use super::*;
 use crate::storage::message_events::MessageReference;
 use crate::storage::signal::{crypto::encrypt_content, wire::Routing};
 
+#[test]
+fn presentation_resolves_original_beyond_window_and_hides_deleted_metadata() {
+    let (alice, bob, mut a, mut b) = pair();
+    let chat = a.create_conversation(BOB, NOW_MS).unwrap();
+    for i in 1..=135 {
+        let payload = a
+            .encrypt_signal_message(
+                &bob.trusted(),
+                chat,
+                &event_id(i),
+                "Original text",
+                NOW_MS + i as i64,
+            )
+            .unwrap();
+        b.decrypt_signal_event(
+            &alice.trusted(),
+            &relay_event(ALICE, &event_id(i), &payload),
+            at(),
+        )
+        .unwrap();
+    }
+    let mut reply = content(ALICE, BOB, 136);
+    reply["body"] = json!("Reply");
+    reply["created_at"] = json!(NOW_MS + 136);
+    reply["reply_to"] = json!(reference(ALICE, 1));
+    let payload = encrypt_raw(&mut a, &bob.trusted(), ALICE, 136, &reply);
+    receive(&mut b, &alice.trusted(), 136, &payload).unwrap();
+    let conversation = b.conversations(true).unwrap()[0].id;
+    let rows = b.timeline_before(conversation, None, 120).unwrap();
+    assert_eq!(rows.len(), 120);
+    assert_eq!(rows.last().unwrap().presentation.quote, "Original text");
+    let cursor = crate::storage::messaging::TimelineCursor::from_key(
+        &rows.last().unwrap().presentation.target,
+    )
+    .unwrap();
+    assert_eq!(
+        b.timeline_from(conversation, &cursor, 1).unwrap()[0].body,
+        "Original text"
+    );
+    let payload = encrypt_raw(
+        &mut a,
+        &bob.trusted(),
+        ALICE,
+        137,
+        &reaction(137, &reference(ALICE, 136), true, 1),
+    );
+    receive(&mut b, &alice.trusted(), 137, &payload).unwrap();
+    assert_eq!(
+        b.timeline_before(conversation, None, 1).unwrap()[0]
+            .presentation
+            .reactions,
+        vec![("👍".into(), 1, false)]
+    );
+    let payload = encrypt_raw(
+        &mut a,
+        &bob.trusted(),
+        ALICE,
+        138,
+        &deletion(138, &reference(ALICE, 1)),
+    );
+    receive(&mut b, &alice.trusted(), 138, &payload).unwrap();
+    assert_eq!(
+        b.timeline_before(conversation, None, 1).unwrap()[0]
+            .presentation
+            .quote,
+        "Message deleted"
+    );
+    let payload = encrypt_raw(
+        &mut a,
+        &bob.trusted(),
+        ALICE,
+        139,
+        &deletion(139, &reference(ALICE, 136)),
+    );
+    receive(&mut b, &alice.trusted(), 139, &payload).unwrap();
+    b.close().unwrap();
+    let mut b = bob.open();
+    let row = b.timeline_before(conversation, None, 1).unwrap().remove(0);
+    assert!(row.presentation.deleted);
+    assert!(row.presentation.quote.is_empty());
+    assert!(row.presentation.reactions.is_empty());
+    assert_eq!(row.body, "Message deleted");
+    let mut reply = content(ALICE, BOB, 140);
+    reply["body"] = json!("Missing original");
+    reply["created_at"] = json!(NOW_MS + 140);
+    reply["reply_to"] = json!(reference(ALICE, 999));
+    let payload = encrypt_raw(&mut a, &bob.trusted(), ALICE, 140, &reply);
+    receive(&mut b, &alice.trusted(), 140, &payload).unwrap();
+    let row = b.timeline_before(conversation, None, 1).unwrap().remove(0);
+    assert_eq!(row.presentation.quote, "Message unavailable");
+    assert!(row.presentation.target.is_empty());
+}
+
 fn pair() -> (TestAccount, TestAccount, Database, Database) {
     let alice = TestAccount::new(ALICE, 121);
     let bob = TestAccount::new(BOB, 122);

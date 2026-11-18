@@ -2,6 +2,7 @@ pub(crate) mod account_status;
 mod events;
 pub(crate) mod message_events;
 pub(crate) mod messaging;
+pub(crate) mod presentation;
 pub(crate) mod receipts;
 mod records;
 pub(crate) mod signal;
