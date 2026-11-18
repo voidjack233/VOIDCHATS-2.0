@@ -2,8 +2,10 @@
 
 This defines the prepared Rust application-version-2 receiver. The authenticated
 relay still negotiates version **1**; feature sending and Slint UI are unchanged.
-Tests pass versioned frames directly into the same Signal/storage receive path.
-The relay will not offer version-2 queue heads to this release.
+The isolated integration configuration negotiates version 2 with a disposable
+relay; that configuration is compiled only into tests and accepts loopback
+WebSocket endpoints. The production relay will not offer version-2 queue heads
+to this release.
 
 ## Wire contract
 
@@ -107,18 +109,40 @@ duplicate JSON keys, invalid ciphertext, and versions above the prepared receive
 ceiling fail closed without ACK. The receiver never interprets a failed
 decryption as an unsupported event. No private key or plaintext is logged.
 
-There is no deferred-event replay worker yet. A future upgrader must process
-saved plaintext without decrypting or advancing Signal again, in a transaction
-that preserves the original dedup ledger and applies tombstones and peer scope.
-Reclassified mis-versioned content and revision conflicts likewise remain saved
-until an explicit compatible recovery policy exists.
+## Deferred recovery
+
+The existing storage worker runs local recovery before loading conversation
+lists. It scans pending records in bounded keyset pages; an unsupported record
+does not stop supported records later in the scan. No service or background
+thread is added. Migration 11 adds pending/quarantined recovery state and its
+scan index without rewriting saved plaintext or account/Signal material.
+
+Recovery verifies the original sender/event, current pinned account/Signal
+binding, local recipient, saved digest ledger, and supported decoder. It uses
+the exact saved plaintext, never the original ciphertext or a second Signal
+decryption. The local decoder can process valid content previously retained
+because of a legacy transport minimum; that metadata is not authorization.
+
+Each recovered event replaces its deferred ledger in the same SQLCipher
+transaction as its message/control effects. Failed writes or COMMIT restore the
+saved record and every affected row. Restart retries cannot create another
+bubble, advance the ratchet, undo a tombstone, overwrite a newer reaction
+revision, or extend the original delivery-receipt deadline.
+
+Still-unknown types, fields, and plaintext versions remain deferred. Equal
+reaction revisions with contradictory state remain deferred until they become
+stale under a newer revision; recovery never chooses an arbitrary winner.
+Malformed, unauthorized, conflicting, or provenance-invalid entries are retained
+as quarantined, with a non-sensitive reason, and are not automatically retried.
+Storage failures propagate and leave the candidate pending. A crash between a
+failed application and quarantine simply causes revalidation next time.
 
 ## Before advertising version 2
 
 Keep transport negotiation at version 1 for this receiver-only release. A later
-release must review/freeze the complete version-2 event contract, exercise its
-negotiated relay handoff end-to-end, and integrate the feature presentation and
-deferred-event recovery policy. Feature sends need their own persistent outgoing
+release must review/freeze the complete version-2 event contract and integrate
+the feature presentation. Isolated relay verification is documented separately
+in [receiver V2 verification](receiver-v2-verification.md). Feature sends need their own persistent outgoing
 control queue, monotonic revision allocation, retry semantics, and peer
 compatibility rules; local receiver support does not prove peer support.
 

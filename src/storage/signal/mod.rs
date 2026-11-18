@@ -3,6 +3,7 @@ mod binding;
 mod crypto;
 pub(crate) mod peer;
 mod publication;
+mod recovery;
 mod wire;
 pub(crate) use wire::valid_content;
 #[cfg(all(test, windows))]

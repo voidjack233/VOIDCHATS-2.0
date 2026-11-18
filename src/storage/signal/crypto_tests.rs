@@ -16,7 +16,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
 
+mod go_relay;
 mod receiver;
+mod recovery;
 
 const ALICE: &str = "101";
 const BOB: &str = "202";

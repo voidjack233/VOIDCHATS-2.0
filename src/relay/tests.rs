@@ -22,6 +22,94 @@ const VOID_ID: &str = "123";
 const WAIT: Duration = Duration::from_secs(5);
 pub(crate) type Socket = WebSocketStream<TcpStream>;
 
+#[test]
+fn version_two_override_is_test_only_and_rejects_remote_or_credentialed_urls() {
+    assert_eq!(
+        super::SUPPORTED_APPLICATION_PROTOCOL,
+        super::ApplicationProtocolVersion::V1
+    );
+    for endpoint in [
+        "wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws",
+        "ws://example.invalid/ws",
+        "wss://127.0.0.1/ws",
+        "ws://user@127.0.0.1/ws",
+    ] {
+        assert!(
+            Connection::spawn_with_test_protocol(
+                endpoint.into(),
+                AUDIENCE.into(),
+                super::ApplicationProtocolVersion::V2,
+                |_| Ok(identity()),
+                |_| {},
+                |_| {}
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        Connection::spawn_with_test_protocol(
+            "ws://127.0.0.1:1/ws".into(),
+            AUDIENCE.into(),
+            super::ApplicationProtocolVersion::parse("3").unwrap(),
+            |_| Ok(identity()),
+            |_| {},
+            |_| {}
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn isolated_version_two_negotiation_dispatches_versioned_delivery_without_implicit_ack() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let (tx, mut activity) = tokio::sync::mpsc::unbounded_channel();
+    let (relay, worker) = Connection::spawn_with_test_protocol(
+        endpoint,
+        AUDIENCE.into(),
+        super::ApplicationProtocolVersion::V2,
+        |_| Ok(identity()),
+        |_| {},
+        move |event| {
+            let _ = tx.send(event);
+        },
+    )
+    .unwrap();
+    assert!(relay.connect(VOID_ID.into()));
+    let mut socket = next_attempt(&listener).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    send_json(&mut socket, json!({"type":"auth_ok","void_id":VOID_ID})).await;
+    assert_eq!(
+        receive_json(&mut socket).await,
+        json!({"type":"protocol","version":"2"})
+    );
+    assert!(activity.try_recv().is_err());
+    send_json(&mut socket, json!({"type":"protocol_ok","version":"2"})).await;
+    let Some(Activity::Online(session)) =
+        tokio::time::timeout(WAIT, activity.recv()).await.unwrap()
+    else {
+        panic!("missing negotiated session");
+    };
+    let event = json!({"type":"event_versioned","event_id":"00000000-0000-4000-8000-000000000001",
+        "from_void_id":"456","payload_base64":"AA==","created_at":expiry(-1),"expires_at":expiry(60),"min_protocol_version":"2"});
+    send_json(&mut socket, event.clone()).await;
+    let Some(Activity::Delivery {
+        generation, json, ..
+    }) = tokio::time::timeout(WAIT, activity.recv()).await.unwrap()
+    else {
+        panic!("missing versioned delivery");
+    };
+    assert_eq!(generation, session.generation);
+    assert_eq!(serde_json::from_str::<Value>(&json).unwrap(), event);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), socket.next())
+            .await
+            .is_err(),
+        "receiving a frame alone must not send ACK"
+    );
+    worker.finish();
+}
+
 fn identity() -> SessionIdentity {
     SessionIdentity {
         void_id: VOID_ID.into(),

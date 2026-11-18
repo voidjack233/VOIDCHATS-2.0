@@ -191,6 +191,49 @@ impl Connection {
         report: impl Fn(ConnectionStatus) + Send + 'static,
         activity: impl Fn(Activity) + Send + 'static,
     ) -> io::Result<(Self, Worker)> {
+        Self::spawn_configured(
+            endpoint,
+            API_BASE.into(),
+            SUPPORTED_APPLICATION_PROTOCOL,
+            load_identity,
+            report,
+            activity,
+        )
+    }
+
+    /// Only compiled into tests, and deliberately unusable with a remote relay.
+    #[cfg(test)]
+    pub(crate) fn spawn_with_test_protocol(
+        endpoint: String,
+        audience: String,
+        version: ApplicationProtocolVersion,
+        load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
+        report: impl Fn(ConnectionStatus) + Send + 'static,
+        activity: impl Fn(Activity) + Send + 'static,
+    ) -> io::Result<(Self, Worker)> {
+        let url = reqwest::Url::parse(&endpoint).map_err(|_| io::ErrorKind::InvalidInput)?;
+        if url.scheme() != "ws"
+            || !matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "::1"))
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || !matches!(
+                version,
+                ApplicationProtocolVersion::V1 | ApplicationProtocolVersion::V2
+            )
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        Self::spawn_configured(endpoint, audience, version, load_identity, report, activity)
+    }
+
+    fn spawn_configured(
+        endpoint: String,
+        audience: String,
+        application_version: ApplicationProtocolVersion,
+        load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
+        report: impl Fn(ConnectionStatus) + Send + 'static,
+        activity: impl Fn(Activity) + Send + 'static,
+    ) -> io::Result<(Self, Worker)> {
         let (requests, receiver) = mpsc::channel(1);
         let (stop, stopped) = oneshot::channel();
         let thread = thread::Builder::new()
@@ -211,7 +254,7 @@ impl Connection {
                     tokio::select! {
                         biased;
                         _ = stopped => {}
-                        _ = run_worker(receiver, &endpoint, load_identity, &report, &activity) => {}
+                        _ = run_worker(receiver, &endpoint, &audience, application_version, load_identity, &report, &activity) => {}
                     }
                 });
                 // DNS can use Tokio's blocking pool. Cancelling the connection
@@ -229,6 +272,8 @@ impl Connection {
 async fn run_worker(
     mut requests: mpsc::Receiver<String>,
     endpoint: &str,
+    audience: &str,
+    application_version: ApplicationProtocolVersion,
     load_identity: impl Fn(&str) -> io::Result<SessionIdentity>,
     report: &impl Fn(ConnectionStatus),
     activity: &impl Fn(Activity),
@@ -265,7 +310,7 @@ async fn run_worker(
                 Err(_) => return ConnectionStatus::AuthenticationFailed,
             };
             let result =
-                connect_and_authenticate(endpoint, API_BASE, &identity, HANDSHAKE_TIMEOUT).await;
+                connect_and_authenticate(endpoint, audience, &identity, HANDSHAKE_TIMEOUT).await;
             // Keep the private key out of the idle session.
             drop(identity);
             if result.is_ok() {
@@ -276,7 +321,7 @@ async fn run_worker(
                 commands: &mut command_receiver,
                 activity,
             });
-            monitor_authenticated(result, report, messaging).await
+            monitor_authenticated(result, report, messaging, application_version).await
         };
         let (terminal, replacement) = tokio::select! {
             biased;
@@ -330,7 +375,8 @@ async fn serve_once(
     report: impl Fn(ConnectionStatus),
 ) -> ConnectionStatus {
     let result = connect_and_authenticate(endpoint, audience, identity, handshake_timeout).await;
-    monitor_authenticated::<fn(Activity)>(result, &report, None).await
+    monitor_authenticated::<fn(Activity)>(result, &report, None, SUPPORTED_APPLICATION_PROTOCOL)
+        .await
 }
 
 async fn connect_and_authenticate(
@@ -458,19 +504,18 @@ struct BufferedDelivery {
 
 async fn negotiate_protocol(
     socket: &mut Socket,
+    application_version: ApplicationProtocolVersion,
 ) -> Result<Option<BufferedDelivery>, ConnectionStatus> {
     send_json(
         socket,
-        json!({ "type": "protocol", "version": SUPPORTED_APPLICATION_PROTOCOL }),
+        json!({ "type": "protocol", "version": application_version }),
     )
     .await?;
     let mut buffered = None;
     loop {
         match socket.next().await {
             Some(Ok(Message::Text(text))) => match protocol::decode(&text) {
-                Some(ServerFrame::ProtocolOk(version))
-                    if version == SUPPORTED_APPLICATION_PROTOCOL =>
-                {
+                Some(ServerFrame::ProtocolOk(version)) if version == application_version => {
                     return Ok(buffered);
                 }
                 // Each socket starts at version 1. A legacy queued event may be
@@ -481,7 +526,7 @@ async fn negotiate_protocol(
                     event_id,
                     expiry_ms,
                     min_protocol_version,
-                }) if min_protocol_version <= SUPPORTED_APPLICATION_PROTOCOL => {
+                }) if min_protocol_version == ApplicationProtocolVersion::V1 => {
                     if expiry_ms <= now_ms() {
                         continue;
                     }
@@ -525,6 +570,7 @@ async fn monitor_authenticated<F: Fn(Activity)>(
     result: Result<Socket, ConnectionStatus>,
     report: &impl Fn(ConnectionStatus),
     mut messaging: Option<Messaging<'_, F>>,
+    application_version: ApplicationProtocolVersion,
 ) -> ConnectionStatus {
     let mut socket = match result {
         Ok(socket) => socket,
@@ -532,7 +578,12 @@ async fn monitor_authenticated<F: Fn(Activity)>(
     };
     // Negotiation belongs to each authenticated socket, including reconnects.
     // No prekey/send/ACK command is exposed before the exact protocol_ok arrives.
-    let buffered = match timeout(RESPONSE_TIMEOUT, negotiate_protocol(&mut socket)).await {
+    let buffered = match timeout(
+        RESPONSE_TIMEOUT,
+        negotiate_protocol(&mut socket, application_version),
+    )
+    .await
+    {
         Ok(Ok(buffered)) => buffered,
         Ok(Err(status)) => return status,
         Err(_) => return ConnectionStatus::Disconnected,
@@ -626,7 +677,7 @@ async fn monitor_authenticated<F: Fn(Activity)>(
                     Some(ServerFrame::Delivery { sender, event_id, expiry_ms, min_protocol_version }) => {
                         // Do not decrypt or ACK unsupported events, even when the
                         // same event ID was previously processed as a legacy event.
-                        if min_protocol_version > SUPPORTED_APPLICATION_PROTOCOL { break; }
+                        if min_protocol_version > application_version { break; }
                         if let Some(mode) = &messaging {
                             if expiry_ms <= now_ms() { continue; }
                             if delivered.as_ref().is_some_and(|(_, _, expiry)| *expiry > now_ms()) { break; }

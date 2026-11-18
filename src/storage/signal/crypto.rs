@@ -260,68 +260,89 @@ impl Database {
                     run_signal(sessions.load_session(&remote))?.ok_or(Error::SignalProtocol)?;
                 verify_session_peer(&session, verified.identity_key())?;
 
-                let routing = Routing {
-                    event_id: &event.event_id,
-                    sender: &event.sender,
-                    recipient: &local_id,
-                };
-                let content = wire::decode_content(routing, &plaintext)?;
-                // New content must be transported with its application minimum.
-                // Keep valid mis-versioned content recoverable, without applying
-                // an extension delivered through a legacy frame.
-                let requires_v2 = match &content {
-                    wire::Content::Message(message) => message.reply_to.is_some(),
-                    wire::Content::Reaction(_) | wire::Content::Delete(_) => true,
-                    _ => false,
-                };
-                if requires_v2 && event.min_protocol_version < ApplicationProtocolVersion::V2 {
-                    return Ok(Incoming::Deferred {
-                        plaintext,
-                        reason: "protocol_version_required".into(),
-                        min_protocol_version: event.min_protocol_version,
-                        received_at: now_ms,
-                    });
-                }
-                match content {
-                    wire::Content::Message(content) => {
-                        let conversation_id =
-                            incoming_conversation(tx, &event.sender, content.created_at)?;
-                        Ok(Incoming::Message {
-                            message: Message {
-                                id: message_id(&event.sender, &event.event_id),
-                                conversation_id,
-                                direction: Direction::Incoming,
-                                body: content.body,
-                                created_at: content.created_at,
-                                delivery_state: DeliveryState::Received,
-                            },
-                            receipt_at: content.requests_receipt.then_some(now_ms),
-                            reply_to: content.reply_to,
-                        })
-                    }
-                    wire::Content::Receipt(original_event_id) if pinned => {
-                        Ok(Incoming::Receipt { original_event_id })
-                    }
-                    wire::Content::Receipt(_) => Err(Error::SignalPeer),
-                    wire::Content::Reaction(event_content) => Ok(Incoming::Reaction {
-                        event: event_content,
-                        plaintext,
-                        min_protocol_version: event.min_protocol_version,
-                        received_at: now_ms,
-                    }),
-                    wire::Content::Delete(event) => Ok(Incoming::Delete(event)),
-                    wire::Content::Unsupported { reason } => Ok(Incoming::Deferred {
-                        plaintext,
-                        reason,
-                        min_protocol_version: event.min_protocol_version,
-                        received_at: now_ms,
-                    }),
-                }
+                incoming_plaintext(
+                    tx,
+                    Routing {
+                        event_id: &event.event_id,
+                        sender: &event.sender,
+                        recipient: &local_id,
+                    },
+                    plaintext,
+                    event.min_protocol_version,
+                    now_ms,
+                    pinned,
+                    true,
+                )
             })?;
         if outcome == IncomingOutcome::AlreadyStored && !pinned {
             return Err(Error::SignalPeer);
         }
         Ok(outcome)
+    }
+}
+
+/// Classify authenticated plaintext without invoking Signal or changing its state.
+/// Recovery uses the original routing and receive time, but a newer local decoder
+/// may process content previously deferred for a legacy transport minimum.
+pub(super) fn incoming_plaintext(
+    tx: &Transaction<'_>,
+    routing: Routing<'_>,
+    plaintext: Zeroizing<Vec<u8>>,
+    min_protocol_version: ApplicationProtocolVersion,
+    received_at: i64,
+    pinned: bool,
+    enforce_transport_version: bool,
+) -> Result<Incoming> {
+    let content = wire::decode_content(routing, &plaintext)?;
+    let requires_v2 = match &content {
+        wire::Content::Message(message) => message.reply_to.is_some(),
+        wire::Content::Reaction(_) | wire::Content::Delete(_) => true,
+        _ => false,
+    };
+    if enforce_transport_version
+        && requires_v2
+        && min_protocol_version < ApplicationProtocolVersion::V2
+    {
+        return Ok(Incoming::Deferred {
+            plaintext,
+            reason: "protocol_version_required".into(),
+            min_protocol_version,
+            received_at,
+        });
+    }
+    match content {
+        wire::Content::Message(content) => {
+            let conversation_id = incoming_conversation(tx, routing.sender, content.created_at)?;
+            Ok(Incoming::Message {
+                message: Message {
+                    id: message_id(routing.sender, routing.event_id),
+                    conversation_id,
+                    direction: Direction::Incoming,
+                    body: content.body,
+                    created_at: content.created_at,
+                    delivery_state: DeliveryState::Received,
+                },
+                receipt_at: content.requests_receipt.then_some(received_at),
+                reply_to: content.reply_to,
+            })
+        }
+        wire::Content::Receipt(original_event_id) if pinned => {
+            Ok(Incoming::Receipt { original_event_id })
+        }
+        wire::Content::Receipt(_) => Err(Error::SignalPeer),
+        wire::Content::Reaction(event) => Ok(Incoming::Reaction {
+            event,
+            plaintext,
+            min_protocol_version,
+            received_at,
+        }),
+        wire::Content::Delete(event) => Ok(Incoming::Delete(event)),
+        wire::Content::Unsupported { reason } => Ok(Incoming::Deferred {
+            plaintext,
+            reason,
+            min_protocol_version,
+            received_at,
+        }),
     }
 }
 
@@ -386,7 +407,7 @@ fn verify_session_peer(
     Ok(())
 }
 
-fn local_account(connection: &Connection) -> Result<(String, VerifyingKey)> {
+pub(super) fn local_account(connection: &Connection) -> Result<(String, VerifyingKey)> {
     let (id, key) = connection.query_row(
         "SELECT void_id, public_key FROM local_account WHERE singleton = 1",
         [],

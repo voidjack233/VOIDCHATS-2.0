@@ -160,7 +160,10 @@ fn bind_with(
                                 ui.set_setup_status(stage.into());
                             });
                         })
-                        .and_then(|(db, confirmed)| {
+                        .and_then(|(mut db, confirmed)| {
+                            // Reuse the existing storage worker before loading the
+                            // timeline. Recovery never decrypts Signal a second time.
+                            db.recover_deferred_events()?;
                             load_lists(&db).map(|lists| (db, lists, confirmed))
                         });
                         match opened {

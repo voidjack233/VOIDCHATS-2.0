@@ -33,6 +33,12 @@ correlation only. No application feature sends it yet. Sender receive-version
 negotiation is not evidence of peer capability and is not a backend prerequisite
 for sending. Reply, Reaction, and Delete payloads are not enabled by this change.
 
+A loopback-only `cfg(test)` configuration negotiates version 2 for isolated
+verification. The actual pinned Go relay, real Signal ciphertext, receiver ACKs,
+blocked queues, reconnects, and deferred recovery passed the checks recorded in
+[receiver V2 verification](receiver-v2-verification.md). The production entry
+point still always uses version 1; there is no runtime override.
+
 Do not raise `SUPPORTED_APPLICATION_PROTOCOL` until the Rust receiver can safely
 process or durably defer every encrypted event allowed at that version, including
 duplicate and out-of-order events, with correct post-commit ACKs. Feature senders
