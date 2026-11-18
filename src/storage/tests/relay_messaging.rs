@@ -101,7 +101,7 @@ async fn authenticate(listener: &TcpListener, who: &'static str) -> Socket {
         json!({"type":"auth_begin", "void_id":who})
     );
     verify_account_proof(&mut socket, &account_key(who).verifying_key(), who).await;
-    send_json(&mut socket, json!({"type":"auth_ok", "void_id":who})).await;
+    crate::relay::tests::finish_authentication(&mut socket, who).await;
     socket
 }
 

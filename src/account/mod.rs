@@ -983,14 +983,14 @@ mod tests {
                         let listener = TcpListener::from_std(listener).unwrap();
                         let mut before_restart = next_attempt(&listener).await;
                         verify_account_proof(&mut before_restart, &verifying_key, "123").await;
-                        send_json(&mut before_restart, json!({"type":"auth_ok", "void_id":"123"})).await;
+                        crate::relay::tests::finish_authentication(&mut before_restart, "123").await;
                         let first = receive_json(&mut before_restart).await;
                         assert_eq!(first["type"], "prekeys_publish");
                         drop(before_restart); // The relay stored the publication and lost the acknowledgement.
 
                         let mut after_restart = next_attempt(&listener).await;
                         verify_account_proof(&mut after_restart, &verifying_key, "123").await;
-                        send_json(&mut after_restart, json!({"type":"auth_ok", "void_id":"123"})).await;
+                        crate::relay::tests::finish_authentication(&mut after_restart, "123").await;
                         assert!(receive_json(&mut after_restart).await == first);
                         send_json(&mut after_restart, json!({"type":"prekeys_published",
                             "publication_id":first["publication_id"], "ec_remaining":"20", "kyber_remaining":"20"})).await;

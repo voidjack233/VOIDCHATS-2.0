@@ -11,9 +11,44 @@ pub(super) const DELETION_CHALLENGE_LIFETIME: std::time::Duration =
 const DELETION_CLOCK_SKEW_MS: i64 = 10_000;
 const MAX_DELIVERY_PAYLOAD: usize = 1_048_576;
 
+/// Application event compatibility, independent of the authentication transcript
+/// and the encrypted Signal payload's own wire version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct ApplicationProtocolVersion(i32);
+
+impl ApplicationProtocolVersion {
+    pub(crate) const V1: Self = Self(1);
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let version = value.parse::<i32>().ok()?;
+        (version > 0 && version.to_string() == value).then_some(Self(version))
+    }
+}
+
+impl TryFrom<String> for ApplicationProtocolVersion {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value).ok_or("invalid application protocol version")
+    }
+}
+
+impl From<ApplicationProtocolVersion> for String {
+    fn from(value: ApplicationProtocolVersion) -> Self {
+        value.0.to_string()
+    }
+}
+
+// Raise only when every permitted encrypted event can be processed or durably
+// deferred. Transport frame support alone does not make a version safe.
+pub(crate) const SUPPORTED_APPLICATION_PROTOCOL: ApplicationProtocolVersion =
+    ApplicationProtocolVersion::V1;
+
 pub(super) enum ServerFrame {
     Challenge(Challenge),
     AuthOk(String),
+    ProtocolOk(ApplicationProtocolVersion),
     DeleteChallenge(Challenge),
     AccountDeleted {
         void_id: String,
@@ -24,6 +59,7 @@ pub(super) enum ServerFrame {
         sender: String,
         event_id: String,
         expiry_ms: i64,
+        min_protocol_version: ApplicationProtocolVersion,
     },
     OnlineDelivery,
     Reply(Reply),
@@ -55,6 +91,14 @@ pub(crate) enum Request {
         event_id: String,
         to_void_id: String,
         payload_base64: String,
+    },
+    // Prepared transport only; ordinary messages and receipts still use Send.
+    #[allow(dead_code)]
+    SendVersioned {
+        event_id: String,
+        to_void_id: String,
+        payload_base64: String,
+        min_protocol_version: ApplicationProtocolVersion,
     },
     Ack {
         event_id: String,
@@ -106,6 +150,7 @@ impl Request {
             Self::PrekeysPublish { .. } => "prekeys_publish",
             Self::PrekeysClaim { .. } => "prekeys_claim",
             Self::Send { .. } => "send",
+            Self::SendVersioned { .. } => "send_versioned",
             Self::Ack { .. } => "ack",
         }
     }
@@ -139,7 +184,10 @@ impl Request {
                     ..
                 },
             ) => request_id == id && void_id == peer,
-            (Self::Send { event_id, .. }, Reply::Accepted { event_id: id }) => event_id == id,
+            (
+                Self::Send { event_id, .. } | Self::SendVersioned { event_id, .. },
+                Reply::Accepted { event_id: id },
+            ) => event_id == id,
             (
                 Self::Ack {
                     event_id,
@@ -290,6 +338,9 @@ enum WireFrame {
     AuthOk {
         void_id: String,
     },
+    ProtocolOk {
+        version: ApplicationProtocolVersion,
+    },
     AccountDeleteChallenge {
         challenge_id: String,
         message: String,
@@ -342,6 +393,14 @@ enum WireFrame {
         payload_base64: String,
         created_at: String,
         expires_at: String,
+    },
+    EventVersioned {
+        event_id: String,
+        from_void_id: String,
+        payload_base64: String,
+        created_at: String,
+        expires_at: String,
+        min_protocol_version: ApplicationProtocolVersion,
     },
     OnlineEvent {
         exchange_id: String,
@@ -398,6 +457,7 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
         WireFrame::AuthOk { void_id } if valid_void_id(&void_id) => {
             Some(ServerFrame::AuthOk(void_id))
         }
+        WireFrame::ProtocolOk { version } => Some(ServerFrame::ProtocolOk(version)),
         WireFrame::Error { code }
             if (1..=64).contains(&code.len())
                 && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
@@ -485,6 +545,27 @@ pub(super) fn decode(text: &str) -> Option<ServerFrame> {
                 sender: from_void_id,
                 event_id,
                 expiry_ms: timestamp_ms(&expires_at)?,
+                min_protocol_version: ApplicationProtocolVersion::V1,
+            })
+        }
+        WireFrame::EventVersioned {
+            event_id,
+            from_void_id,
+            payload_base64,
+            created_at,
+            expires_at,
+            min_protocol_version,
+        } if min_protocol_version > ApplicationProtocolVersion::V1
+            && valid_event_id(&event_id)
+            && valid_void_id(&from_void_id)
+            && valid_base64(&payload_base64, MAX_DELIVERY_PAYLOAD)
+            && timestamp_ms(&expires_at)? > timestamp_ms(&created_at)? =>
+        {
+            Some(ServerFrame::Delivery {
+                sender: from_void_id,
+                event_id,
+                expiry_ms: timestamp_ms(&expires_at)?,
+                min_protocol_version,
             })
         }
         WireFrame::OnlineEvent {
@@ -559,6 +640,127 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use serde_json::json;
+
+    #[test]
+    fn application_versions_are_canonical_positive_decimal_strings() {
+        for version in ["1", "2", "2147483647"] {
+            let parsed = ApplicationProtocolVersion::parse(version).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json!(version));
+            assert!(matches!(
+                decode(&json!({"type":"protocol_ok", "version":version}).to_string()),
+                Some(ServerFrame::ProtocolOk(actual)) if actual == parsed
+            ));
+        }
+        for version in [
+            "",
+            "0",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "1.0",
+            "2147483648",
+            "١",
+        ] {
+            assert!(
+                ApplicationProtocolVersion::parse(version).is_none(),
+                "{version}"
+            );
+            assert!(
+                decode(&json!({"type":"protocol_ok", "version":version}).to_string()).is_none()
+            );
+        }
+        for version in [json!(1), json!(null), json!(true)] {
+            assert!(
+                decode(&json!({"type":"protocol_ok", "version":version}).to_string()).is_none()
+            );
+        }
+        assert!(decode(r#"{"type":"protocol_ok","version":"1","extra":1}"#).is_none());
+        assert!(decode(r#"{"type":"protocol_ok","version":"1","version":"2"}"#).is_none());
+    }
+
+    #[test]
+    fn versioned_deliveries_require_explicit_valid_metadata_and_keep_the_legacy_shape_strict() {
+        let mut event = json!({
+            "type":"event_versioned", "event_id":"00000000-0000-0000-0000-000000000001",
+            "from_void_id":"2", "payload_base64":"YQ==",
+            "created_at":"2026-11-14T04:05:00Z", "expires_at":"2026-11-14T04:06:00Z",
+            "min_protocol_version":"2"
+        });
+        assert!(matches!(decode(&event.to_string()),
+            Some(ServerFrame::Delivery { min_protocol_version, .. })
+                if min_protocol_version == ApplicationProtocolVersion::parse("2").unwrap()));
+        for invalid in [json!("1"), json!("0"), json!("02"), json!(null), json!(2)] {
+            event["min_protocol_version"] = invalid;
+            assert!(decode(&event.to_string()).is_none());
+        }
+        event
+            .as_object_mut()
+            .unwrap()
+            .remove("min_protocol_version");
+        assert!(decode(&event.to_string()).is_none());
+        event["type"] = json!("event");
+        assert!(matches!(
+            decode(&event.to_string()),
+            Some(ServerFrame::Delivery {
+                min_protocol_version: ApplicationProtocolVersion::V1,
+                ..
+            })
+        ));
+        event["min_protocol_version"] = json!("1");
+        assert!(decode(&event.to_string()).is_none());
+        event["type"] = json!("event_versioned");
+        event["min_protocol_version"] = json!("2");
+        for (field, invalid) in [
+            ("payload_base64", json!("YR==")),
+            ("from_void_id", json!("0")),
+            ("event_id", json!("invalid")),
+            ("expires_at", json!("2026-11-14T04:05:00Z")),
+        ] {
+            let mut bad = event.clone();
+            bad[field] = invalid;
+            assert!(decode(&bad.to_string()).is_none(), "{field}");
+        }
+    }
+
+    #[test]
+    fn versioned_sends_use_the_existing_correlated_acceptance_contract() {
+        let event_id = "00000000-0000-0000-0000-000000000001";
+        for version in ["1", "2"] {
+            let request = Request::SendVersioned {
+                event_id: event_id.into(),
+                to_void_id: "2".into(),
+                payload_base64: "YQ==".into(),
+                min_protocol_version: ApplicationProtocolVersion::parse(version).unwrap(),
+            };
+            assert_eq!(request.name(), "send_versioned");
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                json!({
+                    "type":"send_versioned", "event_id":event_id, "to_void_id":"2",
+                    "payload_base64":"YQ==", "min_protocol_version":version
+                })
+            );
+            assert!(request.matches(&Reply::Accepted {
+                event_id: event_id.into()
+            }));
+            assert!(!request.matches(&Reply::Accepted {
+                event_id: "other".into()
+            }));
+        }
+        let legacy = Request::Send {
+            event_id: event_id.into(),
+            to_void_id: "2".into(),
+            payload_base64: "YQ==".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            json!({
+                "type":"send", "event_id":event_id, "to_void_id":"2", "payload_base64":"YQ=="
+            })
+        );
+    }
 
     #[test]
     fn challenge_validates_exact_relay_signing_bytes_and_lifetime() {

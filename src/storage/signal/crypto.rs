@@ -7,10 +7,13 @@ use super::{
     peer::{self, TrustedPeer},
     wire::{self, Routing, SignalBinding},
 };
-use crate::storage::{
-    Database, DeliveryState, Direction, Error, Message, Result,
-    events::{Incoming, IncomingOutcome},
-    receipts::Upload,
+use crate::{
+    relay::SUPPORTED_APPLICATION_PROTOCOL,
+    storage::{
+        Database, DeliveryState, Direction, Error, Message, Result,
+        events::{Incoming, IncomingOutcome},
+        receipts::Upload,
+    },
 };
 use ed25519_dalek::VerifyingKey;
 use futures_util::FutureExt;
@@ -187,6 +190,11 @@ impl Database {
     ) -> Result<IncomingOutcome> {
         let (local_id, _) = local_account(&self.connection)?;
         let event = wire::decode_event(event_json, &local_id)?;
+        // Gate before duplicate lookup, identity pinning, and any Signal ratchet changes.
+        // Recognizing a transport envelope does not imply support for its encrypted events.
+        if event.min_protocol_version > SUPPORTED_APPLICATION_PROTOCOL {
+            return Err(Error::SignalEnvelope);
+        }
         if expected_event_id.is_some_and(|id| id != event.event_id) {
             return Err(Error::SignalEnvelope);
         }

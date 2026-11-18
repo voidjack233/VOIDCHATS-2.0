@@ -9,7 +9,10 @@ use crate::account::{API_BASE, RegisteredIdentity as SessionIdentity, load_regis
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::Signer;
 use futures_util::{SinkExt, StreamExt};
-pub(crate) use protocol::{AccountState, Reply, Request, valid_utc_timestamp};
+pub(crate) use protocol::{
+    AccountState, ApplicationProtocolVersion, Reply, Request, SUPPORTED_APPLICATION_PROTOCOL,
+    valid_utc_timestamp,
+};
 use protocol::{MAX_FRAME_SIZE, ServerFrame};
 use serde_json::json;
 use std::{
@@ -446,6 +449,78 @@ struct Messaging<'a, F> {
     activity: &'a F,
 }
 
+struct BufferedDelivery {
+    sender: String,
+    event_id: String,
+    expiry_ms: i64,
+    json: String,
+}
+
+async fn negotiate_protocol(
+    socket: &mut Socket,
+) -> Result<Option<BufferedDelivery>, ConnectionStatus> {
+    send_json(
+        socket,
+        json!({ "type": "protocol", "version": SUPPORTED_APPLICATION_PROTOCOL }),
+    )
+    .await?;
+    let mut buffered = None;
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => match protocol::decode(&text) {
+                Some(ServerFrame::ProtocolOk(version))
+                    if version == SUPPORTED_APPLICATION_PROTOCOL =>
+                {
+                    return Ok(buffered);
+                }
+                // Each socket starts at version 1. A legacy queued event may be
+                // offered immediately after auth_ok, before protocol_ok. Hold at
+                // most the relay's single in-flight event until the worker is online.
+                Some(ServerFrame::Delivery {
+                    sender,
+                    event_id,
+                    expiry_ms,
+                    min_protocol_version,
+                }) if min_protocol_version <= SUPPORTED_APPLICATION_PROTOCOL => {
+                    if expiry_ms <= now_ms() {
+                        continue;
+                    }
+                    if buffered
+                        .as_ref()
+                        .is_some_and(|event: &BufferedDelivery| event.expiry_ms > now_ms())
+                    {
+                        return Err(ConnectionStatus::Disconnected);
+                    }
+                    buffered = Some(BufferedDelivery {
+                        sender,
+                        event_id,
+                        expiry_ms,
+                        json: text.to_string(),
+                    });
+                }
+                Some(ServerFrame::OnlineDelivery) => {}
+                Some(ServerFrame::Error(code)) => {
+                    report_rejection("protocol", &code);
+                    return Err(
+                        if matches!(code.as_str(), "authentication_failed" | "unauthorized") {
+                            ConnectionStatus::AuthenticationFailed
+                        } else {
+                            ConnectionStatus::Disconnected
+                        },
+                    );
+                }
+                _ => return Err(ConnectionStatus::Disconnected),
+            },
+            Some(Ok(Message::Ping(_))) => socket
+                .flush()
+                .await
+                .map_err(|_| ConnectionStatus::Disconnected)?,
+            Some(Ok(Message::Pong(_))) => {}
+            _ => return Err(ConnectionStatus::Disconnected),
+        }
+    }
+}
+
 async fn monitor_authenticated<F: Fn(Activity)>(
     result: Result<Socket, ConnectionStatus>,
     report: &impl Fn(ConnectionStatus),
@@ -455,9 +530,30 @@ async fn monitor_authenticated<F: Fn(Activity)>(
         Ok(socket) => socket,
         Err(status) => return status,
     };
+    // Negotiation belongs to each authenticated socket, including reconnects.
+    // No prekey/send/ACK command is exposed before the exact protocol_ok arrives.
+    let buffered = match timeout(RESPONSE_TIMEOUT, negotiate_protocol(&mut socket)).await {
+        Ok(Ok(buffered)) => buffered,
+        Ok(Err(status)) => return status,
+        Err(_) => return ConnectionStatus::Disconnected,
+    };
     report(ConnectionStatus::Connected);
+    let mut delivered: Option<(String, String, i64)> = None;
     if let Some(mode) = &messaging {
         (mode.activity)(Activity::Online(mode.session.clone()));
+        if let Some(event) = buffered.filter(|event| event.expiry_ms > now_ms()) {
+            delivered = Some((
+                event.sender.clone(),
+                event.event_id.clone(),
+                event.expiry_ms,
+            ));
+            (mode.activity)(Activity::Delivery {
+                generation: mode.session.generation,
+                sender: event.sender,
+                event_id: event.event_id,
+                json: event.json,
+            });
+        }
     }
     let mut heartbeat = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -468,7 +564,6 @@ async fn monitor_authenticated<F: Fn(Activity)>(
     let mut pending: Option<PendingRequest> = None;
     let command_deadline = sleep(RESPONSE_TIMEOUT);
     tokio::pin!(command_deadline);
-    let mut delivered: Option<(String, String, i64)> = None;
 
     loop {
         tokio::select! {
@@ -528,7 +623,10 @@ async fn monitor_authenticated<F: Fn(Activity)>(
                     }
                 }
                 Some(Ok(Message::Text(text))) => match protocol::decode(&text) {
-                    Some(ServerFrame::Delivery { sender, event_id, expiry_ms }) => {
+                    Some(ServerFrame::Delivery { sender, event_id, expiry_ms, min_protocol_version }) => {
+                        // Do not decrypt or ACK unsupported events, even when the
+                        // same event ID was previously processed as a legacy event.
+                        if min_protocol_version > SUPPORTED_APPLICATION_PROTOCOL { break; }
                         if let Some(mode) = &messaging {
                             if expiry_ms <= now_ms() { continue; }
                             if delivered.as_ref().is_some_and(|(_, _, expiry)| *expiry > now_ms()) { break; }

@@ -41,6 +41,15 @@ pub(crate) async fn send_json(socket: &mut Socket, body: Value) {
         .unwrap();
 }
 
+pub(crate) async fn finish_authentication(socket: &mut Socket, void_id: &str) {
+    send_json(socket, json!({"type":"auth_ok", "void_id":void_id})).await;
+    assert_eq!(
+        receive_json(socket).await,
+        json!({"type":"protocol", "version":"1"})
+    );
+    send_json(socket, json!({"type":"protocol_ok", "version":"1"})).await;
+}
+
 // Accept on loopback only and require the exact first client command.
 async fn mock_relay<F>(
     script: impl FnOnce(Socket) -> F + Send + 'static,
@@ -169,7 +178,7 @@ async fn connect(
 async fn mismatched_prekey_error_interrupts_the_session() {
     let (endpoint, server) = mock_relay(|mut socket| async move {
         verify_proof(&mut socket, &identity().key.verifying_key()).await;
-        send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+        finish_authentication(&mut socket, VOID_ID).await;
         let request = receive_json(&mut socket).await;
         assert_eq!(request["type"], "prekeys_claim");
         send_json(
@@ -250,11 +259,7 @@ async fn manual_reconnect_severs_in_flight_requests_before_the_next_session() {
     assert!(relay.connect(VOID_ID.into()));
     let mut old_socket = next_attempt(&listener).await;
     verify_proof(&mut old_socket, &identity().key.verifying_key()).await;
-    send_json(
-        &mut old_socket,
-        json!({"type":"auth_ok", "void_id":VOID_ID}),
-    )
-    .await;
+    finish_authentication(&mut old_socket, VOID_ID).await;
     let Some(Activity::Online(old_session)) = timeout(WAIT, changes.recv()).await.unwrap() else {
         panic!("missing first authenticated session");
     };
@@ -287,11 +292,7 @@ async fn manual_reconnect_severs_in_flight_requests_before_the_next_session() {
 
     let mut new_socket = next_attempt(&listener).await;
     verify_proof(&mut new_socket, &identity().key.verifying_key()).await;
-    send_json(
-        &mut new_socket,
-        json!({"type":"auth_ok", "void_id":VOID_ID}),
-    )
-    .await;
+    finish_authentication(&mut new_socket, VOID_ID).await;
     let Some(Activity::Online(new_session)) = timeout(WAIT, changes.recv()).await.unwrap() else {
         panic!("missing replacement authenticated session");
     };
@@ -342,7 +343,7 @@ async fn reauthenticates_after_disconnect_with_backoff_and_stops_during_the_next
         assert!(disconnected_at.elapsed() >= Duration::from_secs(minimum));
         assert_status(&mut changes, ConnectionStatus::Connecting).await;
         verify_proof(&mut socket, &identity().key.verifying_key()).await;
-        send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+        finish_authentication(&mut socket, VOID_ID).await;
         assert_status(&mut changes, ConnectionStatus::Connected).await;
         disconnected_at = tokio::time::Instant::now();
         drop(socket);
@@ -400,7 +401,7 @@ async fn transient_auth_unavailability_retries_but_rejected_proof_waits_for_manu
     let mut manual = next_attempt(&listener).await;
     assert_status(&mut changes, ConnectionStatus::Connecting).await;
     verify_proof(&mut manual, &identity().key.verifying_key()).await;
-    send_json(&mut manual, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+    finish_authentication(&mut manual, VOID_ID).await;
     assert_status(&mut changes, ConnectionStatus::Connected).await;
     worker.finish();
     timeout(WAIT, expect_no_command(&mut manual)).await.unwrap();
@@ -435,7 +436,7 @@ async fn authenticates_and_keeps_the_connection_without_handling_messages() {
     let verifying_key = identity.key.verifying_key();
     let (endpoint, server) = mock_relay(move |mut socket| async move {
         verify_proof(&mut socket, &verifying_key).await;
-        send_json(&mut socket, json!({"type": "auth_ok", "void_id": VOID_ID})).await;
+        finish_authentication(&mut socket, VOID_ID).await;
         // The relay may send queued data immediately. Only the Pong should come back.
         send_json(
             &mut socket,
@@ -462,6 +463,275 @@ async fn authenticates_and_keeps_the_connection_without_handling_messages() {
     server.await.unwrap();
     assert_eq!(end, ConnectionStatus::Disconnected);
     assert_eq!(seen, vec![ConnectionStatus::Connected]);
+}
+
+#[tokio::test]
+async fn legacy_delivery_waits_for_protocol_agreement_and_retains_ack_tracking() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let (status, mut statuses) = tokio::sync::mpsc::unbounded_channel();
+    let (activity, mut activities) = tokio::sync::mpsc::unbounded_channel();
+    let (relay, worker) = Connection::spawn_with_activity(
+        endpoint,
+        |_| Ok(identity()),
+        move |value| {
+            let _ = status.send(value);
+        },
+        move |event| {
+            let _ = activity.send(event);
+        },
+    )
+    .unwrap();
+    assert!(relay.connect(VOID_ID.into()));
+    let mut socket = next_attempt(&listener).await;
+    assert_status(&mut statuses, ConnectionStatus::Connecting).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+    assert_eq!(
+        receive_json(&mut socket).await,
+        json!({"type":"protocol", "version":"1"})
+    );
+    let event_id = "12345678-1234-1234-1234-123456789abc";
+    let event = json!({
+        "type":"event", "event_id":event_id, "from_void_id":"456",
+        "payload_base64":"AA==", "created_at":expiry(-1), "expires_at":expiry(60)
+    });
+    // A version-1 queue head may arrive immediately after authentication, before
+    // the relay's protocol_ok. It must not be lost or exposed as an online session.
+    send_json(&mut socket, event.clone()).await;
+    assert!(
+        timeout(Duration::from_millis(100), statuses.recv())
+            .await
+            .is_err()
+    );
+    assert!(activities.try_recv().is_err());
+    assert!(
+        timeout(Duration::from_millis(50), socket.next())
+            .await
+            .is_err(),
+        "queued ciphertext must not be ACKed before it has been processed"
+    );
+    send_json(&mut socket, json!({"type":"protocol_ok", "version":"1"})).await;
+    assert_status(&mut statuses, ConnectionStatus::Connected).await;
+    let Some(Activity::Online(session)) = timeout(WAIT, activities.recv()).await.unwrap() else {
+        panic!("missing protocol-ready session");
+    };
+    let Some(Activity::Delivery {
+        generation,
+        sender,
+        event_id: delivered_id,
+        json,
+    }) = timeout(WAIT, activities.recv()).await.unwrap()
+    else {
+        panic!("the pre-negotiation delivery was not preserved");
+    };
+    assert_eq!(generation, session.generation);
+    assert_eq!(sender, "456");
+    assert_eq!(delivered_id, event_id);
+    assert_eq!(serde_json::from_str::<Value>(&json).unwrap(), event);
+    let ack = tokio::task::spawn_blocking(move || {
+        session.request(Request::Ack {
+            event_id: event_id.into(),
+            sender_void_id: "456".into(),
+        })
+    });
+    assert_eq!(
+        receive_json(&mut socket).await,
+        json!({"type":"ack", "event_id":event_id, "sender_void_id":"456"})
+    );
+    send_json(
+        &mut socket,
+        json!({"type":"ack_ok", "event_id":event_id, "sender_void_id":"456"}),
+    )
+    .await;
+    assert!(matches!(
+        timeout(WAIT, ack).await.unwrap().unwrap(),
+        Ok(super::Reply::Acked { .. })
+    ));
+    worker.finish();
+}
+
+#[tokio::test]
+async fn higher_version_delivery_is_neither_processed_nor_acknowledged_at_version_one() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let (activity, mut activities) = tokio::sync::mpsc::unbounded_channel();
+    let (relay, worker) = Connection::spawn_with_activity(
+        endpoint,
+        |_| Ok(identity()),
+        |_| {},
+        move |event| {
+            let _ = activity.send(event);
+        },
+    )
+    .unwrap();
+    assert!(relay.connect(VOID_ID.into()));
+    let mut socket = next_attempt(&listener).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    finish_authentication(&mut socket, VOID_ID).await;
+    let Some(Activity::Online(session)) = timeout(WAIT, activities.recv()).await.unwrap() else {
+        panic!("missing protocol-ready session");
+    };
+    send_json(
+        &mut socket,
+        json!({
+            "type":"event_versioned", "min_protocol_version":"2",
+            "event_id":"12345678-1234-1234-1234-123456789abc", "from_void_id":"456",
+            "payload_base64":"AA==", "created_at":expiry(-1), "expires_at":expiry(60)
+        }),
+    )
+    .await;
+    assert!(matches!(
+        timeout(WAIT, activities.recv()).await.unwrap(),
+        Some(Activity::Offline(generation)) if generation == session.generation
+    ));
+    timeout(WAIT, expect_no_command(&mut socket)).await.unwrap();
+    assert!(activities.try_recv().is_err());
+    worker.finish();
+}
+
+#[tokio::test]
+async fn rejects_mismatched_or_malformed_protocol_agreement_without_connected_status() {
+    for frame in [
+        json!({"type":"protocol_ok", "version":"2"}),
+        json!({"type":"protocol_ok", "version":"01"}),
+        json!({"type":"protocol_ok", "version":1}),
+        json!({"type":"protocol_ok", "version":"1", "extra":true}),
+    ] {
+        let (endpoint, server) = mock_relay(move |mut socket| async move {
+            verify_proof(&mut socket, &identity().key.verifying_key()).await;
+            send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+            assert_eq!(
+                receive_json(&mut socket).await,
+                json!({"type":"protocol", "version":"1"})
+            );
+            send_json(&mut socket, frame).await;
+            expect_no_command(&mut socket).await;
+        })
+        .await;
+        let (end, seen) = connect(&endpoint, &identity(), Duration::from_secs(2)).await;
+        server.await.unwrap();
+        assert_eq!(end, ConnectionStatus::Disconnected);
+        assert!(seen.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rejects_unsolicited_protocol_agreement_after_negotiation() {
+    let (endpoint, server) = mock_relay(|mut socket| async move {
+        verify_proof(&mut socket, &identity().key.verifying_key()).await;
+        finish_authentication(&mut socket, VOID_ID).await;
+        send_json(&mut socket, json!({"type":"protocol_ok", "version":"1"})).await;
+        expect_no_command(&mut socket).await;
+    })
+    .await;
+    let (end, seen) = connect(&endpoint, &identity(), Duration::from_secs(2)).await;
+    server.await.unwrap();
+    assert_eq!(end, ConnectionStatus::Disconnected);
+    assert_eq!(seen, vec![ConnectionStatus::Connected]);
+}
+
+#[tokio::test]
+async fn prepared_versioned_send_preserves_the_accepted_reply_contract() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let (activity, mut activities) = tokio::sync::mpsc::unbounded_channel();
+    let (relay, worker) = Connection::spawn_with_activity(
+        endpoint,
+        |_| Ok(identity()),
+        |_| {},
+        move |event| {
+            let _ = activity.send(event);
+        },
+    )
+    .unwrap();
+    assert!(relay.connect(VOID_ID.into()));
+    let mut socket = next_attempt(&listener).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    finish_authentication(&mut socket, VOID_ID).await;
+    let Some(Activity::Online(session)) = timeout(WAIT, activities.recv()).await.unwrap() else {
+        panic!("missing protocol-ready session");
+    };
+    let event_id = "12345678-1234-1234-1234-123456789abc";
+    let result = tokio::task::spawn_blocking(move || {
+        session.request(Request::SendVersioned {
+            event_id: event_id.into(),
+            to_void_id: "456".into(),
+            payload_base64: "AA==".into(),
+            min_protocol_version: super::ApplicationProtocolVersion::V1,
+        })
+    });
+    assert_eq!(
+        receive_json(&mut socket).await,
+        json!({
+            "type":"send_versioned", "event_id":event_id, "to_void_id":"456",
+            "payload_base64":"AA==", "min_protocol_version":"1"
+        })
+    );
+    send_json(
+        &mut socket,
+        json!({"type":"accepted", "event_id":event_id,
+        "created_at":expiry(0), "expires_at":expiry(60)}),
+    )
+    .await;
+    assert!(matches!(
+        timeout(WAIT, result).await.unwrap().unwrap(),
+        Ok(super::Reply::Accepted { event_id: accepted_id }) if accepted_id == event_id
+    ));
+    worker.finish();
+}
+
+#[tokio::test]
+async fn protocol_negotiation_times_out_without_reporting_connected() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let client = tokio::spawn(async move {
+        let statuses = std::sync::Mutex::new(Vec::new());
+        let end = timeout(
+            Duration::from_secs(12),
+            serve_once(
+                &endpoint,
+                AUDIENCE,
+                &identity(),
+                Duration::from_secs(2),
+                |value| statuses.lock().unwrap().push(value),
+            ),
+        )
+        .await
+        .expect("protocol negotiation exceeded its response deadline");
+        (end, statuses.into_inner().unwrap())
+    });
+    let mut socket = next_attempt(&listener).await;
+    verify_proof(&mut socket, &identity().key.verifying_key()).await;
+    send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+    assert_eq!(
+        receive_json(&mut socket).await,
+        json!({"type":"protocol", "version":"1"})
+    );
+    let waiting_since = tokio::time::Instant::now();
+    let (end, seen) = client.await.unwrap();
+    assert!(waiting_since.elapsed() >= Duration::from_secs(7));
+    assert_eq!(end, ConnectionStatus::Disconnected);
+    assert!(seen.is_empty());
+    timeout(WAIT, expect_no_command(&mut socket)).await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnect_during_protocol_negotiation_does_not_report_connected() {
+    let (endpoint, server) = mock_relay(|mut socket| async move {
+        verify_proof(&mut socket, &identity().key.verifying_key()).await;
+        send_json(&mut socket, json!({"type":"auth_ok", "void_id":VOID_ID})).await;
+        assert_eq!(
+            receive_json(&mut socket).await,
+            json!({"type":"protocol", "version":"1"})
+        );
+        socket.close(None).await.unwrap();
+    })
+    .await;
+    let (end, seen) = connect(&endpoint, &identity(), Duration::from_secs(2)).await;
+    server.await.unwrap();
+    assert_eq!(end, ConnectionStatus::Disconnected);
+    assert!(seen.is_empty());
 }
 
 #[tokio::test]

@@ -626,6 +626,75 @@ fn allow_event_commit(db: &Database) {
 }
 
 #[test]
+fn unsupported_transport_version_cannot_consume_signal_keys_or_bypass_duplicate_gate() {
+    let alice = TestAccount::new(ALICE, 113);
+    let bob = TestAccount::new(BOB, 114);
+    let peer_a = alice.trusted();
+    let peer_b = bob.trusted();
+    let mut a = alice.open();
+    let mut b = bob.open();
+    a.establish_signal_session(&peer_b, BOB, &encode(&claim(&mut b, false)), at())
+        .unwrap();
+    let conv = a.create_conversation(BOB, NOW_MS).unwrap();
+    let id = event_id(1);
+    let payload = a
+        .encrypt_signal_message(&peer_b, conv, &id, "Existing message format", NOW_MS)
+        .unwrap();
+    let event = relay_event(ALICE, &id, &payload);
+    let mut versioned: Value = serde_json::from_slice(&event).unwrap();
+    versioned["type"] = json!("event_versioned");
+    versioned["min_protocol_version"] = json!("2");
+    let versioned = serde_json::to_vec(&versioned).unwrap();
+
+    assert!(matches!(
+        b.decrypt_signal_event(&peer_a, &versioned, at()),
+        Err(Error::SignalEnvelope)
+    ));
+    assert!(session(&b, ALICE).is_none());
+    assert!(has_prekey(&b, EC_ID));
+    assert!(has_prekey(&b, KYBER_ID));
+    assert_eq!(
+        b.connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM signal_peer_bindings),
+                    (SELECT count(*) FROM inbox), (SELECT count(*) FROM messages)",
+                [],
+                |row| Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?
+                )),
+            )
+            .unwrap(),
+        (0, 0, 0)
+    );
+
+    assert_eq!(
+        b.decrypt_signal_event(&peer_a, &event, at()).unwrap(),
+        IncomingOutcome::Stored
+    );
+    let persisted_session = session(&b, ALICE).unwrap();
+    assert!(matches!(
+        b.decrypt_signal_event(&peer_a, &versioned, at()),
+        Err(Error::SignalEnvelope)
+    ));
+    assert!(session(&b, ALICE).unwrap() == persisted_session);
+    assert_eq!(
+        b.decrypt_signal_event(&peer_a, &event, at()).unwrap(),
+        IncomingOutcome::AlreadyStored
+    );
+    assert!(session(&b, ALICE).unwrap() == persisted_session);
+    assert_received(&b, ALICE, &id, "Existing message format", NOW_MS);
+    assert_eq!(
+        b.connection
+            .query_row("SELECT count(*) FROM messages", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn commit_failures_and_duplicate_events_do_not_advance_signal_state() {
     let alice = TestAccount::new(ALICE, 76);
     let bob = TestAccount::new(BOB, 77);

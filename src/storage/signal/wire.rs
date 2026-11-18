@@ -4,7 +4,10 @@
 //! Base64-encoded ciphertext serialized by libsignal.
 
 use super::{DEVICE_ID, Error, Result};
-use crate::account::{timestamp_ms, valid_void_id};
+use crate::{
+    account::{timestamp_ms, valid_void_id},
+    relay::ApplicationProtocolVersion,
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use libsignal_protocol::{CiphertextMessage, CiphertextMessageType};
 use serde::{Deserialize, Serialize};
@@ -55,6 +58,7 @@ impl Routing<'_> {
 }
 
 pub(super) struct ParsedEvent {
+    pub(super) min_protocol_version: ApplicationProtocolVersion,
     pub(super) event_id: String,
     pub(super) sender: String,
     pub(super) payload_base64: String,
@@ -85,6 +89,18 @@ struct RelayEvent {
     payload_base64: String,
     created_at: String,
     expires_at: String,
+    #[serde(default, deserialize_with = "present_protocol_version")]
+    min_protocol_version: Option<ApplicationProtocolVersion>,
+}
+
+// An absent legacy field is valid; an explicitly present null is not a version.
+fn present_protocol_version<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ApplicationProtocolVersion>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ApplicationProtocolVersion::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -180,6 +196,11 @@ pub(super) fn decode_event(event_json: &[u8], expected_recipient: &str) -> Resul
     }
     let event: RelayEvent =
         serde_json::from_slice(event_json).map_err(|_| Error::SignalEnvelope)?;
+    let min_protocol_version = match (event.kind.as_str(), event.min_protocol_version) {
+        ("event", None) => ApplicationProtocolVersion::V1,
+        ("event_versioned", Some(version)) if version > ApplicationProtocolVersion::V1 => version,
+        _ => return Err(Error::SignalEnvelope),
+    };
     let routing = Routing {
         event_id: &event.event_id,
         sender: &event.from_void_id,
@@ -187,7 +208,7 @@ pub(super) fn decode_event(event_json: &[u8], expected_recipient: &str) -> Resul
     };
     let created_at_ms = timestamp_ms(&event.created_at).ok_or(Error::SignalEnvelope)?;
     let expires_at_ms = timestamp_ms(&event.expires_at).ok_or(Error::SignalEnvelope)?;
-    if event.kind != "event" || !routing.valid() || expires_at_ms <= created_at_ms {
+    if !routing.valid() || expires_at_ms <= created_at_ms {
         return Err(Error::SignalEnvelope);
     }
 
@@ -219,6 +240,7 @@ pub(super) fn decode_event(event_json: &[u8], expected_recipient: &str) -> Resul
     };
     let ciphertext = decode_base64(&payload.ciphertext_base64, MAX_PAYLOAD_BYTES)?;
     Ok(ParsedEvent {
+        min_protocol_version,
         event_id: event.event_id,
         sender: event.from_void_id,
         payload_base64: event.payload_base64,
@@ -456,6 +478,7 @@ mod tests {
         };
 
         let parsed = decode_event(&event(&payload), ROUTING.recipient).unwrap();
+        assert_eq!(parsed.min_protocol_version, ApplicationProtocolVersion::V1);
         assert_eq!(parsed.event_id, ROUTING.event_id);
         assert_eq!(parsed.sender, ROUTING.sender);
         assert_eq!(parsed.payload_base64, STANDARD.encode(payload.to_string()));
@@ -463,6 +486,49 @@ mod tests {
         assert_eq!(parsed.binding.identity_key, identity_key);
         assert_eq!(parsed.ciphertext, [255]);
         assert!(decode_event(&event(&payload), "42").is_err());
+
+        let legacy: serde_json::Value = serde_json::from_slice(&event(&payload)).unwrap();
+        let mut versioned = legacy.clone();
+        versioned["type"] = json!("event_versioned");
+        versioned["min_protocol_version"] = json!("2");
+        let parsed =
+            decode_event(&serde_json::to_vec(&versioned).unwrap(), ROUTING.recipient).unwrap();
+        assert_eq!(
+            parsed.min_protocol_version,
+            ApplicationProtocolVersion::parse("2").unwrap()
+        );
+        assert_eq!(parsed.payload_base64, STANDARD.encode(payload.to_string()));
+        for value in [
+            json!(null),
+            json!(1),
+            json!("1"),
+            json!("0"),
+            json!("02"),
+            json!("+2"),
+            json!(" 2"),
+            json!("2147483648"),
+        ] {
+            versioned["min_protocol_version"] = value;
+            assert!(
+                decode_event(&serde_json::to_vec(&versioned).unwrap(), ROUTING.recipient).is_err()
+            );
+        }
+        versioned
+            .as_object_mut()
+            .unwrap()
+            .remove("min_protocol_version");
+        assert!(decode_event(&serde_json::to_vec(&versioned).unwrap(), ROUTING.recipient).is_err());
+        for value in [json!(null), json!("1"), json!("2")] {
+            let mut malformed_legacy = legacy.clone();
+            malformed_legacy["min_protocol_version"] = value;
+            assert!(
+                decode_event(
+                    &serde_json::to_vec(&malformed_legacy).unwrap(),
+                    ROUTING.recipient
+                )
+                .is_err()
+            );
+        }
 
         payload["device_id"] = 2.into();
         assert!(decode_event(&event(&payload), ROUTING.recipient).is_err());

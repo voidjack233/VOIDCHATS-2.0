@@ -1554,7 +1554,7 @@ pub(crate) mod tests {
             for state in ["active", "deleted"] {
                 let mut socket = next_attempt(&listener).await;
                 verify_account_proof(&mut socket, &public, "123").await;
-                send_json(&mut socket, json!({"type":"auth_ok", "void_id":"123"})).await;
+                crate::relay::tests::finish_authentication(&mut socket, "123").await;
                 for peer in ["234", "456"] {
                     let request = receive_json(&mut socket).await;
                     assert_eq!(
@@ -1849,7 +1849,7 @@ pub(crate) mod tests {
                             let listener = TcpListener::from_std(listener).unwrap();
                             let mut first = next_attempt(&listener).await;
                             verify_account_proof(&mut first, &public_key, "123").await;
-                            send_json(&mut first, json!({"type":"auth_ok", "void_id":"123"})).await;
+                            crate::relay::tests::finish_authentication(&mut first, "123").await;
                             let sent = receive_json(&mut first).await;
                             assert_eq!(sent["type"], "prekeys_publish");
                             send_json(
@@ -1863,8 +1863,7 @@ pub(crate) mod tests {
 
                             let mut second = next_attempt(&listener).await;
                             verify_account_proof(&mut second, &public_key, "123").await;
-                            send_json(&mut second, json!({"type":"auth_ok", "void_id":"123"}))
-                                .await;
+                            crate::relay::tests::finish_authentication(&mut second, "123").await;
                             assert!(receive_json(&mut second).await == sent);
                             second_attempt.store(true, Ordering::Release);
                             saw_reconnect.notified().await;
