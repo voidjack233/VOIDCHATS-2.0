@@ -117,7 +117,8 @@ func run() error {
 		return errors.New("invalid account deletion configuration")
 	}
 	sockets, err := relay.New(authentication, relay.Options{
-		AuthTimeout: cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
+		MinProtocolVersion: cfg.MinProtocolVersion,
+		AuthTimeout:        cfg.WSAuthTimeout, MaxConnections: cfg.WSMaxConnections,
 		QueueSize: cfg.WSQueueSize, MaxPayloadBytes: cfg.WSMaxPayloadBytes,
 		MaxFrameBytes: int64(((cfg.WSMaxPayloadBytes + 2) / 3 * 4) + 2048), Queue: queued, Prekeys: publicPrekeys, Accounts: lifecycle,
 	})

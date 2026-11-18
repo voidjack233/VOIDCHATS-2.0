@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ func TestLiteralEnvAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RateBurst != 8 || c.ListenAddr != "127.0.0.1:8080" {
+	if c.MinProtocolVersion != 1 || c.RateBurst != 8 || c.ListenAddr != "127.0.0.1:8080" {
 		t.Fatal("configuration defaults or environment precedence mismatch")
 	}
 	if !strings.Contains(c.DatabaseURL, "app:") {
@@ -149,5 +150,25 @@ func TestRelayRequiresPrivateListenerAndValidAudience(t *testing.T) {
 				t.Fatal("accepted invalid audience or leaked it")
 			}
 		})
+	}
+}
+
+func TestMinimumProtocolVersion(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://synthetic@localhost/void_test_config")
+	// Load never connects; the environment file is not read.
+	for _, value := range []string{"0", "-1", "2147483648", "secret-invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("VOID_MIN_PROTOCOL_VERSION", value)
+			if _, err := Load(""); err == nil || strings.Contains(err.Error(), value) {
+				t.Fatalf("unsafe or missing validation: %v", err)
+			}
+		})
+	}
+	for _, value := range []string{"1", "2", "2147483647"} {
+		t.Setenv("VOID_MIN_PROTOCOL_VERSION", value)
+		cfg, err := Load("")
+		if err != nil || fmt.Sprint(cfg.MinProtocolVersion) != value {
+			t.Fatalf("minimum %s: %v", value, err)
+		}
 	}
 }

@@ -32,19 +32,20 @@ var errStopped = errors.New("relay session stopped")
 // Options uses safe defaults for zero values. Capacity and duration overrides
 // permit smaller deployments and deterministic tests; payloads remain <=1 MiB.
 type Options struct {
-	MaxConnections  int
-	QueueSize       int
-	MaxPayloadBytes int
-	MaxFrameBytes   int64
-	AuthTimeout     time.Duration
-	PingInterval    time.Duration
-	PongTimeout     time.Duration
-	WriteTimeout    time.Duration
-	ForwardTimeout  time.Duration
-	Logger          *slog.Logger
-	Queue           *queue.Service
-	Prekeys         *prekeys.Service
-	Accounts        *account.DeletionService
+	MinProtocolVersion int
+	MaxConnections     int
+	QueueSize          int
+	MaxPayloadBytes    int
+	MaxFrameBytes      int64
+	AuthTimeout        time.Duration
+	PingInterval       time.Duration
+	PongTimeout        time.Duration
+	WriteTimeout       time.Duration
+	ForwardTimeout     time.Duration
+	Logger             *slog.Logger
+	Queue              *queue.Service
+	Prekeys            *prekeys.Service
+	Accounts           *account.DeletionService
 }
 
 // Server is an HTTP handler for the WebSocket endpoint. Close must be called
@@ -73,17 +74,18 @@ type session struct {
 	cancel context.CancelFunc
 	out    chan outbound
 	// conn is assigned after admission; shutdown may happen during the upgrade.
-	connMu          sync.Mutex
-	conn            socket
-	voidID          string // Set once at activation before publishing in the registry.
-	deliveryMu      sync.Mutex
-	protocolVersion int // Guarded by deliveryMu; connection-local, defaults to 1.
-	inFlightSender  string
-	inFlightID      string
-	inFlightExpiry  time.Time
-	wake            chan struct{}
-	queuedBytes     atomic.Int64
-	deleting        atomic.Bool
+	connMu            sync.Mutex
+	conn              socket
+	voidID            string // Set once at activation before publishing in the registry.
+	deliveryMu        sync.Mutex
+	protocolConfirmed atomic.Bool
+	protocolVersion   int // Guarded by deliveryMu; connection-local, defaults to 1.
+	inFlightSender    string
+	inFlightID        string
+	inFlightExpiry    time.Time
+	wake              chan struct{}
+	queuedBytes       atomic.Int64
+	deleting          atomic.Bool
 }
 
 // The transport contract also permits deterministic slow-write tests without
@@ -107,6 +109,12 @@ type outbound struct {
 func New(authenticator *auth.Service, opts Options) (*Server, error) {
 	if authenticator == nil || opts.Queue == nil {
 		return nil, errors.New("authentication and delivery queue services are required")
+	}
+	if opts.MinProtocolVersion == 0 {
+		opts.MinProtocolVersion = 1
+	}
+	if !queue.ValidProtocolVersion(opts.MinProtocolVersion) {
+		return nil, errors.New("invalid minimum protocol version")
 	}
 	if opts.MaxConnections == 0 {
 		opts.MaxConnections = 256
@@ -408,7 +416,7 @@ func (client *session) forward(fields map[string]string) string {
 		return "failed"
 	}
 	recipient := s.active[fields["to_void_id"]]
-	if recipient == nil || recipient.ctx.Err() != nil {
+	if recipient == nil || recipient.ctx.Err() != nil || !recipient.messagingAllowed() {
 		s.mu.Unlock()
 		return "unavailable"
 	}

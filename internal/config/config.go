@@ -13,6 +13,7 @@ import (
 )
 
 type Config struct {
+	MinProtocolVersion    int
 	DatabaseURL           string
 	ListenAddr            string
 	WorkerID              uint16
@@ -134,6 +135,10 @@ func Load(path string) (Config, error) {
 			return 0, fmt.Errorf("invalid %s", key)
 		}
 		return n, nil
+	}
+	c.MinProtocolVersion, err = integer("VOID_MIN_PROTOCOL_VERSION", 1, 1, 1<<31-1)
+	if err != nil {
+		return Config{}, err
 	}
 	worker, err := integer("VOID_WORKER_ID", 0, 0, 1023)
 	if err != nil {

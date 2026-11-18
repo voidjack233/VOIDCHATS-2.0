@@ -154,3 +154,16 @@ public payloads, fixed 24-hour claim expiry and proposed schema are documented i
 uses the same `send`/`event`/`ack` contract above. The recipient may be offline
 when its previously published public bundle is claimed. No existing frame or
 account-authentication transcript changes.
+
+## Mandatory application protocol minimum (prepared)
+
+`VOID_MIN_PROTOCOL_VERSION` defaults to `1`. With a higher minimum, clients must
+send `protocol` after `auth_ok` and receive `protocol_ok` before using messaging.
+Pending and online events cannot reach an unconfirmed connection, including
+version 1 ciphertext. A lower advertisement or messaging command without
+negotiation returns `{"type":"error","code":"update_required","min_protocol_version":"2"}`
+when writable, followed by disconnect. All messaging commands, ACKs and prekey
+operations are gated; the separate account-deletion exchange remains available.
+An idle unconfirmed connection receives no messages. Reconnects negotiate again.
+See [release activation and limits](VERSIONED_DELIVERY.md#mandatory-minimum-protocol-prepared-not-deployed).
+This enforcement addition is not deployed; the version 2 minimum is not active.

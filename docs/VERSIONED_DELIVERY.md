@@ -67,3 +67,41 @@ Backend verification on 2026-11-18 passed `go test ./...`, `go test -race ./...`
 A separate full `go test ./...` run passed against a newly initialized standalone PostgreSQL 18 cluster with a fresh data directory, unique loopback port and socket, and no inherited database connection settings. The runner verified the actual migration against existing live and expired synthetic ciphertext before running the suite. It used `--existing-login`, so `TestPostgresRuntimePrivileges` was skipped because the restricted-role fixture was intentionally absent; all other PostgreSQL integration tests ran. The disposable database and standalone cluster were removed afterward. No production database, account or service was accessed.
 
 These are backend transport/storage checks using synthetic opaque payloads. They do not validate native libsignal decryption, reply/reaction/delete application semantics, or client feature authorization.
+
+## Mandatory minimum protocol (prepared, not deployed)
+
+The backend also supports a server-wide minimum through `VOID_MIN_PROTOCOL_VERSION`.
+It defaults to `1`; accepted values are positive integers up to `2147483647`.
+The setting is read at startup and remains fixed for that process. This addition
+has not been deployed and does not activate a version 2 minimum.
+
+At minimum 1, existing clients can authenticate and use messaging without a new
+command. At a higher minimum, authentication retains its existing frames, but
+messaging access stays blocked until a successful `protocol` advertisement meets
+the configured minimum. The server writes `protocol_ok` before enabling queued
+or online delivery. An authenticated client advertising a lower version, or
+issuing a messaging command before negotiating, receives this response where
+the socket can still be written, then is disconnected:
+
+```json
+{"type":"error","code":"update_required","min_protocol_version":"2"}
+```
+
+The gate covers queued sends and receives, online relay sends and receives,
+ACKs, lookups, account-status queries, and prekey publication/claims. An idle
+client that never advertises remains blocked; there is no negotiation timeout.
+Account deletion remains available through its existing authorization exchange.
+Queued ciphertext stays stored until normal ACK or expiration. Reconnects must
+negotiate again even if the previous socket was compatible. The existing
+per-event required-version check and queue ordering remain in effect.
+
+For a coordinated release, first ship native support for post-authentication
+advertisement and `update_required` handling. Once that update is available,
+separately authorize deployment of this backend and setting
+`VOID_MIN_PROTOCOL_VERSION=2` in the deployment environment. Replace every old
+backend process, including existing authenticated sockets, so all connections
+must satisfy the same minimum. This is a startup setting, not a live reload.
+Check legacy rejection, updated-client delivery and queued recovery in release
+validation. No additional SQL migration or device-version storage is required.
+The server trusts the client's advertised protocol; this is compatibility
+enforcement, not verification of the installed application binary.

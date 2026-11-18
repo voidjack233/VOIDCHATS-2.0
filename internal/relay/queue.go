@@ -63,6 +63,10 @@ func (client *session) handleCommand(fields map[string]string) bool {
 	if fields["type"] == "account_delete_begin" {
 		return client.deleteAccount(fields)
 	}
+	if fields["type"] != "protocol" && !client.messagingAllowed() {
+		client.updateRequired(client.ctx)
+		return false
+	}
 	check, stop := context.WithTimeout(client.ctx, client.server.opts.ForwardTimeout)
 	err := client.server.withActive(check, []string{client.voidID}, func() error { return nil })
 	stop()
@@ -97,6 +101,10 @@ func (client *session) handleCommand(fields map[string]string) bool {
 		if !ok {
 			break
 		}
+		if version < s.opts.MinProtocolVersion {
+			client.updateRequired(ctx)
+			return false
+		}
 		// Serialize negotiation with delivery so the confirmation precedes any
 		// event that requires the new version. Downgrading could invalidate an
 		// in-flight frame; reconnect instead, starting at version 1.
@@ -109,6 +117,7 @@ func (client *session) handleCommand(fields map[string]string) bool {
 			return false
 		}
 		client.protocolVersion = version
+		client.protocolConfirmed.Store(true)
 		s.wakeRecipient(client.voidID)
 		return true
 	case "account_status":
@@ -187,6 +196,16 @@ func (client *session) handleCommand(fields map[string]string) bool {
 	return false
 }
 
+// The minimum is immutable for a server lifetime. Confirmation is connection-local
+// and only becomes true after protocol_ok is written; it never decreases.
+func (client *session) messagingAllowed() bool {
+	return client.server.opts.MinProtocolVersion <= 1 || client.protocolConfirmed.Load()
+}
+
+func (client *session) updateRequired(ctx context.Context) {
+	_ = client.transmit(ctx, map[string]string{"type": "error", "code": "update_required", "min_protocol_version": strconv.Itoa(client.server.opts.MinProtocolVersion)})
+}
+
 func parseProtocolVersion(value string) (int, bool) {
 	version, err := strconv.ParseInt(value, 10, 32)
 	if err != nil || !queue.ValidProtocolVersion(int(version)) || strconv.FormatInt(version, 10) != value {
@@ -231,7 +250,7 @@ func (client *session) deliverOne() bool {
 	s := client.server
 	client.deliveryMu.Lock()
 	defer client.deliveryMu.Unlock()
-	if client.deleting.Load() {
+	if client.deleting.Load() || !client.messagingAllowed() {
 		return true
 	}
 	select {
