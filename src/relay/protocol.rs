@@ -19,6 +19,7 @@ pub(crate) struct ApplicationProtocolVersion(i32);
 
 impl ApplicationProtocolVersion {
     pub(crate) const V1: Self = Self(1);
+    #[cfg(test)]
     pub(crate) const V2: Self = Self(2);
 
     pub(crate) fn parse(value: &str) -> Option<Self> {
@@ -43,12 +44,10 @@ impl From<ApplicationProtocolVersion> for String {
 
 // Raise only when every permitted encrypted event can be processed or durably
 // deferred. Transport frame support alone does not make a version safe.
+/// Initial native application contract, including replies, reactions and deletion.
+/// Signal content/envelope codec revisions are independent of relay negotiation.
 pub(crate) const SUPPORTED_APPLICATION_PROTOCOL: ApplicationProtocolVersion =
-    if cfg!(feature = "coordinated-v2-release") {
-        ApplicationProtocolVersion::V2
-    } else {
-        ApplicationProtocolVersion::V1
-    };
+    ApplicationProtocolVersion::V1;
 
 pub(super) enum ServerFrame {
     Challenge(Challenge),
@@ -98,7 +97,7 @@ pub(crate) enum Request {
         to_void_id: String,
         payload_base64: String,
     },
-    // Prepared transport only; ordinary messages and receipts still use Send.
+    // Future incompatible contracts only; all initial V1 content uses Send.
     #[allow(dead_code)]
     SendVersioned {
         event_id: String,

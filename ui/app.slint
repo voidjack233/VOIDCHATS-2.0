@@ -261,7 +261,7 @@ export component AppWindow inherits Window {
     in-out property <string> stored-draft;
     pure callback has-message-content(string) -> bool;
     private property <bool> can-send-draft:
-        !root.send-busy && !root.action-busy && !root.conversation-loading && root.has-message-content(root.stored-draft) && (root.reply-event-id == "" || root.remote-actions-supported);
+        !root.send-busy && !root.action-busy && !root.conversation-loading && root.has-message-content(root.stored-draft);
     in property <string> draft-status;
     in property <bool> draft-save-failed;
     in property <bool> unsaved-draft-failure;

@@ -12,7 +12,7 @@ Missing, null, numeric, duplicate, unknown, and noncanonical fields are rejected
 The minimum field is allowed only with update_required. A minimum no higher than
 the current advertisement is contradictory and does not activate the update UI.
 
-The client still advertises application protocol V1. Negotiation completes
+The complete initial client advertises application protocol V1. Negotiation completes
 before an online session is exposed, so an incompatible connection cannot
 publish prekeys, send queued ciphertext, or ACK events. A valid update response
 ends the worker, closes its socket/command queues, and disables manual and
@@ -33,9 +33,8 @@ ordinary network recovery, a blocking UI latch, and preservation of history,
 drafts, enrollment, and the protected database key. A separate native rendering
 fixture captures the screen at 850x560 and 1600x900 without accounts or network.
 
-No updater or download URL is provided. This verifies the documented response
-with mock relays, not a production deployment or live server minimum. At the
-pinned backend commit the mandatory minimum is documented as prepared, not
-activated. Actual update distribution and server activation remain separate
-release work; this change does not infer peer V2 capability or enable feature
-sending.
+No updater or download URL is provided. Future update distribution and minimum
+activation remain separate release decisions. The current complete
+[V1 messaging baseline](protocol-v1.md) works against minimum V1 unchanged.
+Loopback integration verifies minimum-V1 success and future-minimum rejection
+against unchanged Go `9eb1319`; production is not contacted or modified.

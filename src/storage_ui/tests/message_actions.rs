@@ -35,23 +35,7 @@ impl NativeFixture {
         let root = path.to_owned();
         let storage = bind_fixture(&ui, move |_| (root.clone(), key.clone())).unwrap();
         let activity = storage.relay_activity();
-        #[cfg(not(feature = "coordinated-v2-release"))]
-        let (connection, relay) = crate::relay::Connection::spawn_with_test_protocol(
-            endpoint.into(),
-            audience.into(),
-            crate::relay::ApplicationProtocolVersion::V2,
-            move |_| {
-                Ok(account::RegisteredIdentity {
-                    void_id: id.into(),
-                    key: ed25519_dalek::SigningKey::from_bytes(&[seed; 32]),
-                })
-            },
-            crate::report_relay_status(&ui),
-            activity,
-        )
-        .unwrap();
-        #[cfg(feature = "coordinated-v2-release")]
-        let (connection, relay) = crate::relay::Connection::spawn_for_release_test(
+        let (connection, relay) = crate::relay::Connection::spawn_for_baseline_test(
             endpoint.into(),
             audience.into(),
             move |_| {
@@ -97,10 +81,7 @@ fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
         backend == "2faffd27f12d1d02ec28e4be298610d4fee50856"
             || backend == "9eb131933a3c9e95cc8b5dba1bebae6400691419"
     );
-    if cfg!(feature = "coordinated-v2-release") {
-        assert_eq!(backend, "9eb131933a3c9e95cc8b5dba1bebae6400691419");
-        assert_eq!(std::env::var("VOID_TEST_MIN_PROTOCOL").as_deref(), Ok("2"));
-    }
+    assert_eq!(std::env::var("VOID_TEST_MIN_PROTOCOL").as_deref(), Ok("1"));
     let endpoint = std::env::var("VOID_TEST_RELAY_URL").unwrap();
     let audience = std::env::var("VOID_TEST_RELAY_AUDIENCE").unwrap();
     i_slint_backend_testing::init_integration_test_with_system_time();
@@ -134,7 +115,7 @@ fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
     timer.start(TimerMode::Repeated, Duration::from_millis(40), move || {
         assert!(
             started.elapsed() < Duration::from_secs(90),
-            "native V2 fixture timed out in phase {}: A={}, B={}",
+            "native V1 fixture timed out in phase {}: A={}, B={}",
             observed.get(),
             aa.borrow().ui.get_message_action_error(),
             bb.borrow().ui.get_message_action_error()
@@ -212,7 +193,7 @@ fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
                 ui.set_stored_draft("Draft survives restart".into());
                 ui.invoke_save_stored_draft(ui.get_stored_draft());
                 // Close is queued behind this local intent, before its 600 ms
-                // dispatch turn. The new worker must recover it on V2 startup.
+                // dispatch turn. The new worker must recover it on V1 startup.
                 let (author, event) = target.clone().unwrap();
                 ui.invoke_toggle_reaction(author, event, "🎉".into());
                 aa.borrow_mut().stop();
@@ -302,9 +283,109 @@ fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
 }
 
 #[test]
-fn v1_blocks_remote_actions_while_local_delete_and_reply_cancellation_work() {
+fn offline_restored_reply_queues_like_text_without_losing_its_reference() {
     if !in_test_process(
-        "storage_ui::tests::message_actions::v1_blocks_remote_actions_while_local_delete_and_reply_cancellation_work",
+        "storage_ui::tests::message_actions::offline_restored_reply_queues_like_text_without_losing_its_reference",
+    ) {
+        return;
+    }
+    let root = TestDir::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
+    let mut db = Database::open(
+        &root.0,
+        Owner {
+            void_id: "41",
+            public_key: key.verifying_key().as_bytes(),
+        },
+    )
+    .unwrap();
+    let chat = db.create_conversation("123", 100).unwrap();
+    let target = MessageReference {
+        author_void_id: "123".into(),
+        event_id: "00000000-0000-4000-8000-000000000001".into(),
+    };
+    db.commit_incoming("123", &target.event_id, &[8; 32], |_| {
+        Ok(Message {
+            id: "original".into(),
+            conversation_id: chat,
+            direction: Direction::Incoming,
+            body: "Original".into(),
+            created_at: 110,
+            delivery_state: DeliveryState::Received,
+        })
+    })
+    .unwrap();
+    db.save_reply_draft(chat, "An offline reply", Some(&target))
+        .unwrap();
+    db.close().unwrap();
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let ui = AppWindow::new().unwrap();
+    ui.set_account_void_id("41".into());
+    ui.set_setup_page(0);
+    let path = root.0.clone();
+    let saved_key = key.clone();
+    let worker = bind_fixture(&ui, move |_| (path.clone(), saved_key.clone())).unwrap();
+    worker.opener()(&ui);
+    let weak = ui.as_weak();
+    let phase = std::rc::Rc::new(Cell::new(0));
+    let seen = phase.clone();
+    let started = Instant::now();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(15), move || {
+        let ui = weak.upgrade().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        match seen.get() {
+            0 if ui.get_storage_ready() => {
+                ui.invoke_select_stored_conversation(chat.to_string().into());
+                seen.set(1);
+            }
+            1 if !ui.get_conversation_loading() && !ui.get_reply_event_id().is_empty() => {
+                assert!(!ui.get_remote_actions_supported());
+                assert_eq!(ui.get_stored_draft(), "An offline reply");
+                ui.invoke_send_message();
+                assert!(ui.get_send_busy());
+                seen.set(2);
+            }
+            2 if !ui.get_send_busy() && ui.get_stored_messages().row_count() == 2 => {
+                assert!(ui.get_stored_draft().is_empty());
+                assert!(ui.get_reply_event_id().is_empty());
+                assert_eq!(
+                    ui.get_stored_messages().row_data(1).unwrap().quote,
+                    "Original"
+                );
+                seen.set(3);
+                slint::quit_event_loop().unwrap();
+            }
+            _ => (),
+        }
+    });
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    worker.finish();
+    assert_eq!(phase.get(), 3);
+    let db = Database::open(
+        &root.0,
+        Owner {
+            void_id: "41",
+            public_key: key.verifying_key().as_bytes(),
+        },
+    )
+    .unwrap();
+    let rows = db.timeline_before(chat, None, 120).unwrap();
+    let id = &rows[1].reference.as_ref().unwrap().event_id;
+    assert_eq!(db.outgoing_reply(id).unwrap(), Some(target));
+    assert_eq!(db.outgoing_operation(id).unwrap().state, "failed");
+    assert!(
+        db.committed_outgoing(id).unwrap().is_none(),
+        "offline submission must not advance Signal"
+    );
+    assert!(db.reply_draft(chat).unwrap().is_none());
+}
+
+#[test]
+fn offline_actions_preserve_drafts_and_allow_local_delete_and_reply_cancellation() {
+    if !in_test_process(
+        "storage_ui::tests::message_actions::offline_actions_preserve_drafts_and_allow_local_delete_and_reply_cancellation",
     ) {
         return;
     }
@@ -385,7 +466,6 @@ fn v1_blocks_remote_actions_while_local_delete_and_reply_cancellation_work() {
                     ui.get_stored_messages().row_data(0).unwrap().event_id,
                     event
                 );
-                ui.invoke_send_message(); // V1 cannot consume a restored reply draft.
                 ui.invoke_toggle_reaction("123".into(), event.into(), "👍".into());
                 ui.invoke_delete_message("123".into(), event.into(), true);
                 assert!(!ui.get_send_busy());

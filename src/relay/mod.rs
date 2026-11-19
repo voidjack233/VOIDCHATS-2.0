@@ -140,15 +140,6 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Enabled only by the coordinated release artifact (or explicit loopback fixture).
-    pub(crate) fn feature_sends_allowed(&self) -> bool {
-        self.feature_operations_supported() && self.is_active()
-    }
-    /// A previously negotiated V2 session can authorize saving a queued intent
-    /// even if its socket closes before the storage worker reaches the command.
-    pub(crate) fn feature_operations_supported(&self) -> bool {
-        self.application_version == ApplicationProtocolVersion::V2
-    }
     pub(crate) fn is_active(&self) -> bool {
         !self.commands.is_closed()
     }
@@ -159,13 +150,11 @@ impl Session {
             min_protocol_version,
             ..
         } = &request
-            && (*min_protocol_version > self.application_version
-                || (*min_protocol_version >= ApplicationProtocolVersion::V2
-                    && !self.feature_operations_supported()))
+            && *min_protocol_version > self.application_version
         {
             return Err(RequestError::Rejected {
                 command: "send_versioned",
-                code: "protocol_release_not_enabled".into(),
+                code: "protocol_unsupported".into(),
             });
         }
         let (reply, response) = blocking::channel();
@@ -217,7 +206,7 @@ impl Connection {
         Self::spawn_with_activity(endpoint, load_identity, report, |_| {})
     }
 
-    /// Legacy V1 fixtures. Release-policy tests use spawn_for_release_test.
+    /// V1 fixtures. Baseline tests share the production version constant.
     #[cfg(test)]
     pub(crate) fn spawn_with_activity(
         endpoint: String,
@@ -237,7 +226,7 @@ impl Connection {
 
     /// Only compiled into tests, and deliberately unusable with a remote relay.
     #[cfg(test)]
-    pub(crate) fn spawn_for_release_test(
+    pub(crate) fn spawn_for_baseline_test(
         endpoint: String,
         audience: String,
         load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
@@ -254,7 +243,7 @@ impl Connection {
         )
     }
 
-    /// Explicit protocol simulation for isolated legacy and V2 tests only.
+    /// Explicit version simulation for isolated future-protocol transport tests.
     #[cfg(test)]
     pub(crate) fn spawn_with_test_protocol(
         endpoint: String,

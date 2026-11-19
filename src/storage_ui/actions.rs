@@ -17,13 +17,13 @@ pub(super) fn apply(
     match action {
         MessageAction::Reply(target, body) => {
             if target.is_some() && !remote {
-                return Err(storage::Error::FeatureUnavailable);
+                return Err(storage::Error::MessagingUnavailable);
             }
             db.save_reply_draft(conversation, &body, target.as_ref())
         }
         MessageAction::Reaction(target, emoji) => {
             if !remote {
-                return Err(storage::Error::FeatureUnavailable);
+                return Err(storage::Error::MessagingUnavailable);
             }
             let own = db.local_void_id()?;
             let peer = db.conversation(conversation)?.peer_void_id;
@@ -44,7 +44,7 @@ pub(super) fn apply(
         MessageAction::Delete(target, everyone) => {
             if everyone {
                 if !remote {
-                    return Err(storage::Error::FeatureUnavailable);
+                    return Err(storage::Error::MessagingUnavailable);
                 }
                 db.queue_delete_everyone(
                     conversation,

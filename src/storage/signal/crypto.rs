@@ -240,12 +240,43 @@ impl Database {
         self.decrypt_signal_delivery(peer, event_json, now, None)
     }
 
+    /// Simulate a previous receiver's classifier while using real Signal and
+    /// the same durable incoming transaction. Recovery fixtures retain exact
+    /// authenticated plaintext without replaying its ciphertext.
+    #[cfg(test)]
+    pub(super) fn decrypt_signal_event_with_decoder(
+        &mut self,
+        peer: &TrustedPeer,
+        event_json: &[u8],
+        now: SystemTime,
+        decode: super::recovery::PlaintextDecoder,
+    ) -> Result<IncomingOutcome> {
+        self.decrypt_delivery_with_decoder(peer, event_json, now, None, decode)
+    }
+
     pub(crate) fn decrypt_signal_delivery(
         &mut self,
         peer: &TrustedPeer,
         event_json: &[u8],
         now: SystemTime,
         expected_event_id: Option<&str>,
+    ) -> Result<IncomingOutcome> {
+        self.decrypt_delivery_with_decoder(
+            peer,
+            event_json,
+            now,
+            expected_event_id,
+            incoming_plaintext,
+        )
+    }
+
+    fn decrypt_delivery_with_decoder(
+        &mut self,
+        peer: &TrustedPeer,
+        event_json: &[u8],
+        now: SystemTime,
+        expected_event_id: Option<&str>,
+        decode: super::recovery::PlaintextDecoder,
     ) -> Result<IncomingOutcome> {
         let (local_id, _) = local_account(&self.connection)?;
         let event = wire::decode_event(event_json, &local_id)?;
@@ -319,7 +350,7 @@ impl Database {
                     run_signal(sessions.load_session(&remote))?.ok_or(Error::SignalProtocol)?;
                 verify_session_peer(&session, verified.identity_key())?;
 
-                incoming_plaintext(
+                decode(
                     tx,
                     Routing {
                         event_id: &event.event_id,
@@ -330,7 +361,6 @@ impl Database {
                     event.min_protocol_version,
                     now_ms,
                     pinned,
-                    true,
                 )
             })?;
         if outcome == IncomingOutcome::AlreadyStored && !pinned {
@@ -342,7 +372,7 @@ impl Database {
 
 /// Classify authenticated plaintext without invoking Signal or changing its state.
 /// Recovery uses the original routing and receive time, but a newer local decoder
-/// may process content previously deferred for a legacy transport minimum.
+/// may process content previously deferred by an older decoder.
 pub(super) fn incoming_plaintext(
     tx: &Transaction<'_>,
     routing: Routing<'_>,
@@ -350,25 +380,8 @@ pub(super) fn incoming_plaintext(
     min_protocol_version: ApplicationProtocolVersion,
     received_at: i64,
     pinned: bool,
-    enforce_transport_version: bool,
 ) -> Result<Incoming> {
     let content = wire::decode_content(routing, &plaintext)?;
-    let requires_v2 = match &content {
-        wire::Content::Message(message) => message.reply_to.is_some(),
-        wire::Content::Reaction(_) | wire::Content::Delete(_) => true,
-        _ => false,
-    };
-    if enforce_transport_version
-        && requires_v2
-        && min_protocol_version < ApplicationProtocolVersion::V2
-    {
-        return Ok(Incoming::Deferred {
-            plaintext,
-            reason: "protocol_version_required".into(),
-            min_protocol_version,
-            received_at,
-        });
-    }
     match content {
         wire::Content::Message(content) => {
             let conversation_id = incoming_conversation(tx, routing.sender, content.created_at)?;

@@ -169,7 +169,7 @@ fn receive(
     index: u32,
     payload: &[u8],
 ) -> crate::storage::Result<IncomingOutcome> {
-    db.decrypt_signal_event(peer, &event(peer.void_id(), index, payload, true), at())
+    db.decrypt_signal_event(peer, &event(peer.void_id(), index, payload, false), at())
 }
 
 fn count(db: &Database, query: &str) -> i64 {
@@ -457,7 +457,7 @@ fn authenticated_unsupported_content_is_durable_and_does_not_strand_later_text()
         .unwrap();
     assert_eq!(
         saved,
-        (expected, "unsupported_event_type".into(), "2".into())
+        (expected, "unsupported_event_type".into(), "1".into())
     );
     assert_eq!(count(&b, "SELECT count(*) FROM messages"), 0);
     assert_eq!(count(&b, "SELECT count(*) FROM conversations"), 0);
@@ -564,7 +564,7 @@ fn failed_control_and_deferral_commits_roll_back_signal_then_retry_exact_ciphert
 }
 
 #[test]
-fn extensions_arriving_as_legacy_events_are_preserved_for_safe_recovery() {
+fn initial_v1_processes_reactions_in_ordinary_relay_events() {
     let (alice, bob, mut a, mut b) = pair();
     let payload = encrypt_raw(
         &mut a,
@@ -575,14 +575,8 @@ fn extensions_arriving_as_legacy_events_are_preserved_for_safe_recovery() {
     );
     b.decrypt_signal_event(&alice.trusted(), &event(ALICE, 1, &payload, false), at())
         .unwrap();
-    assert_eq!(
-        count(
-            &b,
-            "SELECT count(*) FROM deferred_signal_events WHERE reason='protocol_version_required'"
-        ),
-        1
-    );
-    assert_eq!(count(&b, "SELECT count(*) FROM message_reactions"), 0);
+    assert_eq!(count(&b, "SELECT count(*) FROM deferred_signal_events"), 0);
+    assert_eq!(count(&b, "SELECT count(*) FROM message_reactions"), 1);
     assert_eq!(count(&b, "SELECT count(*) FROM messages"), 0);
 }
 

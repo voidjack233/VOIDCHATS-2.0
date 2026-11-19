@@ -4,7 +4,7 @@ use crate::relay::{ApplicationProtocolVersion as Version, SUPPORTED_APPLICATION_
 
 #[test]
 #[ignore = "requires explicitly provisioned disposable Go 9eb1319 and synthetic accounts"]
-fn actual_go_minimum_enforcement_matches_the_release_profile() {
+fn actual_go_minimum_enforcement_matches_initial_v1() {
     use std::sync::mpsc;
     assert_eq!(std::env::var("VOID_TEST_DISPOSABLE").as_deref(), Ok("1"));
     assert_eq!(
@@ -43,7 +43,7 @@ fn actual_go_minimum_enforcement_matches_the_release_profile() {
                 report_activity,
             )
         } else {
-            Connection::spawn_for_release_test(
+            Connection::spawn_for_baseline_test(
                 endpoint.clone(),
                 AUDIENCE.into(),
                 move |_| who(),
@@ -70,10 +70,7 @@ fn actual_go_minimum_enforcement_matches_the_release_profile() {
             let Activity::Online(session) = activity.recv_timeout(WAIT).unwrap() else {
                 panic!("missing session");
             };
-            assert_eq!(
-                session.feature_operations_supported(),
-                version == Version::V2
-            );
+            assert_eq!(session.is_active(), true);
             let result = session
                 .request(Request::Lookup {
                     void_id: "202".into(),
@@ -82,7 +79,7 @@ fn actual_go_minimum_enforcement_matches_the_release_profile() {
             assert!(matches!(result,crate::relay::Reply::Person{void_id,..} if void_id=="202"));
             if version == Version::V1 {
                 assert!(
-                    matches!(session.request(Request::SendVersioned{event_id:"00000000-0000-4000-8000-000000000001".into(),to_void_id:"202".into(),payload_base64:"AA==".into(),min_protocol_version:Version::V2}),Err(RequestError::Rejected{code,..}) if code=="protocol_release_not_enabled")
+                    matches!(session.request(Request::SendVersioned{event_id:"00000000-0000-4000-8000-000000000001".into(),to_void_id:"202".into(),payload_base64:"AA==".into(),min_protocol_version:Version::V2}),Err(RequestError::Rejected{code,..}) if code=="protocol_unsupported")
                 );
             }
         }
@@ -100,29 +97,16 @@ async fn begin(socket: &mut Socket, version: Version) {
 }
 
 #[test]
-fn coordinated_build_is_explicit_and_defaults_remain_v1() {
-    assert_eq!(
-        SUPPORTED_APPLICATION_PROTOCOL,
-        if cfg!(feature = "coordinated-v2-release") {
-            Version::V2
-        } else {
-            Version::V1
-        }
-    );
-    // Both backend minimums return this same response. There is deliberately no
-    // parser field, capability probe or inferred deployment attestation.
-    assert!(matches!(
-        crate::relay::protocol::decode(r#"{"type":"protocol_ok","version":"2"}"#),
-        Some(crate::relay::protocol::ServerFrame::ProtocolOk(Version::V2))
-    ));
+fn normal_build_advertises_initial_v1() {
+    assert_eq!(SUPPORTED_APPLICATION_PROTOCOL, Version::V1);
 }
 
 #[tokio::test]
-async fn release_policy_is_negotiated_again_and_guards_the_transport() {
+async fn initial_v1_negotiates_on_reconnect_and_guards_future_transport() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
     let (send, mut activity) = tokio::sync::mpsc::unbounded_channel();
-    let (relay, worker) = Connection::spawn_for_release_test(
+    let (relay, worker) = Connection::spawn_for_baseline_test(
         endpoint,
         AUDIENCE.into(),
         |_| Ok(identity()),
@@ -149,13 +133,10 @@ async fn release_policy_is_negotiated_again_and_guards_the_transport() {
         let Some(Activity::Online(session)) = timeout(WAIT, activity.recv()).await.unwrap() else {
             panic!("missing session");
         };
-        assert_eq!(
-            session.feature_operations_supported(),
-            cfg!(feature = "coordinated-v2-release")
-        );
+        assert_eq!(session.is_active(), true);
         if let Some(old) = &prior {
             assert_ne!(old.generation, session.generation);
-            assert!(!old.feature_sends_allowed());
+            assert!(!old.is_active());
         }
         let own = session.clone();
         let attempt = tokio::task::spawn_blocking(move || {
@@ -166,27 +147,16 @@ async fn release_policy_is_negotiated_again_and_guards_the_transport() {
                 min_protocol_version: Version::V2,
             })
         });
-        if cfg!(feature = "coordinated-v2-release") {
-            let frame = receive_json(&mut socket).await;
-            assert_eq!(frame["type"], "send_versioned");
-            assert_eq!(frame["min_protocol_version"], "2");
-            send_json(&mut socket,json!({"type":"accepted","event_id":frame["event_id"],"created_at":expiry(0),"expires_at":expiry(60)})).await;
-            assert!(matches!(
-                attempt.await.unwrap(),
-                Ok(crate::relay::Reply::Accepted { .. })
-            ));
-        } else {
-            assert!(
-                matches!(attempt.await.unwrap(),Err(RequestError::Rejected{code,..}) if code=="protocol_release_not_enabled")
-            );
-            assert!(
-                timeout(Duration::from_millis(100), socket.next())
-                    .await
-                    .is_err(),
-                "uncoordinated build transmitted V2"
-            );
-        }
-        // Ordinary messages retain the legacy transport even on the V2 profile.
+        assert!(
+            matches!(attempt.await.unwrap(), Err(RequestError::Rejected { code, .. }) if code == "protocol_unsupported")
+        );
+        assert!(
+            timeout(Duration::from_millis(100), socket.next())
+                .await
+                .is_err(),
+            "V1 transmitted a future-version event"
+        );
+        // All initial V1 content uses the opaque ordinary send transport.
         let own = session.clone();
         let ordinary = tokio::task::spawn_blocking(move || {
             own.request(Request::Send {
@@ -212,12 +182,12 @@ async fn release_policy_is_negotiated_again_and_guards_the_transport() {
 }
 
 #[tokio::test]
-async fn minimum_above_the_release_stops_reconnect_and_never_exposes_messaging() {
+async fn future_minimum_stops_reconnect_and_never_exposes_messaging() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
     let (send, mut states) = tokio::sync::mpsc::unbounded_channel();
     let (events, mut activity) = tokio::sync::mpsc::unbounded_channel();
-    let (relay, worker) = Connection::spawn_for_release_test(
+    let (relay, worker) = Connection::spawn_for_baseline_test(
         endpoint,
         AUDIENCE.into(),
         |_| Ok(identity()),
@@ -232,12 +202,7 @@ async fn minimum_above_the_release_stops_reconnect_and_never_exposes_messaging()
     assert!(relay.connect(VOID_ID.into()));
     let mut socket = next_attempt(&listener).await;
     begin(&mut socket, SUPPORTED_APPLICATION_PROTOCOL).await;
-    let required = Version::parse(if cfg!(feature = "coordinated-v2-release") {
-        "3"
-    } else {
-        "2"
-    })
-    .unwrap();
+    let required = Version::V2;
     send_json(
         &mut socket,
         json!({"type":"error","code":"update_required","min_protocol_version":required}),
@@ -257,33 +222,4 @@ async fn minimum_above_the_release_stops_reconnect_and_never_exposes_messaging()
             .is_err()
     );
     worker.finish();
-}
-
-#[tokio::test]
-async fn v2_success_does_not_reveal_whether_the_deployment_minimum_is_one_or_two() {
-    for _simulated_minimum in [1, 2] {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
-        let (send, mut activity) = tokio::sync::mpsc::unbounded_channel();
-        let (relay, worker) = Connection::spawn_with_test_protocol(
-            endpoint,
-            AUDIENCE.into(),
-            Version::V2,
-            |_| Ok(identity()),
-            |_| {},
-            move |a| {
-                let _ = send.send(a);
-            },
-        )
-        .unwrap();
-        assert!(relay.connect(VOID_ID.into()));
-        let mut socket = next_attempt(&listener).await;
-        begin(&mut socket, Version::V2).await;
-        send_json(&mut socket, json!({"type":"protocol_ok","version":"2"})).await;
-        let Some(Activity::Online(session)) = timeout(WAIT, activity.recv()).await.unwrap() else {
-            panic!("missing session");
-        };
-        assert!(session.feature_sends_allowed());
-        worker.finish();
-    }
 }

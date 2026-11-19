@@ -16,7 +16,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
-mod release;
+mod baseline;
 
 const AUDIENCE: &str = "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz";
 const VOID_ID: &str = "123";
@@ -113,11 +113,7 @@ pub(crate) type Socket = WebSocketStream<TcpStream>;
 fn version_two_override_is_test_only_and_rejects_remote_or_credentialed_urls() {
     assert_eq!(
         super::SUPPORTED_APPLICATION_PROTOCOL,
-        if cfg!(feature = "coordinated-v2-release") {
-            super::ApplicationProtocolVersion::V2
-        } else {
-            super::ApplicationProtocolVersion::V1
-        }
+        super::ApplicationProtocolVersion::V1
     );
     for endpoint in [
         "wss://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz/ws",

@@ -171,13 +171,13 @@ export component MessageBubble inherits Rectangle {
         HorizontalLayout {
             spacing: 0px;
             reply-action := Clickable {
-                label: root.remote-enabled ? "Reply" : "Reply requires protocol V2";
+                label: "Reply";
                 enabled: root.actions-enabled && root.remote-enabled && !root.message.deleted;
                 clicked => { root.message-action("reply", self.absolute-position.x, self.absolute-position.y); }
                 Image { source: @image-url("icons/reply.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: 7px; colorize: root.remote-enabled ? Theme.secondary : Theme.divider; }
             }
             react-action := Clickable {
-                label: root.remote-enabled ? "React" : "Reactions require protocol V2";
+                label: "React";
                 enabled: root.actions-enabled && root.remote-enabled && !root.message.deleted;
                 clicked => { root.message-action("react", self.absolute-position.x, self.absolute-position.y); }
                 Image { source: @image-url("icons/react.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: 7px; colorize: root.remote-enabled ? Theme.secondary : Theme.divider; }

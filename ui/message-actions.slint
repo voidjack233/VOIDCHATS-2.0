@@ -54,7 +54,7 @@ export component MessageActions inherits Rectangle {
                     MenuAction { label: "Reply"; enabled: root.remote-enabled; clicked => { root.reply(); } }
                     MenuAction { label: "React"; enabled: root.remote-enabled; clicked => { root.mode = "react"; } }
                     MenuAction { label: "Delete message…"; clicked => { root.mode = "delete"; } }
-                    if !root.remote-enabled: MenuText { text: root.deleted ? "Reply and reactions are unavailable for a deleted message." : "Reply and reactions require a compatible protocol V2 connection. They are unavailable in this build."; color: Theme.secondary; font-size: 12px; }
+                    if !root.remote-enabled: MenuText { text: root.deleted ? "Reply and reactions are unavailable for a deleted message." : "Connect to messaging to reply or react."; color: Theme.secondary; font-size: 12px; }
                 }
                 if root.mode == "react": VerticalLayout {
                     spacing: 8px;
@@ -85,7 +85,7 @@ export component MessageActions inherits Rectangle {
                     MenuText { text: "Choose where to remove this message. This does not delete your account."; color: Theme.secondary; font-size: 12px; }
                     MenuAction { label: "Delete for Me"; destructive: true; clicked => { root.delete-message(false); root.dismiss(); } }
                     if root.outgoing: MenuAction { label: "Delete for Everyone"; destructive: true; enabled: root.remote-enabled; clicked => { root.mode = "confirm"; } }
-                    if root.outgoing && !root.remote-enabled: MenuText { text: "Delete for Everyone requires a compatible protocol V2 connection. It is unavailable in this build."; color: Theme.secondary; font-size: 12px; }
+                    if root.outgoing && !root.remote-enabled: MenuText { text: "Connect to messaging to delete for everyone."; color: Theme.secondary; font-size: 12px; }
                 }
                 if root.mode == "confirm": VerticalLayout {
                     spacing: 12px;

@@ -1,56 +1,39 @@
-# Versioned relay transport
+# Relay transport and initial application V1
 
-Contract reviewed against backend commit `2faffd27f12d1d02ec28e4be298610d4fee50856`:
+The version-aware delivery contract was introduced at backend `2faffd2`;
+mandatory minimum enforcement is available at `9eb1319`. See the backend's
+[MESSAGING_API.md](https://github.com/voidjack233/VOIDCHATS-2.0/blob/9eb1319/docs/MESSAGING_API.md)
+and [VERSIONED_DELIVERY.md](https://github.com/voidjack233/VOIDCHATS-2.0/blob/9eb1319/docs/VERSIONED_DELIVERY.md).
 
-- [MESSAGING_API.md](https://github.com/voidjack233/VOIDCHATS-2.0/blob/2faffd27f12d1d02ec28e4be298610d4fee50856/docs/MESSAGING_API.md)
-- [VERSIONED_DELIVERY.md](https://github.com/voidjack233/VOIDCHATS-2.0/blob/2faffd27f12d1d02ec28e4be298610d4fee50856/docs/VERSIONED_DELIVERY.md)
+The complete [initial V1 baseline](protocol-v1.md) includes text, receipts,
+reply, reactions and message deletion in every normal Rust build.
 
-The default build sends `protocol` with version `"1"` and
-waits for a matching `protocol_ok` before becoming available to the messaging
-worker. Reconnects repeat this exchange. A legacy event can arrive before the
-agreement; one bounded in-flight delivery is buffered and released after the
-worker receives its new session. Negotiation has a timeout and fails closed on
-malformed, mismatched, or unsolicited replies.
+The authenticated connection sends `protocol` with version `"1"` and waits for
+matching `protocol_ok` before exposing its session to the storage worker.
+Reconnect repeats the exchange. One bounded legacy in-flight delivery may be
+buffered until negotiation completes. Malformed, unsolicited or mismatched
+negotiation fails closed; negotiation also has a timeout.
 
-Application versions use canonical decimal JSON strings in `1..=2147483647`.
-This version is independent of the authentication transcript and the Signal
-payload's existing wire version. Ordinary messages and delivery receipts still
-use `send`, legacy `event`, and the existing correlated acceptance and ACKs.
-ACKs remain contingent on successful local processing and durable storage.
+All initial encrypted event types use `send`, `event`, correlated relay acceptance
+and the existing ACK format. ACK follows successful atomic local processing or
+safe durable deferral. Go need not inspect Signal content or change its database.
+The Signal envelope/text/control codec's `v: 2` is independent of application
+version `"1"`; receipt codec `v: 1` is also unchanged.
 
-`event_versioned` is decoded with an explicit minimum version greater than 1.
-Its original envelope and version metadata remain available to Signal
-processing; the metadata is a relay routing hint, not an authenticated Signal
-plaintext field. Transport rejects versions above the advertised version before
-worker delivery. The prepared Signal receiver has a separate version-2 ceiling
-and rejects higher versions before duplicate acknowledgment, identity pinning,
-or ratchet changes. Version 2 remains unadvertised; see
-[encrypted receiver contract](encrypted-event-receiver.md). Rejection sends no ACK, leaving recovery to the relay's
-retained queue. It does not preserve events beyond the backend's expiry policy.
+Canonical application versions are decimal JSON strings in `1..=2147483647`.
+Generic `send_versioned` serialization and `event_versioned` parsing remain for
+future incompatible contracts, but no initial V1 operation sends them. Transport
+rejects an incoming minimum above the negotiated version before worker delivery;
+Signal also checks the V1 receiver ceiling before pinning, duplicates or ratchet
+writes. Requests above the session's version fail locally. This is a transport
+guard, not peer capability discovery or Signal authorization.
 
-The typed `SendVersioned` request provides serialization and acceptance
-correlation. [Outgoing feature operations](outgoing-encrypted-events.md) use it only
-in isolated test configurations; production feature sends remain blocked. Sender receive-version
-negotiation is not evidence of peer capability and is not a backend prerequisite
-for sending. Reply, Reaction, and Delete payloads are not enabled by this change.
+A valid higher `update_required` minimum activates the blocking update interface
+and ends automatic/manual reconnect for that worker. Network failures preserve
+ordinary reconnect backoff. No cryptographic state is reset.
 
-A loopback-only `cfg(test)` configuration negotiates version 2 for isolated
-verification. The actual pinned Go relay, real Signal ciphertext, receiver ACKs,
-blocked queues, reconnects, and deferred recovery passed the checks recorded in
-[receiver V2 verification](receiver-v2-verification.md). The production entry
-point still uses version 1; there is no runtime override. The opt-in
-`coordinated-v2-release` build selects version 2 only for an operator-coordinated
-release. See the [V2 release runbook](protocol-v2-release.md) for the manual gate,
-activation order, verification and rollback limits.
-
-Do not raise `SUPPORTED_APPLICATION_PROTOCOL` until the Rust receiver can safely
-process or durably defer every encrypted event allowed at that version, including
-duplicate and out-of-order events, with correct post-commit ACKs. Feature senders
-use the chosen coordinated mandatory-update policy; this relay negotiation does not
-provide peer capability discovery. Unsupported queue heads block later events,
-including legacy messages, until acknowledgment or expiry.
-
-Deployment requires the matching version-aware backend, migration 008, and the
-coordinated relay replacement described in the backend documentation. This
-integration does not verify production deployment and does not fall back to an
-older backend that rejects `protocol`.
+The relay retains its ordered queue and 30-day expiry policy. An unsupported
+future/experimental head can block subsequent events until ACK or expiry;
+metadata is never silently downgraded and expired controls cannot be claimed as
+applied. No server capability probe or production change is introduced.
+Loopback fixtures verify the contract against unchanged Go code.

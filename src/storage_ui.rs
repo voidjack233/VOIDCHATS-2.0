@@ -338,7 +338,7 @@ fn bind_with(
                         if let Some(db) = &mut database {
                             messaging_ready = initialize_messaging(&weak, db, &session);
                             if messaging_ready {
-                                if session.feature_sends_allowed() {
+                                if session.is_active() {
                                     actions::resume(&weak, &mut controls, db);
                                 }
                                 peer_refresh =
@@ -386,7 +386,7 @@ fn bind_with(
                         {
                             messaging_ready = initialize_messaging(&weak, db, session);
                             if messaging_ready {
-                                if session.feature_sends_allowed() {
+                                if session.is_active() {
                                     actions::resume(&weak, &mut controls, db);
                                 }
                                 peer_refresh =
@@ -416,15 +416,7 @@ fn bind_with(
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as i64;
-                            let queued = db.reply_draft(id).and_then(|reply| {
-                                if reply.is_some()
-                                    && !relay.as_ref().is_some_and(Session::feature_sends_allowed)
-                                {
-                                    Err(storage::Error::FeatureUnavailable)
-                                } else {
-                                    db.queue_outgoing(id, &body, now)
-                                }
-                            });
+                            let queued = db.queue_outgoing(id, &body, now);
                             match queued {
                                 Ok((event_id, promoted)) => {
                                     let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -473,10 +465,9 @@ fn bind_with(
                     Command::MessageAction(id, selection, action, position) => {
                         history.remember(position);
                         if let Some(db) = &mut database {
-                            let remote = messaging_ready
-                                && relay
-                                    .as_ref()
-                                    .is_some_and(Session::feature_operations_supported);
+                            // Preserve an already-submitted intent if this negotiated
+                            // socket closes just before the worker handles it.
+                            let remote = messaging_ready && relay.is_some();
                             // Choose a surviving neighbor before hiding an anchored message.
                             let removed =
                                 if let actions::MessageAction::Delete(target, false) = &action {
@@ -534,7 +525,7 @@ fn bind_with(
                     Command::RetryControls => {
                         controls = actions::Dispatch::default();
                         if messaging_ready
-                            && relay.as_ref().is_some_and(Session::feature_sends_allowed)
+                            && relay.as_ref().is_some_and(Session::is_active)
                             && let Some(db) = &database
                         {
                             actions::resume(&weak, &mut controls, db);
@@ -543,7 +534,7 @@ fn bind_with(
                     Command::DispatchControl => {
                         if let (Some(db), Some(session)) = (&mut database, &relay)
                             && messaging_ready
-                            && session.feature_sends_allowed()
+                            && session.is_active()
                         {
                             let result = controls.run(db, session);
                             let pending = db
@@ -790,7 +781,6 @@ fn bind_sending(ui: &AppWindow, sender: Sender<Command>) {
             || ui.get_conversation_loading()
             || ui.get_send_busy()
             || ui.get_stored_draft().trim().is_empty()
-            || (!ui.get_reply_event_id().is_empty() && !ui.get_remote_actions_supported())
         {
             return;
         }
@@ -854,7 +844,7 @@ fn initialize_messaging(
     let _ = weak.upgrade_in_event_loop(move |ui| {
         ui.set_publishing_keys(false);
         ui.set_messaging_ready(ready && session.is_active());
-        ui.set_remote_actions_supported(ready && session.feature_sends_allowed());
+        ui.set_remote_actions_supported(ready && session.is_active());
         if !interrupted || ui.get_publication_error().is_empty() {
             ui.set_publication_error(notice.into());
             ui.set_publication_retryable(retryable);

@@ -59,23 +59,11 @@ fn update_gate_blocks_sends_preserves_storage_and_latches_until_close() {
         assert!(started.elapsed() < Duration::from_secs(10));
         if seen.get() == 0 && ui.get_storage_ready() {
             report(ConnectionStatus::UpdateRequired(
-                ApplicationProtocolVersion::parse(if cfg!(feature = "coordinated-v2-release") {
-                    "3"
-                } else {
-                    "2"
-                })
-                .unwrap(),
+                ApplicationProtocolVersion::V2,
             ));
             seen.set(1);
         } else if seen.get() == 1 && ui.get_update_required() {
-            assert_eq!(
-                ui.get_required_protocol_version(),
-                if cfg!(feature = "coordinated-v2-release") {
-                    "3"
-                } else {
-                    "2"
-                }
-            );
+            assert_eq!(ui.get_required_protocol_version(), "2");
             assert!(!ui.get_can_reconnect());
             assert!(!ui.get_messaging_ready());
             ui.set_selected_conversation(chat.to_string().into());

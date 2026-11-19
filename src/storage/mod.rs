@@ -64,7 +64,7 @@ pub(crate) enum Error {
     UnsupportedSchema,
     Database,
     EventConflict,
-    FeatureUnavailable,
+    MessagingUnavailable,
     ReactionLimit,
     SignalState,
     SignalPeer,
@@ -107,8 +107,8 @@ impl Error {
                 "Local storage could not be opened. Check the VOID data directory and try again."
             }
             Self::EventConflict => "The event conflicts with its stored message or payload.",
-            Self::FeatureUnavailable => {
-                "This operation requires an enabled version-2 messaging connection."
+            Self::MessagingUnavailable => {
+                "Messaging is not ready. Connect and finish encryption setup, then try again."
             }
             Self::ReactionLimit => "A message can have at most 10 distinct reaction emojis.",
             Self::SignalState => {

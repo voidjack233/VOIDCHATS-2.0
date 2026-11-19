@@ -69,25 +69,91 @@ fn defer(
     value: &Value,
 ) -> Vec<u8> {
     let payload = encrypt_raw(a, bob, index, value);
-    b.decrypt_signal_event(
+    b.decrypt_signal_event_with_decoder(
         &alice.trusted(),
         &relay_event(ALICE, &event_id(index), &payload),
         at(),
+        previous_decoder,
     )
     .unwrap();
     payload
 }
 
+// Model the previous prerelease receiver, which durably deferred authenticated
+// extensions even over V1 transport. The actual saved bytes remain unchanged.
+pub(super) fn previous_decoder(
+    tx: &Transaction<'_>,
+    routing: Routing<'_>,
+    plaintext: Zeroizing<Vec<u8>>,
+    minimum: ApplicationProtocolVersion,
+    received: i64,
+    pinned: bool,
+) -> crate::storage::Result<Incoming> {
+    let content = crate::storage::signal::wire::decode_content(routing, &plaintext)?;
+    if matches!(
+        content,
+        crate::storage::signal::wire::Content::Reaction(_)
+            | crate::storage::signal::wire::Content::Delete(_)
+    ) || matches!(content, crate::storage::signal::wire::Content::Message(ref message) if message.reply_to.is_some())
+    {
+        return Ok(Incoming::Deferred {
+            plaintext,
+            reason: "protocol_version_required".into(),
+            min_protocol_version: minimum,
+            received_at: received,
+        });
+    }
+    incoming_plaintext(tx, routing, plaintext, minimum, received, pinned)
+}
+
 fn count(db: &Database, table: &str) -> i64 {
     assert!(matches!(
         table,
-        "deferred_signal_events" | "messages" | "control_event_inbox" | "inbox" | "receipt_outbox"
+        "deferred_signal_events"
+            | "messages"
+            | "message_reactions"
+            | "control_event_inbox"
+            | "inbox"
+            | "receipt_outbox"
     ));
     db.connection
         .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
             row.get(0)
         })
         .unwrap()
+}
+
+#[test]
+fn experimental_minimum_two_stays_deferred_without_retagging_or_ratchet_changes() {
+    let (alice, bob, mut a, mut b) = pair();
+    defer(&mut a, &mut b, &alice, &bob, 1, &reaction(1, 1, true));
+    // An existing prerelease record is not rewritten as part of consolidation.
+    b.connection
+        .execute(
+            "UPDATE deferred_signal_events SET min_protocol_version='2'",
+            [],
+        )
+        .unwrap();
+    let state = session(&b, ALICE);
+    b.close().unwrap();
+    let mut b = bob.open();
+    let stats = b.recover_deferred_events().unwrap();
+    assert_eq!(
+        (stats.recovered, stats.deferred, stats.quarantined),
+        (0, 1, 0)
+    );
+    assert_eq!(
+        b.connection
+            .query_row(
+                "SELECT min_protocol_version FROM deferred_signal_events",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "2"
+    );
+    assert_eq!(count(&b, "message_reactions"), 0);
+    assert!(session(&b, ALICE) == state);
 }
 
 #[test]
@@ -191,7 +257,6 @@ fn upgraded_decoder(
     minimum: ApplicationProtocolVersion,
     received: i64,
     pinned: bool,
-    enforce: bool,
 ) -> crate::storage::Result<Incoming> {
     let mut value: Value = serde_json::from_slice(&plaintext).map_err(|_| Error::SignalEnvelope)?;
     if value["type"] == "future_message" && value["v"] == 3 {
@@ -204,10 +269,9 @@ fn upgraded_decoder(
             minimum,
             received,
             pinned,
-            enforce,
         );
     }
-    incoming_plaintext(tx, routing, plaintext, minimum, received, pinned, enforce)
+    incoming_plaintext(tx, routing, plaintext, minimum, received, pinned)
 }
 
 #[test]

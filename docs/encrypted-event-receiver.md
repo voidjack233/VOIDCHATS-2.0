@@ -1,11 +1,9 @@
 # Encrypted event receiver
 
-This defines the prepared Rust application-version-2 receiver. The authenticated
-relay still negotiates version **1**; feature sending and Slint UI are unchanged.
-The isolated integration configuration negotiates version 2 with a disposable
-relay; that configuration is compiled only into tests and accepts loopback
-WebSocket endpoints. The production relay will not offer version-2 queue heads
-to this release.
+This is the complete receiver contract for initial application **V1**, including
+text, receipts, replies, reactions and deletion. Normal builds negotiate V1;
+all these content types use the ordinary opaque relay transport. See the
+[baseline and experimental-data notes](protocol-v1.md).
 
 ## Wire contract
 
@@ -46,9 +44,9 @@ revisions replace lower ones; stale revisions do nothing. Equal revision/state
 is idempotent; equal revision with contradictory state is durably deferred.
 Inactive removal rows retain their revision high-water marks across restarts.
 Emoji tokens are bounded Unicode strings; full emoji choice validation and the
-10-distinct-emoji interaction limit belong to future sender/picker work. Receiver
-state is retained rather than dropped when concurrent offline choices exceed a
-future UI limit.
+10-distinct-emoji interaction limit are enforced by the sender/picker. Receiver
+state is retained rather than dropped when concurrent offline choices exceed
+the UI limit.
 
 Delete-for-Everyone plaintext uses the common routing fields, `v: 2`, and:
 
@@ -60,13 +58,12 @@ Delete-for-Everyone plaintext uses the common routing fields, `v: 2`, and:
 ```
 
 Only the authenticated original author may delete that message. The recipient
-cannot use this event to delete the local user's outgoing message. No Delete for
-Me implementation is added in this receiver phase.
+cannot use this event to delete the local user's outgoing message. Delete for Me is a separate
+local-only hide ledger and has no encrypted control event.
 
-Replies and controls require application minimum version 2. A valid extension
-received in a legacy frame is durably deferred as `protocol_version_required`.
-Existing ordinary text and version-1 delivery-receipt plaintexts remain supported
-with their existing encodings and meanings.
+Replies and controls are initial application V1 capabilities, processed directly
+from ordinary `event` frames. Existing `v: 2` text/control encodings and `v: 1`
+delivery-receipt encodings remain unchanged. No minimum version 2 is required.
 
 ## Atomic persistence and ACKs
 
@@ -90,8 +87,8 @@ delete arriving before its message persists safely. Existing target bodies are
 cleared, unread markers removed, and reactions deactivated. Message rows,
 timestamps, inbox digests, reply references, and receipt records remain intact.
 An original arriving later is inserted with a blank body and without a new unread
-marker. Redelivery and later reactions cannot resurrect deleted content. Future
-UI work must render the tombstone as a deleted-message placeholder and resolve
+marker. Redelivery and later reactions cannot resurrect deleted content. The
+UI renders the tombstone as a deleted-message placeholder and resolves
 quoted originals as deleted or unavailable, without storing copied body previews.
 
 ## Authenticated unsupported content
@@ -121,7 +118,8 @@ Recovery verifies the original sender/event, current pinned account/Signal
 binding, local recipient, saved digest ledger, and supported decoder. It uses
 the exact saved plaintext, never the original ciphertext or a second Signal
 decryption. The local decoder can process valid content previously retained
-because of a legacy transport minimum; that metadata is not authorization.
+by the prerelease decoder under minimum V1; that metadata is not authorization.
+Saved minimums above the current V1 ceiling remain deferred without retagging.
 
 Each recovered event replaces its deferred ledger in the same SQLCipher
 transaction as its message/control effects. Failed writes or COMMIT restore the
@@ -137,18 +135,14 @@ as quarantined, with a non-sensitive reason, and are not automatically retried.
 Storage failures propagate and leave the candidate pending. A crash between a
 failed application and quarantine simply causes revalidation next time.
 
-## Before advertising version 2
+## Sending and release
 
-Keep production transport negotiation at version 1. The existing event formats
-remain unchanged. Read-only presentation and the
-[durable outgoing foundation](outgoing-encrypted-events.md) now use this contract;
-Slint sending actions and the coordinated mandatory-update V2 release remain
-separate work. Isolated receiver relay verification is documented in
-[receiver V2 verification](receiver-v2-verification.md). Local receiver support
-does not prove peer support; the release policy requires compatible application
-updates instead of a peer capability handshake.
+The [durable outgoing operations](outgoing-encrypted-events.md) and
+[Slint actions](message-actions-ui.md) use this contract in normal builds.
+There is no separate V2 activation. Future incompatible contracts retain the
+mandatory-update mechanism; no peer handshake is introduced.
 
 No retention extension or Go/database deployment is introduced. A delete that
-expires from the relay before recipient processing is still not guaranteed to
-reach that recipient. Tombstones protect only deletions actually received and
-committed locally. Production identities and databases are not used in tests.
+expires from the relay before recipient processing is not guaranteed to reach
+that recipient. Tombstones protect deletions actually received and committed.
+Production identities and databases are not used in tests.

@@ -1,3 +1,8 @@
+> Historical pre-consolidation verification at backend `2faffd2`. Its separate
+> application-V2 release conclusions are superseded by [initial V1](protocol-v1.md).
+> Current tests use unchanged `9eb1319` with minimum V1. This record is retained
+> to explain the original queue-barrier and cryptographic recovery investigation.
+
 # Receiver recovery and protocol V2 verification
 
 Verified locally on 18 November 2026. Production negotiation remains version 1.

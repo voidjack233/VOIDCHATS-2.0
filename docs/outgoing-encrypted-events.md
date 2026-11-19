@@ -6,21 +6,13 @@ No peer handshake, relay fields, or new Signal implementation is added.
 The message author and original event UUID identify a target independently of
 pagination, local row IDs, or display names.
 
-## Release gate
+## Initial application V1
 
-The default build still advertises application protocol **1**. `messaging::send` rejects
-replies and `messaging::send_control` rejects all feature controls before lookup,
-prekey claims, encryption, or transport. There is no environment-variable override.
-The explicit `coordinated-v2-release` build and numeric-loopback V2 fixtures
-can dispatch them. The feature is an operator coordination choice, not proof
-of the deployment minimum; follow the [release runbook](protocol-v2-release.md).
-Ordinary messages and delivery receipts continue using the legacy transport.
-
-The chosen compatibility policy is a coordinated mandatory application update.
-Before enabling these operations in a release, deploy/enforce backend minimum V2
-and release a client that negotiates V2 with this receiver and sender. Negotiating
-the sender's own version is not peer-capability discovery. Older recipients must
-update before draining versioned queue heads. No peer handshake is implemented.
+Normal builds negotiate V1 and enable all completed operations after messaging
+initialization. Text, replies, receipts and controls all use the existing opaque
+`send`/`event` transport with implicit minimum V1. Signal payload revisions and
+strict validation remain unchanged. There is no Cargo feature or peer handshake.
+See [protocol-v1.md](protocol-v1.md) for future updates and experimental data.
 
 ## SQLCipher migration 12
 
@@ -74,7 +66,7 @@ applied the control. The current protocol defines delivery receipts for messages
 not reaction/deletion controls; no recipient-application acknowledgment is invented.
 
 `pending_controls` recovers unfinished UUIDs after restart. The explicit dispatcher
-can resume them with the saved payload. The message-action worker now resumes controls on compatible V2 connections
+can resume them with the saved payload. The message-action worker now resumes controls on ready V1 connections
 with bounded retries and a manual retry action. Ordinary messages are not
 automatically retransmitted. Accepted operations are idempotent no-ops on repeated dispatch.
 
@@ -89,19 +81,12 @@ restart and explicit retry preserve its exact UUID/ciphertext, with no automatic
 send after reconnect.
 
 The opt-in `actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receipts`
-test uses the unmodified version-aware Go relay at
-`2faffd27f12d1d02ec28e4be298610d4fee50856` and a fresh disposable PostgreSQL fixture,
-with synthetic accounts 101/202 only. It checks V1 feature blocking, V2 replies,
-encrypted message receipts, offline controls, ambiguous/duplicate acceptance,
-restart recovery, reconnection, deletion and continued legacy messaging. It is
-ignored in routine runs because it requires this explicitly provisioned environment.
-The newer mandatory-minimum response is covered by the existing mock tests, not
-by changing this pinned Go fixture or connecting to production.
+test uses unchanged Go `9eb1319`, minimum V1 and fresh disposable PostgreSQL,
+with synthetic accounts 101/202. It checks V1 replies, receipts, offline controls,
+ambiguous/duplicate acceptance, restart recovery, reconnect and both deletions.
+The actual receiver fixture verifies failed-COMMIT ACK timing, duplicate delivery,
+out-of-order reactions and saved-plaintext recovery against the same contract.
+Tests require explicitly provisioned loopback fixtures and never use personal data.
 
-The Slint hover actions, reply banner, reaction picker and delete choices are
-connected to the worker APIs, preserving timeline anchors. Next: coordinate the
-mandatory V2 release. Production and
-existing account stores were not used for testing. The relay's existing 30-day
-retention remains: deletion/reaction events that expire before recipient processing
-cannot be claimed as applied. No longer retention, backend change or synchronization
-workaround is introduced here.
+The existing 30-day retention remains: expired controls cannot be claimed as
+applied. No retention extension, backend change or production activation is needed.

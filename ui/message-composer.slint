@@ -44,7 +44,7 @@ export component MessageComposer inherits VerticalLayout {
             }
         }
     }
-    if root.replying && !root.remote-enabled: WrappingText { text: "Sending this reply requires a compatible protocol V2 connection. Your draft is saved."; color: Theme.secondary; font-size: 12px; }
+    if root.replying && !root.remote-enabled: WrappingText { text: "Messaging is not ready. Sending saves this reply locally; choose Resend when ready."; color: Theme.secondary; font-size: 12px; }
     if root.draft-save-failed: HorizontalLayout {
         spacing: 8px;
         WrappingText {

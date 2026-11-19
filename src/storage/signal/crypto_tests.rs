@@ -648,7 +648,7 @@ fn unsupported_transport_version_cannot_consume_signal_keys_or_bypass_duplicate_
     let event = relay_event(ALICE, &id, &payload);
     let mut versioned: Value = serde_json::from_slice(&event).unwrap();
     versioned["type"] = json!("event_versioned");
-    versioned["min_protocol_version"] = json!("3");
+    versioned["min_protocol_version"] = json!("2");
     let versioned = serde_json::to_vec(&versioned).unwrap();
 
     assert!(matches!(

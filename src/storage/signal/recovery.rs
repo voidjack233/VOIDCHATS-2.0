@@ -20,6 +20,15 @@ use zeroize::Zeroizing;
 
 const PAGE_SIZE: i64 = 64;
 
+pub(super) type PlaintextDecoder = fn(
+    &Transaction<'_>,
+    Routing<'_>,
+    Zeroizing<Vec<u8>>,
+    ApplicationProtocolVersion,
+    i64,
+    bool,
+) -> Result<Incoming>;
+
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct RecoverySummary {
     pub(crate) recovered: usize,
@@ -43,31 +52,12 @@ impl Database {
     #[cfg(test)]
     pub(super) fn recover_deferred_with_decoder(
         &mut self,
-        decode: fn(
-            &Transaction<'_>,
-            Routing<'_>,
-            Zeroizing<Vec<u8>>,
-            ApplicationProtocolVersion,
-            i64,
-            bool,
-            bool,
-        ) -> Result<Incoming>,
+        decode: PlaintextDecoder,
     ) -> Result<RecoverySummary> {
         self.recover_deferred_with(decode)
     }
 
-    fn recover_deferred_with(
-        &mut self,
-        decode: fn(
-            &Transaction<'_>,
-            Routing<'_>,
-            Zeroizing<Vec<u8>>,
-            ApplicationProtocolVersion,
-            i64,
-            bool,
-            bool,
-        ) -> Result<Incoming>,
-    ) -> Result<RecoverySummary> {
+    fn recover_deferred_with(&mut self, decode: PlaintextDecoder) -> Result<RecoverySummary> {
         let mut summary = RecoverySummary::default();
         let mut cursor: Option<(i64, String, String)> = None;
         loop {
@@ -139,15 +129,7 @@ fn recover_one(
     tx: &Transaction<'_>,
     sender: &str,
     event_id: &str,
-    decode: fn(
-        &Transaction<'_>,
-        Routing<'_>,
-        Zeroizing<Vec<u8>>,
-        ApplicationProtocolVersion,
-        i64,
-        bool,
-        bool,
-    ) -> Result<Incoming>,
+    decode: PlaintextDecoder,
 ) -> Result<Outcome> {
     let record = tx.query_row(
         "SELECT d.plaintext, d.min_protocol_version, d.received_at, c.payload_digest, c.kind
@@ -211,7 +193,6 @@ fn recover_one(
         min_protocol_version,
         received_at,
         true,
-        false,
     )?;
     if let Incoming::Deferred { reason, .. } = incoming {
         tx.execute("UPDATE deferred_signal_events SET reason = ?3 WHERE sender_void_id = ?1 AND event_id = ?2",

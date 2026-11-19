@@ -36,20 +36,18 @@ applies the tombstone and blocks resending the original. A hidden viewport ancho
 is replaced with a surviving neighbor while retaining its offset. Account deletion
 and account initialization are not involved.
 
-## Protocol gate and recovery
+## Messaging readiness and recovery
 
-The default build still advertises V1. Reply, reactions and Delete for Everyone are
-disabled with an explanation; Delete for Me and cancelling a saved reply remain
-available. The worker independently enforces this gate even if UI flags are
-stale. Loopback-only V2 fixtures and the explicitly opt-in coordinated V2 build
-enable remote sends. See the [release runbook](protocol-v2-release.md); successful
-negotiation does not attest the server-wide minimum.
-No capability handshake, new encrypted format or Go change was introduced.
+All completed actions belong to initial V1 in normal builds. Reply, React and
+Delete for Everyone require messaging readiness, with connection/setup hints
+when unavailable. Delete for Me and cancelling a saved reply work offline.
+Restored reply drafts can be queued offline like ordinary messages; Resend is
+explicit. The worker independently validates account readiness and targets.
+There is no release feature, protocol-V2 explanation or capability handshake.
 
-An already-submitted action can persist under its verified V2 session when the
-socket closes before the worker reaches it. Transmission still requires an
-active V2 session. This avoids losing the local intent during shutdown without
-granting V1 sessions permission to save remote feature operations.
+An already-submitted action can persist under its negotiated session if the
+socket closes before the worker processes it. Transmission requires an active
+connection. This preserves durable intent during shutdown.
 
 After compatible authentication and key publication, the existing worker recovers
 pending control UUIDs from SQLCipher. It dispatches one per turn, leaves queued UI
@@ -63,24 +61,24 @@ relay retention and cryptographic constraints are unchanged.
 
 ## Verification
 
-Routine isolated Slint tests cover restoring/cancelling reply drafts, V1 send
-blocking, worker enforcement against stale UI flags, local deletion, preserved
+Routine isolated Slint tests cover restoring/cancelling reply drafts, offline
+action guarding, worker enforcement against stale UI flags, local deletion, preserved
 deduplication and replacement of a deleted viewport anchor without losing offset.
 Existing Signal and storage tests cover failed writes, duplicate events,
 out-of-order revisions, receipts and ciphertext reuse.
 
 The opt-in `native_callbacks_exchange_features_offline_and_restore_reply_drafts`
 test binds two real frontends and storage workers to synthetic accounts 101/202
-on the unchanged disposable Go relay at `2faffd2`. It drives frontend callbacks
+on the unchanged disposable Go relay at `9eb1319`, minimum V1. It drives frontend callbacks
 through Signal encryption, verified receipts, reply banners, reaction toggles,
 an interrupted action recovered after restart, offline controls, tombstone and
 quote refresh, and local deletion. It never opens personal account directories.
 
 Native snapshot fixtures cover 850×560, 1080×680, 1280×720 and 1600×900, including
-resizing, picker, deletion choices, confirmation, V1 explanation and hover rail.
+resizing, picker, deletion choices, confirmation, offline explanation and hover rail.
 These opt-in tests are excluded from routine runs because they create native
 fixture windows or require explicit provisioning of the local Go/PostgreSQL relay.
 
-Before release, coordinate the backend minimum V2 requirement, client V2
-advertisement and production send gate. Existing mandatory-update handling remains
-the compatibility policy. No production V2 activation has been performed.
+The [initial V1 baseline](protocol-v1.md) replaces the prerelease V2 plan.
+Mandatory-update handling remains for future incompatible releases.
+No production deployment or personal-account modification is performed.

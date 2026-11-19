@@ -1,5 +1,6 @@
-//! VOID's version 2 Signal wire format. The relay carries a Base64-encoded UTF-8
-//! envelope that correlates the event ID and sender with the relay frame and
+//! VOID application V1 uses Signal envelope/content codec revision 2.
+//! The relay carries a Base64-encoded UTF-8 envelope correlating the event ID
+//! and sender with the relay frame and
 //! identifies the recipient. It contains the sender's signed account binding and
 //! Base64-encoded ciphertext serialized by libsignal.
 
@@ -17,14 +18,14 @@ use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt};
 use zeroize::Zeroizing;
 
-const PROTOCOL_VERSION: u8 = 2;
+const SIGNAL_WIRE_VERSION: u8 = 2;
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1_410_000;
 const MAX_BODY_BYTES: usize = 60_000;
 const MAX_CONTENT_BYTES: usize = 6 * MAX_BODY_BYTES + 512;
 const MAX_SAFE_TIMESTAMP: i64 = 9_007_199_254_740_991;
 pub(super) const RECEIVER_APPLICATION_PROTOCOL: ApplicationProtocolVersion =
-    ApplicationProtocolVersion::V2;
+    ApplicationProtocolVersion::V1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct SignalBinding {
@@ -218,7 +219,7 @@ pub(super) fn decode_event(event_json: &[u8], expected_recipient: &str) -> Resul
     let bytes = decode_base64(&event.payload_base64, MAX_PAYLOAD_BYTES)?;
     let payload: EncryptedPayload =
         serde_json::from_slice(&bytes).map_err(|_| Error::SignalEnvelope)?;
-    if payload.v != PROTOCOL_VERSION
+    if payload.v != SIGNAL_WIRE_VERSION
         || payload.kind != "signal"
         || !routing.matches(
             &payload.client_message_id,
@@ -276,7 +277,7 @@ pub(super) fn encode_payload(
         registration_id: binding.registration_id,
         identity_key: STANDARD.encode(binding.identity_key),
         account_signature: STANDARD.encode(binding.account_signature),
-        v: PROTOCOL_VERSION,
+        v: SIGNAL_WIRE_VERSION,
         kind: "signal".into(),
         client_message_id: routing.event_id.into(),
         from_void_id: routing.sender.into(),
@@ -322,7 +323,7 @@ pub(super) fn encode_content_with_reply(
         return Err(Error::SignalEnvelope);
     }
     let content = MessageContent {
-        v: PROTOCOL_VERSION,
+        v: SIGNAL_WIRE_VERSION,
         client_message_id: routing.event_id.into(),
         from_void_id: routing.sender.into(),
         to_void_id: routing.recipient.into(),
@@ -391,12 +392,12 @@ pub(super) fn decode_content(routing: Routing<'_>, bytes: &[u8]) -> Result<Conte
     }) {
         return Err(Error::SignalEnvelope);
     }
-    if version > u64::from(PROTOCOL_VERSION) {
+    if version > u64::from(SIGNAL_WIRE_VERSION) {
         return Ok(unsupported("unsupported_content_version"));
     }
     let mut allowed = vec!["v", "client_message_id", "from_void_id", "to_void_id"];
     let content = match kind {
-        None if version == u64::from(PROTOCOL_VERSION) => {
+        None if version == u64::from(SIGNAL_WIRE_VERSION) => {
             allowed.extend(["body", "created_at", "request_delivery_receipt", "reply_to"]);
             let body = string("body")?;
             let created_at = fields
@@ -430,7 +431,7 @@ pub(super) fn decode_content(routing: Routing<'_>, bytes: &[u8]) -> Result<Conte
             }
             Content::Receipt(original.into())
         }
-        Some("reaction") if version == u64::from(PROTOCOL_VERSION) => {
+        Some("reaction") if version == u64::from(SIGNAL_WIRE_VERSION) => {
             allowed.extend(["type", "target", "emoji", "active", "revision"]);
             let target =
                 decode_reference(routing, fields.get("target").ok_or(Error::SignalEnvelope)?)?;
@@ -454,7 +455,7 @@ pub(super) fn decode_content(routing: Routing<'_>, bytes: &[u8]) -> Result<Conte
                 revision,
             })
         }
-        Some("delete_for_everyone") if version == u64::from(PROTOCOL_VERSION) => {
+        Some("delete_for_everyone") if version == u64::from(SIGNAL_WIRE_VERSION) => {
             allowed.extend(["type", "target"]);
             let target =
                 decode_reference(routing, fields.get("target").ok_or(Error::SignalEnvelope)?)?;

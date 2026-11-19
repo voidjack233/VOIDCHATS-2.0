@@ -10,7 +10,7 @@ use crate::{
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 
 const WAIT: Duration = Duration::from_secs(20);
-const BACKEND_COMMIT: &str = "2faffd27f12d1d02ec28e4be298610d4fee50856";
+const BACKEND_COMMIT: &str = "9eb131933a3c9e95cc8b5dba1bebae6400691419";
 
 #[test]
 fn outgoing_control_lost_acceptance_reconnect_reuses_ciphertext_without_automatic_send() {
@@ -54,9 +54,9 @@ fn outgoing_control_lost_acceptance_reconnect_reuses_ciphertext_without_automati
                 send_json(&mut socket, json!({"type":"auth_ok","void_id":ALICE})).await;
                 assert_eq!(
                     receive_json(&mut socket).await,
-                    json!({"type":"protocol","version":"2"})
+                    json!({"type":"protocol","version":"1"})
                 );
-                send_json(&mut socket, json!({"type":"protocol_ok","version":"2"})).await;
+                send_json(&mut socket, json!({"type":"protocol_ok","version":"1"})).await;
                 if round == 1 {
                     assert!(
                         tokio::time::timeout(Duration::from_millis(350), socket.next())
@@ -72,8 +72,8 @@ fn outgoing_control_lost_acceptance_reconnect_reuses_ciphertext_without_automati
                 );
                 send_json(&mut socket,json!({"type":"person","void_id":BOB,"auth_public_key":STANDARD.encode(SigningKey::from_bytes(&[122;32]).verifying_key().as_bytes())})).await;
                 let frame = receive_json(&mut socket).await;
-                assert_eq!(frame["type"], "send_versioned");
-                assert_eq!(frame["min_protocol_version"], "2");
+                assert_eq!(frame["type"], "send");
+                assert!(frame.get("min_protocol_version").is_none());
                 if round == 0 {
                     saved = Some(frame);
                 } else {
@@ -96,7 +96,7 @@ fn outgoing_control_lost_acceptance_reconnect_reuses_ciphertext_without_automati
         "https://api.voidchats.xyz/dm9pZG5vdGhpbmduZXNz",
         ALICE,
         121,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
     assert!(crate::messaging::send_control(&mut a, &client.session, &control).is_err());
     assert_eq!(a.control(&control).unwrap().state, "unconfirmed");
@@ -122,7 +122,7 @@ fn outgoing_control_lost_acceptance_reconnect_reuses_ciphertext_without_automati
 }
 
 #[test]
-#[ignore = "requires isolated Go backend 2faffd2 and disposable PostgreSQL fixture; never production"]
+#[ignore = "requires isolated Go backend 9eb1319 and disposable PostgreSQL fixture; never production"]
 fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receipts() {
     assert_eq!(std::env::var("VOID_TEST_DISPOSABLE").as_deref(), Ok("1"));
     assert_eq!(
@@ -147,7 +147,7 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
         &audience,
         BOB,
         122,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
     crate::messaging::publish(&mut a, &a1.session).unwrap();
     crate::messaging::publish(&mut b, &bc.session).unwrap();
@@ -168,28 +168,9 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
     let add = event_id(801);
     a.queue_reaction(chat, &add, &target, "👍", true, NOW_MS)
         .unwrap();
-    let ratchet = session(&a, BOB);
-    assert!(matches!(
-        crate::messaging::send(&mut a, Some(&a1.session), &reply),
-        Err(crate::messaging::Error::Storage(Error::FeatureUnavailable))
-    ));
-    assert!(matches!(
-        crate::messaging::send_control(&mut a, &a1.session, &add),
-        Err(crate::messaging::Error::Storage(Error::FeatureUnavailable))
-    ));
-    assert!(a.control(&add).unwrap().payload.is_none());
-    assert!(a.committed_outgoing(&reply).unwrap().is_none());
-    assert!(ratchet == session(&a, BOB));
-    drop(a1);
-    let mut ac = Client::start(
-        &endpoint,
-        &audience,
-        ALICE,
-        121,
-        ApplicationProtocolVersion::V2,
-    );
+    let mut ac = a1;
     crate::messaging::send(&mut a, Some(&ac.session), &reply).unwrap();
-    let json = bc.delivery(&reply, true);
+    let json = bc.delivery(&reply, false);
     process(&mut b, &bc, ALICE, &reply, &json);
     let bchat = b.conversations(true).unwrap()[0].id;
     assert_eq!(
@@ -214,7 +195,7 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
     // unconfirmed intent rather than promoting it based on a guessed outcome.
     let payload = a.encrypt_signal_control(&bob.trusted(), &add).unwrap();
     a.set_control_state(&add, "unconfirmed").unwrap();
-    send(&ac, BOB, &add, &payload, true);
+    send(&ac, BOB, &add, &payload, false);
     assert!(
         matches!(crate::messaging::send_control(&mut a,&ac.session,&add),Err(crate::messaging::Error::Relay(crate::relay::RequestError::Rejected{code,..})) if code=="duplicate_event")
     );
@@ -243,10 +224,10 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
         &audience,
         BOB,
         122,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
     for id in [&add, &remove, &deletion] {
-        let json = bc.delivery(id, true);
+        let json = bc.delivery(id, false);
         process(&mut b, &bc, ALICE, id, &json);
         // Duplicate encrypted delivery is safe without ratcheting again.
         assert_eq!(
@@ -283,11 +264,7 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
     assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
     assert_eq!(
         crate::relay::SUPPORTED_APPLICATION_PROTOCOL,
-        if cfg!(feature = "coordinated-v2-release") {
-            ApplicationProtocolVersion::V2
-        } else {
-            ApplicationProtocolVersion::V1
-        }
+        ApplicationProtocolVersion::V1
     );
 }
 
@@ -483,8 +460,8 @@ fn count(db: &Database, query: &str) -> i64 {
 }
 
 #[test]
-#[ignore = "requires isolated Go backend 2faffd2 and disposable PostgreSQL fixture; never production"]
-fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
+#[ignore = "requires isolated Go backend 9eb1319 and disposable PostgreSQL fixture; never production"]
+fn actual_go_v1_receiver_recovers_and_commits_before_ack() {
     assert_eq!(std::env::var("VOID_TEST_DISPOSABLE").as_deref(), Ok("1"));
     assert_eq!(
         std::env::var("VOID_TEST_BACKEND_COMMIT").as_deref(),
@@ -503,7 +480,7 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
         &audience,
         ALICE,
         121,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
     let mut bob_client = Client::start(
         &endpoint,
@@ -548,7 +525,7 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
     b.finish_receipt(&receipt_id).unwrap();
     assert!(a.has_verified_delivery(&event_id(1)).unwrap());
 
-    // A version-2 head blocks all later legacy events on a version-1 connection.
+    // A failed durable reply commit must hold the queue head until reconnect.
     let mut reply = content(2);
     reply["body"] = json!("Reply via actual Go");
     reply["created_at"] = json!(NOW_MS + 1);
@@ -559,24 +536,13 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
             &bob.trusted(),
             chat,
             &event_id(3),
-            "Legacy behind v2",
+            "Text behind reply",
             NOW_MS + 2,
         )
         .unwrap();
-    send(&alice_client, BOB, &event_id(2), &reply, true);
+    send(&alice_client, BOB, &event_id(2), &reply, false);
     send(&alice_client, BOB, &event_id(3), &later, false);
-    bob_client.no_delivery();
-    drop(bob_client);
-    b.close().unwrap();
-    b = bob.open();
-    bob_client = Client::start(
-        &endpoint,
-        &audience,
-        BOB,
-        122,
-        ApplicationProtocolVersion::V2,
-    );
-    let json = bob_client.delivery(&event_id(2), true);
+    let json = bob_client.delivery(&event_id(2), false);
     let before = session(&b, ALICE);
     fail_next_event_commit(&b, "inbox");
     assert!(
@@ -595,9 +561,9 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
         &audience,
         BOB,
         122,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
-    let repeated = bob_client.delivery(&event_id(2), true);
+    let repeated = bob_client.delivery(&event_id(2), false);
     assert_eq!(
         serde_json::from_str::<Value>(&repeated).unwrap()["payload_base64"],
         serde_json::from_str::<Value>(&json).unwrap()["payload_base64"]
@@ -613,8 +579,8 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
 
     // Commit a reaction but lose its ACK, then deduplicate after restart.
     let payload = encrypt_raw(&mut a, &bob, 4, &reaction(4, true, 1));
-    send(&alice_client, BOB, &event_id(4), &payload, true);
-    let json = bob_client.delivery(&event_id(4), true);
+    send(&alice_client, BOB, &event_id(4), &payload, false);
+    let json = bob_client.delivery(&event_id(4), false);
     assert_eq!(
         b.decrypt_signal_delivery(
             &alice.trusted(),
@@ -634,9 +600,9 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
         &audience,
         BOB,
         122,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
-    let json = bob_client.delivery(&event_id(4), true);
+    let json = bob_client.delivery(&event_id(4), false);
     process(&mut b, &bob_client, ALICE, &event_id(4), &json);
     assert!(session(&b, ALICE) == committed);
     assert_eq!(count(&b, "SELECT count(*) FROM message_reactions"), 1);
@@ -646,8 +612,8 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
     let removal = encrypt_raw(&mut a, &bob, 6, &reaction(6, false, 4));
     let middle = encrypt_raw(&mut a, &bob, 7, &reaction(7, true, 3));
     for (index, payload) in [(6, &removal), (5, &stale), (7, &middle)] {
-        send(&alice_client, BOB, &event_id(index), payload, true);
-        let json = bob_client.delivery(&event_id(index), true);
+        send(&alice_client, BOB, &event_id(index), payload, false);
+        let json = bob_client.delivery(&event_id(index), false);
         process(&mut b, &bob_client, ALICE, &event_id(index), &json);
     }
     assert_eq!(
@@ -658,14 +624,15 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
     delete["type"] = json!("delete_for_everyone");
     delete["target"] = json!(target(1));
     let payload = encrypt_raw(&mut a, &bob, 8, &delete);
-    send(&alice_client, BOB, &event_id(8), &payload, true);
-    let json = bob_client.delivery(&event_id(8), true);
+    send(&alice_client, BOB, &event_id(8), &payload, false);
+    let json = bob_client.delivery(&event_id(8), false);
     process(&mut b, &bob_client, ALICE, &event_id(8), &json);
     assert!(b.message_deleted(ALICE, &target(1)).unwrap());
     assert_received(&b, ALICE, &event_id(1), "", NOW_MS);
     bob_client.reconnect();
 
-    // Mis-versioned but authenticated known content becomes recoverable locally.
+    // Model an older receiver durably deferring supported content, then recover
+    // the exact saved plaintext after restart without decrypting twice.
     let mut recovered = content(9);
     recovered["body"] = json!("Recovered reply");
     recovered["created_at"] = json!(NOW_MS + 9);
@@ -673,12 +640,25 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
     let payload = encrypt_raw(&mut a, &bob, 9, &recovered);
     send(&alice_client, BOB, &event_id(9), &payload, false);
     let json = bob_client.delivery(&event_id(9), false);
-    process(&mut b, &bob_client, ALICE, &event_id(9), &json);
+    b.decrypt_signal_event_with_decoder(
+        &alice.trusted(),
+        json.as_bytes(),
+        SystemTime::now(),
+        super::recovery::previous_decoder,
+    )
+    .unwrap();
+    bob_client
+        .session
+        .request(Request::Ack {
+            sender_void_id: ALICE.into(),
+            event_id: event_id(9),
+        })
+        .unwrap();
     let mut future = content(10);
     future["type"] = json!("still_unknown");
     let payload = encrypt_raw(&mut a, &bob, 10, &future);
-    send(&alice_client, BOB, &event_id(10), &payload, true);
-    let json = bob_client.delivery(&event_id(10), true);
+    send(&alice_client, BOB, &event_id(10), &payload, false);
+    let json = bob_client.delivery(&event_id(10), false);
     process(&mut b, &bob_client, ALICE, &event_id(10), &json);
     assert_eq!(count(&b, "SELECT count(*) FROM deferred_signal_events"), 2);
     let before = session(&b, ALICE);
@@ -705,7 +685,7 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
         &audience,
         BOB,
         122,
-        ApplicationProtocolVersion::V2,
+        ApplicationProtocolVersion::V1,
     );
     let payload = a
         .encrypt_signal_message(
@@ -723,10 +703,6 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
     assert_eq!(count(&b, "SELECT count(*) FROM messages"), 5);
     assert_eq!(
         crate::relay::SUPPORTED_APPLICATION_PROTOCOL,
-        if cfg!(feature = "coordinated-v2-release") {
-            ApplicationProtocolVersion::V2
-        } else {
-            ApplicationProtocolVersion::V1
-        }
+        ApplicationProtocolVersion::V1
     );
 }

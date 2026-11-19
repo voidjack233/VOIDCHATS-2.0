@@ -49,8 +49,8 @@ impl Error {
                         "Relay authentication failed. Use Reconnect to try signing in again."
                     }
                     (_, "not_found") => "The peer’s VOID-ID was not found.",
-                    (_, "protocol_release_not_enabled") => {
-                        "This release cannot send events requiring a newer protocol. Use the coordinated VOID update."
+                    (_, "protocol_unsupported") => {
+                        "This operation requires a newer VOID protocol. Check for an update."
                     }
                     ("send" | "send_versioned", "duplicate_event") => {
                         "The relay already has this event. Acceptance is unconfirmed."
@@ -187,10 +187,6 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
     if db.outgoing_message_blocked(event_id)? {
         return Err(StorageError::EventConflict.into());
     }
-    let versioned = db.outgoing_reply(event_id)?.is_some();
-    if versioned && !session.is_some_and(Session::feature_sends_allowed) {
-        return Err(StorageError::FeatureUnavailable.into());
-    }
     let operation = db.outgoing_operation(event_id)?;
     if operation.state == "sent" || db.has_verified_delivery(event_id)? {
         return Ok(());
@@ -275,19 +271,10 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
             db,
             session,
             &operation.peer,
-            if versioned {
-                Request::SendVersioned {
-                    event_id: event_id.into(),
-                    to_void_id: operation.peer.clone(),
-                    payload_base64,
-                    min_protocol_version: crate::relay::ApplicationProtocolVersion::V2,
-                }
-            } else {
-                Request::Send {
-                    event_id: event_id.into(),
-                    to_void_id: operation.peer.clone(),
-                    payload_base64,
-                }
+            Request::Send {
+                event_id: event_id.into(),
+                to_void_id: operation.peer.clone(),
+                payload_base64,
             },
         );
         match reply {
@@ -314,12 +301,11 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
     attempt
 }
 
-/// Explicit worker operation, deliberately not scheduled at production startup.
+/// Persistent controls resume through the worker's bounded retry dispatcher.
 /// Acceptance is only relay acceptance, never proof of recipient application.
-#[allow(dead_code)]
 pub(crate) fn send_control(db: &mut Database, session: &Session, id: &str) -> Result<()> {
-    if !session.feature_sends_allowed() {
-        return Err(StorageError::FeatureUnavailable.into());
+    if !session.is_active() {
+        return Err(Error::Offline);
     }
     let operation = db.control(id)?;
     if operation.state == "accepted" {
@@ -371,11 +357,10 @@ pub(crate) fn send_control(db: &mut Database, session: &Session, id: &str) -> Re
         db,
         session,
         &operation.peer,
-        Request::SendVersioned {
+        Request::Send {
             event_id: id.into(),
             to_void_id: operation.peer.clone(),
             payload_base64,
-            min_protocol_version: crate::relay::ApplicationProtocolVersion::V2,
         },
     ) {
         Ok(Reply::Accepted { event_id }) if event_id == id => {

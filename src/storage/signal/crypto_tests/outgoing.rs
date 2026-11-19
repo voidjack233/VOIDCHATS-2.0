@@ -24,11 +24,7 @@ fn receive(
     id: &str,
     payload: &[u8],
 ) -> crate::storage::Result<IncomingOutcome> {
-    let mut frame: Value =
-        serde_json::from_slice(&relay_event(peer.void_id(), id, payload)).unwrap();
-    frame["type"] = json!("event_versioned");
-    frame["min_protocol_version"] = json!("2");
-    db.decrypt_signal_event(peer, &serde_json::to_vec(&frame).unwrap(), at())
+    db.decrypt_signal_event(peer, &relay_event(peer.void_id(), id, payload), at())
 }
 fn original(
     a: &mut Database,
