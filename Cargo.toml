@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[features]
+default = []
+# Operator-coordinated artifact only. Do not distribute/run against a deployment
+# that still allows V1 clients. See docs/protocol-v2-release.md.
+coordinated-v2-release = []
+
 [dependencies]
 async-trait = "0.1"
 slint = "1"

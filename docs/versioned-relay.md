@@ -5,7 +5,7 @@ Contract reviewed against backend commit `2faffd27f12d1d02ec28e4be298610d4fee508
 - [MESSAGING_API.md](https://github.com/voidjack233/VOIDCHATS-2.0/blob/2faffd27f12d1d02ec28e4be298610d4fee50856/docs/MESSAGING_API.md)
 - [VERSIONED_DELIVERY.md](https://github.com/voidjack233/VOIDCHATS-2.0/blob/2faffd27f12d1d02ec28e4be298610d4fee50856/docs/VERSIONED_DELIVERY.md)
 
-Every authenticated messaging socket sends `protocol` with version `"1"` and
+The default build sends `protocol` with version `"1"` and
 waits for a matching `protocol_ok` before becoming available to the messaging
 worker. Reconnects repeat this exchange. A legacy event can arrive before the
 agreement; one bounded in-flight delivery is buffered and released after the
@@ -38,7 +38,10 @@ A loopback-only `cfg(test)` configuration negotiates version 2 for isolated
 verification. The actual pinned Go relay, real Signal ciphertext, receiver ACKs,
 blocked queues, reconnects, and deferred recovery passed the checks recorded in
 [receiver V2 verification](receiver-v2-verification.md). The production entry
-point still always uses version 1; there is no runtime override.
+point still uses version 1; there is no runtime override. The opt-in
+`coordinated-v2-release` build selects version 2 only for an operator-coordinated
+release. See the [V2 release runbook](protocol-v2-release.md) for the manual gate,
+activation order, verification and rollback limits.
 
 Do not raise `SUPPORTED_APPLICATION_PROTOCOL` until the Rust receiver can safely
 process or durably defer every encrypted event allowed at that version, including

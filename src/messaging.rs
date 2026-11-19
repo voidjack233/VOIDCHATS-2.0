@@ -49,6 +49,9 @@ impl Error {
                         "Relay authentication failed. Use Reconnect to try signing in again."
                     }
                     (_, "not_found") => "The peer’s VOID-ID was not found.",
+                    (_, "protocol_release_not_enabled") => {
+                        "This release cannot send events requiring a newer protocol. Use the coordinated VOID update."
+                    }
                     ("send" | "send_versioned", "duplicate_event") => {
                         "The relay already has this event. Acceptance is unconfirmed."
                     }

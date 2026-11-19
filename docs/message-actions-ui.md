@@ -38,10 +38,12 @@ and account initialization are not involved.
 
 ## Protocol gate and recovery
 
-Production still advertises V1. Reply, reactions and Delete for Everyone are
+The default build still advertises V1. Reply, reactions and Delete for Everyone are
 disabled with an explanation; Delete for Me and cancelling a saved reply remain
 available. The worker independently enforces this gate even if UI flags are
-stale. Only the existing loopback-only V2 test configuration enables remote sends.
+stale. Loopback-only V2 fixtures and the explicitly opt-in coordinated V2 build
+enable remote sends. See the [release runbook](protocol-v2-release.md); successful
+negotiation does not attest the server-wide minimum.
 No capability handshake, new encrypted format or Go change was introduced.
 
 An already-submitted action can persist under its verified V2 session when the

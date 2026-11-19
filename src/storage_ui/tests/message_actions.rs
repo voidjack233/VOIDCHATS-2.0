@@ -35,10 +35,25 @@ impl NativeFixture {
         let root = path.to_owned();
         let storage = bind_fixture(&ui, move |_| (root.clone(), key.clone())).unwrap();
         let activity = storage.relay_activity();
+        #[cfg(not(feature = "coordinated-v2-release"))]
         let (connection, relay) = crate::relay::Connection::spawn_with_test_protocol(
             endpoint.into(),
             audience.into(),
             crate::relay::ApplicationProtocolVersion::V2,
+            move |_| {
+                Ok(account::RegisteredIdentity {
+                    void_id: id.into(),
+                    key: ed25519_dalek::SigningKey::from_bytes(&[seed; 32]),
+                })
+            },
+            crate::report_relay_status(&ui),
+            activity,
+        )
+        .unwrap();
+        #[cfg(feature = "coordinated-v2-release")]
+        let (connection, relay) = crate::relay::Connection::spawn_for_release_test(
+            endpoint.into(),
+            audience.into(),
             move |_| {
                 Ok(account::RegisteredIdentity {
                     void_id: id.into(),
@@ -77,10 +92,15 @@ impl Drop for NativeFixture {
 #[ignore = "requires explicitly provisioned loopback Go relay and synthetic accounts 101/202"]
 fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
     assert_eq!(std::env::var("VOID_TEST_DISPOSABLE").as_deref(), Ok("1"));
-    assert_eq!(
-        std::env::var("VOID_TEST_BACKEND_COMMIT").as_deref(),
-        Ok("2faffd27f12d1d02ec28e4be298610d4fee50856")
+    let backend = std::env::var("VOID_TEST_BACKEND_COMMIT").unwrap();
+    assert!(
+        backend == "2faffd27f12d1d02ec28e4be298610d4fee50856"
+            || backend == "9eb131933a3c9e95cc8b5dba1bebae6400691419"
     );
+    if cfg!(feature = "coordinated-v2-release") {
+        assert_eq!(backend, "9eb131933a3c9e95cc8b5dba1bebae6400691419");
+        assert_eq!(std::env::var("VOID_TEST_MIN_PROTOCOL").as_deref(), Ok("2"));
+    }
     let endpoint = std::env::var("VOID_TEST_RELAY_URL").unwrap();
     let audience = std::env::var("VOID_TEST_RELAY_AUDIENCE").unwrap();
     i_slint_backend_testing::init_integration_test_with_system_time();

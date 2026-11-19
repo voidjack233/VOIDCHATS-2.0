@@ -44,7 +44,11 @@ impl From<ApplicationProtocolVersion> for String {
 // Raise only when every permitted encrypted event can be processed or durably
 // deferred. Transport frame support alone does not make a version safe.
 pub(crate) const SUPPORTED_APPLICATION_PROTOCOL: ApplicationProtocolVersion =
-    ApplicationProtocolVersion::V1;
+    if cfg!(feature = "coordinated-v2-release") {
+        ApplicationProtocolVersion::V2
+    } else {
+        ApplicationProtocolVersion::V1
+    };
 
 pub(super) enum ServerFrame {
     Challenge(Challenge),

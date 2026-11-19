@@ -283,7 +283,11 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
     assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
     assert_eq!(
         crate::relay::SUPPORTED_APPLICATION_PROTOCOL,
-        ApplicationProtocolVersion::V1
+        if cfg!(feature = "coordinated-v2-release") {
+            ApplicationProtocolVersion::V2
+        } else {
+            ApplicationProtocolVersion::V1
+        }
     );
 }
 
@@ -499,7 +503,7 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
         &audience,
         ALICE,
         121,
-        ApplicationProtocolVersion::V1,
+        ApplicationProtocolVersion::V2,
     );
     let mut bob_client = Client::start(
         &endpoint,
@@ -719,6 +723,10 @@ fn actual_go_v2_receiver_recovers_blocked_queue_and_commits_before_ack() {
     assert_eq!(count(&b, "SELECT count(*) FROM messages"), 5);
     assert_eq!(
         crate::relay::SUPPORTED_APPLICATION_PROTOCOL,
-        ApplicationProtocolVersion::V1
+        if cfg!(feature = "coordinated-v2-release") {
+            ApplicationProtocolVersion::V2
+        } else {
+            ApplicationProtocolVersion::V1
+        }
     );
 }

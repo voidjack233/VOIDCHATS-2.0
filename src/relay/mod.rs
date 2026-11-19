@@ -136,26 +136,18 @@ fn report_rejection(command: &str, code: &str) {
 pub(crate) struct Session {
     pub(crate) generation: u64,
     commands: mpsc::Sender<PendingRequest>,
-    #[cfg(test)]
-    isolated_v2: bool,
+    application_version: ApplicationProtocolVersion,
 }
 
 impl Session {
-    /// No production feature dispatch until the coordinated mandatory V2 release.
+    /// Enabled only by the coordinated release artifact (or explicit loopback fixture).
     pub(crate) fn feature_sends_allowed(&self) -> bool {
         self.feature_operations_supported() && self.is_active()
     }
     /// A previously negotiated V2 session can authorize saving a queued intent
     /// even if its socket closes before the storage worker reaches the command.
     pub(crate) fn feature_operations_supported(&self) -> bool {
-        #[cfg(test)]
-        {
-            self.isolated_v2
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
+        self.application_version == ApplicationProtocolVersion::V2
     }
     pub(crate) fn is_active(&self) -> bool {
         !self.commands.is_closed()
@@ -163,6 +155,19 @@ impl Session {
 
     // Called on the SQLCipher worker. The socket continues to receive events during this wait.
     pub(crate) fn request(&self, request: Request) -> Result<Reply, RequestError> {
+        if let Request::SendVersioned {
+            min_protocol_version,
+            ..
+        } = &request
+            && (*min_protocol_version > self.application_version
+                || (*min_protocol_version >= ApplicationProtocolVersion::V2
+                    && !self.feature_operations_supported()))
+        {
+            return Err(RequestError::Rejected {
+                command: "send_versioned",
+                code: "protocol_release_not_enabled".into(),
+            });
+        }
         let (reply, response) = blocking::channel();
         self.commands
             .try_send(PendingRequest {
@@ -193,7 +198,14 @@ impl Connection {
         report: impl Fn(ConnectionStatus) + Send + 'static,
         activity: impl Fn(Activity) + Send + 'static,
     ) -> io::Result<(Self, Worker)> {
-        Self::spawn_with_activity(ENDPOINT.into(), load_registered_identity, report, activity)
+        Self::spawn_configured(
+            ENDPOINT.into(),
+            API_BASE.into(),
+            SUPPORTED_APPLICATION_PROTOCOL,
+            load_registered_identity,
+            report,
+            activity,
+        )
     }
 
     #[cfg(test)]
@@ -205,6 +217,8 @@ impl Connection {
         Self::spawn_with_activity(endpoint, load_identity, report, |_| {})
     }
 
+    /// Legacy V1 fixtures. Release-policy tests use spawn_for_release_test.
+    #[cfg(test)]
     pub(crate) fn spawn_with_activity(
         endpoint: String,
         load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
@@ -214,7 +228,7 @@ impl Connection {
         Self::spawn_configured(
             endpoint,
             API_BASE.into(),
-            SUPPORTED_APPLICATION_PROTOCOL,
+            ApplicationProtocolVersion::V1,
             load_identity,
             report,
             activity,
@@ -222,6 +236,25 @@ impl Connection {
     }
 
     /// Only compiled into tests, and deliberately unusable with a remote relay.
+    #[cfg(test)]
+    pub(crate) fn spawn_for_release_test(
+        endpoint: String,
+        audience: String,
+        load_identity: impl Fn(&str) -> io::Result<SessionIdentity> + Send + 'static,
+        report: impl Fn(ConnectionStatus) + Send + 'static,
+        activity: impl Fn(Activity) + Send + 'static,
+    ) -> io::Result<(Self, Worker)> {
+        Self::spawn_with_test_protocol(
+            endpoint,
+            audience,
+            SUPPORTED_APPLICATION_PROTOCOL,
+            load_identity,
+            report,
+            activity,
+        )
+    }
+
+    /// Explicit protocol simulation for isolated legacy and V2 tests only.
     #[cfg(test)]
     pub(crate) fn spawn_with_test_protocol(
         endpoint: String,
@@ -321,8 +354,7 @@ async fn run_worker(
         let session = Session {
             generation,
             commands,
-            #[cfg(test)]
-            isolated_v2: application_version == ApplicationProtocolVersion::V2,
+            application_version,
         };
         let mut connected_at = None;
         let attempt = async {
@@ -401,7 +433,7 @@ async fn serve_once(
     report: impl Fn(ConnectionStatus),
 ) -> ConnectionStatus {
     let result = connect_and_authenticate(endpoint, audience, identity, handshake_timeout).await;
-    monitor_authenticated::<fn(Activity)>(result, &report, None, SUPPORTED_APPLICATION_PROTOCOL)
+    monitor_authenticated::<fn(Activity)>(result, &report, None, ApplicationProtocolVersion::V1)
         .await
 }
 

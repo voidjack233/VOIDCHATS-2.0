@@ -8,10 +8,12 @@ pagination, local row IDs, or display names.
 
 ## Release gate
 
-Production still advertises application protocol **1**. `messaging::send` rejects
+The default build still advertises application protocol **1**. `messaging::send` rejects
 replies and `messaging::send_control` rejects all feature controls before lookup,
 prekey claims, encryption, or transport. There is no environment-variable override.
-Only the existing numeric-loopback `cfg(test)` V2 connection can dispatch them.
+The explicit `coordinated-v2-release` build and numeric-loopback V2 fixtures
+can dispatch them. The feature is an operator coordination choice, not proof
+of the deployment minimum; follow the [release runbook](protocol-v2-release.md).
 Ordinary messages and delivery receipts continue using the legacy transport.
 
 The chosen compatibility policy is a coordinated mandatory application update.
