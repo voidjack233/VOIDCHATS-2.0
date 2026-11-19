@@ -4,20 +4,25 @@ Status: activated on 2026-11-02 after the owner explicitly authorized the review
 
 VOID-IDs are canonical decimal positive int64 strings. They are public addresses, never authentication credentials. Event IDs are lowercase nonzero UUID strings, scoped by authenticated sender. Opaque bytes use canonical padded standard base64. Every frame is one JSON object with exactly its documented string fields; duplicate, unknown, null, numeric and case-variant fields are rejected. Timestamps in this document are illustrative server values, not client inputs.
 
+The [initial V1 contract](PROTOCOL_V1.md) includes encrypted text, replies, reactions,
+Delete for Everyone and delivery receipts over ordinary `send`/`event`. Their
+prerelease application-V2 activation plan is retired; generic future-version
+transport and mandatory minimum enforcement remain available.
+
 ## Authenticate and locate
 
 Use the Ed25519 `auth_begin` → `auth_challenge` → `auth_proof` → `auth_ok` flow documented in [WEBSOCKET.md](../WEBSOCKET.md). Production proofs bind the registered public key, VOID-ID, canonical audience, challenge, expiry and nonce. One active connection is maintained per account. Authentication must complete before commands or pending delivery.
 
 ### Application protocol support
 
-Activated on 2026-11-18 at 13:04 (Asia/Manila), with [migration 008 and backend source `2faffd2`](VERSIONED_DELIVERY.md). Every authenticated connection starts at application protocol version 1. This is separate from the authentication proof's `authenticate:v2` transcript, which is unchanged. After `auth_ok`, a capable client advertises its highest supported application protocol version:
+Activated on 2026-11-18 at 13:04 (Asia/Manila), with [migration 008 and backend source `2faffd2`](VERSIONED_DELIVERY.md). Every authenticated connection starts at application protocol version 1. This is separate from the authentication proof's `authenticate:v2` transcript, which is unchanged. After `auth_ok`, VOID Native advertises the initial application protocol version:
 
 ```json
-{"type":"protocol","version":"2"}
+{"type":"protocol","version":"1"}
 ```
 
 ```json
-{"type":"protocol_ok","version":"2"}
+{"type":"protocol_ok","version":"1"}
 ```
 
 Versions are canonical decimal strings from `1` through `2147483647`; numeric JSON values, leading zeros, signs and whitespace are invalid. Support means the client can process events requiring any version up to its advertised version. Versions can increase or repeat during a connection; decreasing the advertised version returns `invalid_frame` and closes the socket. The confirmation is sent before newly enabled delivery resumes. Ordinary version 1 events may arrive before that confirmation, including immediately after authentication.
@@ -56,11 +61,11 @@ The current recipient connection receives:
 {"type":"event","event_id":"00000000-0000-4000-8000-000000000001","from_void_id":"101","payload_base64":"AAECAw==","created_at":"2026-11-02T06:00:00Z","expires_at":"2026-12-02T06:00:00Z"}
 ```
 
-The payload is forwarded unchanged. The synthetic bytes above are not a valid MLS object or an encryption format. Encrypted edits, deletions, reactions and other device instructions use this identical opaque mechanism; the backend does not parse their meaning.
+The payload is forwarded unchanged. The synthetic bytes above are not valid Signal ciphertext or an encryption format. Initial V1 text, replies, reactions, Delete for Everyone and encrypted delivery receipts all use this identical opaque mechanism; Go does not parse their meaning.
 
-### Versioned encrypted events
+### Generic future-version encrypted events
 
-Legacy `send` always requires recipient application protocol version 1. Use `send_versioned` to attach a minimum recipient version outside the ciphertext:
+Ordinary `send` always requires recipient application protocol version 1 and covers the entire initial feature set. The retained generic `send_versioned` extension can attach a higher minimum for a future incompatible application contract; it is not required for replies, reactions, deletions or receipts. For example:
 
 ```json
 {"type":"send_versioned","event_id":"00000000-0000-4000-8000-000000000002","to_void_id":"202","payload_base64":"AAECAw==","min_protocol_version":"2"}
@@ -92,7 +97,7 @@ The server deletes only the matching sender/event addressed to the authenticated
 
 The row and ciphertext are removed from the live queue. No delivered column, receipt, history or tombstone remains. An ACK from a different account cannot delete the intended recipient's event. A missing/previously deleted event also returns `ack_ok`; that response asserts no historical delivery outcome and does not reveal another account's queue.
 
-There is no sender-facing delivered notification or reverse encrypted receipt lifecycle in this implementation.
+Go does not synthesize sender-facing delivered notifications. Native clients exchange encrypted delivery receipts as ordinary opaque V1 events in the reverse direction; receipt authorization, deduplication and local delivery state belong to the clients.
 
 ## Online opaque protocol relay
 
@@ -167,4 +172,4 @@ operations are gated; the separate account-deletion exchange remains available.
 An idle unconfirmed connection receives no messages. Reconnects negotiate again.
 See [release activation and limits](VERSIONED_DELIVERY.md#mandatory-minimum-protocol).
 The enforcement-capable backend was deployed on 2026-11-18 at 19:49 (Asia/Manila),
-source `9eb1319`, with minimum 1. The version 2 minimum is not active.
+source `9eb1319`, with minimum 1. The version 2 minimum is not active and is not required for the initial feature set.

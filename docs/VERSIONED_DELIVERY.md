@@ -2,6 +2,11 @@
 
 Activated on 2026-11-18 at 13:04 (Asia/Manila), after the owner instructed "apply the change". Migration 008 and backend source `2faffd27f12d1d02ec28e4be298610d4fee50856` are running against the existing PostgreSQL 18.6 database `void2-0e2ee`. This enables the generic encrypted delivery path for VOID Native Reply, Reactions and Delete for Everyone. The exact frames and reconnect behavior are specified in [MESSAGING_API.md](MESSAGING_API.md#application-protocol-support).
 
+The [initial V1 review](PROTOCOL_V1.md) supersedes the prerelease plan to enable
+replies, reactions and deletion as application V2. All initial features use
+ordinary V1 delivery. The activation records below are historical; generic future
+version support and minimum enforcement remain unchanged.
+
 ## Activation and preservation
 
 The existing PostgreSQL 18 cluster and backend were stopped at inspection. The owner started PostgreSQL after the session could not perform administrator authentication. No old relay process or other database client was connected during migration. A full private recovery dump was restored into a newly initialized, isolated PostgreSQL 18 cluster. The exact migration preserved every restored record, defaulted all queued events to version 1, and passed all three Go schema/access validators. The isolated cluster was removed afterward.
@@ -36,7 +41,7 @@ Migration 008 is already applied to this database; do not replay it. The followi
 2. Stop and drain every old backend reader and writer before permitting versioned traffic. An already-running old binary ignores the additive version column and can deliver unsupported ciphertext. Its old strict schema validator also rejects the migrated layout on restart, so mixed-version operation is unsuitable.
 3. Apply migration 008 once with the schema owner's existing access while the backend is stopped. It adds `messages.min_protocol_version integer NOT NULL DEFAULT 1` and a positive-version constraint. It preserves queued IDs, routing, ciphertext and timestamps, including expired rows. It does not change accounts, authentication keys, database roles, privileges, indexes or the 30-day retention rule. Existing table-level queue grants cover the new column; restricted deployments with column-specific grants need their existing operator to review access before startup.
 4. Start only the new backend build. Its read-only schema validator requires the new column, default and validated constraint as well as effective access. Startup never applies migrations.
-5. Verify legacy send/receive/ACK and the native client's reconnect advertisement before enabling version 2 feature sends. Native clients must support the `event_versioned` envelope and preserve local Signal processing order.
+5. Verify ordinary V1 send/receive/ACK and the native client's reconnect advertisement. Initial replies, reactions and deletion require no V2 activation. Any future incompatible release needs a matching native receiver and a separate coordinated rollout.
 
 Do not roll back to an old backend while any event requiring a newer protocol remains queued: old readers cannot enforce the compatibility gate. Do not discard or relabel queued ciphertext to make rollback appear safe. Coordinate recovery with a version-aware build and the client's encryption state. Restoring an older backup must also preserve/replay committed account deletion state before admitting traffic.
 
@@ -97,7 +102,8 @@ Queued ciphertext stays stored until normal ACK or expiration. Reconnects must
 negotiate again even if the previous socket was compatible. The existing
 per-event required-version check and queue ordering remain in effect.
 
-For a coordinated release, first ship native support for post-authentication
+The initial feature set requires no V2 release. For a genuine future incompatible
+release, first ship native support for that contract, post-authentication
 advertisement and `update_required` handling. Once that update is available,
 separately authorize setting `VOID_MIN_PROTOCOL_VERSION=2` in the deployment
 environment and restarting the enforcement-capable backend. Replace every old

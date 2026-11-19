@@ -9,6 +9,8 @@ queued messages, prekey inventories, and claims were preserved. See the
 remain reserved while queued ciphertext and public prekeys are removed
 transactionally. Startup never applies migrations.
 
+The [initial messaging protocol V1](docs/PROTOCOL_V1.md) includes text, replies, reactions, Delete for Everyone and encrypted receipts through ordinary opaque `send`/`event`. No backend runtime change is required. The prerelease V2 feature activation plan is retired; generic versioned delivery and mandatory minimum enforcement are retained for future incompatible releases. This consolidation does not deploy or reset anything.
+
 A Go backend that authenticates accounts and temporarily queues opaque encrypted events for delivery over WebSockets. VOID-ID is a public contact address, not an authentication credential. Devices retain their own history and encryption state.
 
 Version-aware encrypted delivery was activated on 2026-11-18 at 13:04 (Asia/Manila), with source `2faffd2` and [migration 008](migrations/008_message_protocol_version.sql). All 18 accounts and 13 queued events were preserved; existing ciphertext defaults to version 1. Each connection starts at version 1 and can advertise newer support after authentication. An incompatible queue head holds delivery until a capable connection resumes or the event expires. VOID Native Reply, Reactions and Delete for Everyone share this generic encrypted path. See the [client contract](docs/MESSAGING_API.md#application-protocol-support) and [activation, recovery and ordering limits](docs/VERSIONED_DELIVERY.md).
