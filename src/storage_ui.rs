@@ -947,6 +947,7 @@ fn pin_to_present(ui: &AppWindow) {
 
 fn advance_timeline_revision(ui: &AppWindow) {
     ui.set_timeline_revision(ui.get_timeline_revision().wrapping_add(1));
+    ui.window().request_redraw();
 }
 
 fn is_current_timeline(ui: &AppWindow, id: i64, selection: i32) -> bool {
@@ -1428,6 +1429,7 @@ fn show_conversation(
 
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
+    mod history_scrolling;
     mod message_actions;
     mod presentation;
     mod update_required;

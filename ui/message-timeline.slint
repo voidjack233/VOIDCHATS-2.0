@@ -22,6 +22,8 @@ export component MessageTimeline inherits Rectangle {
     in property <bool> send-busy;
     in property <bool> remote-enabled;
     in property <bool> action-busy;
+    // NOTE2EE's comfortable-density floor, scaled up for taller viewports.
+    in property <length> older-prefetch-distance: 640px;
     callback message-action(StoredMessage, string, length, length);
     callback toggle-reaction(string, string, string);
     callback page-timeline(bool);
@@ -40,7 +42,7 @@ export component MessageTimeline inherits Rectangle {
             let older = event.delta-y > 0px && timeline.content-y >= 0px && root.timeline-has-older;
             let newer = event.delta-y < 0px && timeline.content-y <= timeline.end-offset
                 && root.timeline-has-newer;
-            if (older || newer) && !root.timeline-loading && !root.conversation-loading {
+            if (older || newer) && !root.conversation-loading {
                 root.timeline-following = false;
                 timeline.scroll-revision += 1;
                 timeline.page-direction = older ? -1 : 1;
@@ -55,14 +57,24 @@ export component MessageTimeline inherits Rectangle {
         private property <length> end-offset: min(0px, self.visible-height - self.content-height);
         private property <length> tracked-y;
         private property <int> scroll-revision;
+        private property <int> captured-revision: -1;
         private property <int> page-direction;
+        private property <bool> capture-pending;
+        private property <bool> awaiting-page;
         private property <int> model-revision: root.timeline-revision;
         private property <bool> following: root.timeline-following;
+        private property <bool> opening: root.conversation-loading;
+        private property <length> older-threshold: max(root.older-prefetch-distance, 2 * self.visible-height);
+        private property <{ revision: int, width: length, height: length, content: length }> geometry:
+            { revision: self.model-revision, width: self.visible-width,
+                height: self.visible-height, content: self.content-height };
+        private property <{ revision: int, width: length, height: length, content: length }> settled-geometry;
 
         function place-content(offset: length) {
             let target = clamp(offset, self.end-offset, 0px);
+            // A programmatic correction must also replace the input baseline.
+            self.tracked-y = target;
             if abs(target - self.content-y) > 0.25px {
-                self.tracked-y = target;
                 self.content-y = target;
             }
         }
@@ -71,10 +83,19 @@ export component MessageTimeline inherits Rectangle {
             self.place-content(self.following ? self.end-offset : self.content-y);
         }
 
-        function user-scrolled() {
+        function user-scrolled(explicit-input: bool) {
             if self.content-y == self.tracked-y { return; }
-            let older = self.content-y > self.tracked-y;
+            let delta = self.content-y - self.tracked-y;
+            let older = delta > 0px;
             self.tracked-y = self.content-y;
+            // Model reconciliation, resizing and anchor placement can clamp the
+            // viewport too. Only real ScrollView input may create demand then.
+            if self.opening || (!explicit-input && self.geometry != self.settled-geometry) { return; }
+            // Retain movement immediately, even if the worker commits before
+            // reactive row capture runs. The next capture picks the visible key.
+            if !root.timeline-following && root.timeline-anchor-key != "" {
+                root.timeline-anchor-offset += delta;
+            }
             root.timeline-following = !root.timeline-has-newer
                 && self.content-y <= self.end-offset + 8px;
             if root.timeline-following {
@@ -83,32 +104,79 @@ export component MessageTimeline inherits Rectangle {
             } else {
                 self.scroll-revision += 1;
             }
-            if root.timeline-loading || root.conversation-loading { return; }
-            self.page-direction = older && root.timeline-has-older && self.content-y >= -96px ? -1
-                : !older && root.timeline-has-newer && self.content-y <= self.end-offset + 96px ? 1 : 0;
+            // Each untracked position delta is fresh scroll intent, including
+            // scrollbar input and movement received while a page is loading.
+            self.page-direction = older ? -1 : 1;
         }
 
         init => { self.sync-viewport(); }
-        changed following => { self.sync-viewport(); }
+        changed following => {
+            if self.following {
+                self.page-direction = 0;
+                self.capture-pending = false;
+            }
+            self.sync-viewport();
+        }
+        changed opening => {
+            if self.opening {
+                self.page-direction = 0;
+                self.capture-pending = false;
+                self.awaiting-page = false;
+            }
+        }
         changed model-revision => { self.sync-viewport(); }
         changed end-offset => { self.sync-viewport(); }
-        // Thumb clicks also move the viewport without emitting ScrollView.scrolled.
+        changed geometry => {
+            self.sync-viewport();
+            self.settled-geometry = self.geometry;
+            self.capture-pending = false;
+        }
+        // Animated wheel frames and scrollbar moves refresh the reading anchor.
         changed content-y => {
             root.clear-timestamp-tip();
-            self.user-scrolled();
+            self.user-scrolled(false);
         }
-        scrolled => { self.user-scrolled(); }
+        scrolled => {
+            self.user-scrolled(true);
+        }
 
         Timer {
             interval: 8ms;
-            running: timeline.page-direction != 0;
+            running: !root.conversation-loading && (timeline.awaiting-page
+                || timeline.page-direction != 0 || timeline.geometry != timeline.settled-geometry);
             triggered => {
+                if root.timeline-loading { return; }
+                // Let geometry change handlers restore the anchor before consuming
+                // retained input. Proximity alone cannot authorize another page.
+                if timeline.geometry != timeline.settled-geometry { return; }
+                timeline.awaiting-page = false;
                 let older = timeline.page-direction < 0;
-                timeline.page-direction = 0;
-                if !root.timeline-loading && !root.conversation-loading
-                    && (older ? root.timeline-has-older : root.timeline-has-newer) {
-                    root.page-timeline(older);
+                let eligible = older
+                    ? root.timeline-has-older && timeline.content-y >= -timeline.older-threshold
+                    : root.timeline-has-newer && timeline.content-y <= timeline.end-offset + 96px;
+                if timeline.page-direction == 0 || root.timeline-following || !eligible {
+                    timeline.page-direction = 0;
+                    timeline.capture-pending = false;
+                    return;
                 }
+                if !timeline.capture-pending || timeline.captured-revision != timeline.scroll-revision {
+                    // Capture against settled, current geometry BEFORE the worker
+                    // can replace/trim the window. Retry the capture pulse if rows
+                    // materialized after the last one; never dispatch without ACK.
+                    timeline.scroll-revision += 1;
+                    timeline.capture-pending = true;
+                    return;
+                }
+                timeline.page-direction = 0;
+                timeline.capture-pending = false;
+                // End the old kinetic binding at this captured position. Fresh
+                // input during the load must not fight a pre-pagination animation.
+                timeline.tracked-y = timeline.content-y;
+                timeline.content-y = timeline.tracked-y;
+                // Keep this same timer alive through the asynchronous commit;
+                // headless/native redraw scheduling must not lose restoration.
+                timeline.awaiting-page = true;
+                root.page-timeline(older);
             }
         }
 
@@ -133,27 +201,34 @@ export component MessageTimeline inherits Rectangle {
                 private property <length> bubble-top: self.y + bubble-row.y;
                 private property <int> user-scroll: timeline.scroll-revision;
                 private property <bool> anchored: message.key != ""
-                    && message.key == root.timeline-anchor-key && !root.timeline-following;
+                    && message.key == root.timeline-anchor-key && !root.timeline-following
+                    && timeline.geometry == timeline.settled-geometry;
                 private property <{ y: length, revision: int }> anchor-placement: self.anchored
                     ? { y: clamp(root.timeline-anchor-offset - self.bubble-top, timeline.end-offset, 0px),
                         revision: root.timeline-revision }
                     : { y: 0px, revision: 0 };
 
                 init => {
-                    if self.anchored { timeline.place-content(self.anchor-placement.y); }
+                    if self.anchored {
+                        timeline.place-content(self.anchor-placement.y);
+                    }
                 }
                 changed anchor-placement => {
-                    if self.anchored { timeline.place-content(self.anchor-placement.y); }
+                    if self.anchored {
+                        timeline.place-content(self.anchor-placement.y);
+                    }
                 }
                 changed user-scroll => {
                     // Keep the first on-screen message, including partial visibility.
                     // Store the bubble position so inserting a date marker doesn't move it.
                     let viewport-top = -timeline.content-y;
                     if !root.timeline-following && message.key != ""
+                        && timeline.geometry == timeline.settled-geometry
                         && (index == 0 || self.y <= viewport-top + history.spacing)
                         && self.y + self.height > viewport-top {
                         root.timeline-anchor-key = message.key;
                         root.timeline-anchor-offset = self.bubble-top - viewport-top;
+                        timeline.captured-revision = timeline.scroll-revision;
                     }
                 }
                 if message.day != "": HorizontalLayout {
