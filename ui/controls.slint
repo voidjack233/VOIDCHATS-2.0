@@ -1,6 +1,10 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+export global NavigationInput {
+    in-out property <bool> keyboard;
+}
+
 export component Clickable inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
@@ -26,6 +30,7 @@ export component Clickable inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             key-focus.focus();
+            NavigationInput.keyboard = false;
             root.pointer-focus = true;
             root.clicked();
         }
@@ -35,6 +40,7 @@ export component Clickable inherits Rectangle {
         enabled: root.enabled;
         focus-gained(reason) => {
             if reason != FocusReason.window-activation {
+                NavigationInput.keyboard = reason != FocusReason.pointer-click;
                 root.pointer-focus = reason == FocusReason.pointer-click;
             }
         }

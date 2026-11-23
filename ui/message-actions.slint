@@ -18,6 +18,7 @@ export component MessageActions inherits Rectangle {
     in property <bool> outgoing;
     in property <bool> deleted;
     in property <bool> remote-enabled;
+    in property <bool> delete-everyone-enabled;
     in property <[StoredReaction]> reactions;
     in property <length> anchor-x;
     in property <length> anchor-y;
@@ -84,16 +85,16 @@ export component MessageActions inherits Rectangle {
                     spacing: 8px;
                     MenuText { text: "Choose where to remove this message. This does not delete your account."; color: Theme.secondary; font-size: 12px; }
                     MenuAction { label: "Delete for Me"; destructive: true; clicked => { root.delete-message(false); root.dismiss(); } }
-                    if root.outgoing: MenuAction { label: "Delete for Everyone"; destructive: true; enabled: root.remote-enabled; clicked => { root.mode = "confirm"; } }
-                    if root.outgoing && !root.remote-enabled: MenuText { text: "Connect to messaging to delete for everyone."; color: Theme.secondary; font-size: 12px; }
+                    if root.outgoing: MenuAction { label: "Delete for Everyone"; destructive: true; enabled: root.delete-everyone-enabled; clicked => { root.mode = "confirm"; } }
+                    if root.outgoing && root.delete-everyone-enabled && !root.remote-enabled: MenuText { text: "Deletion will be queued and sent when messaging reconnects."; color: Theme.secondary; font-size: 12px; }
                 }
                 if root.mode == "confirm": VerticalLayout {
                     spacing: 12px;
-                    MenuText { text: "Remove this message here and send an encrypted deletion request to the other person. Relay acceptance does not confirm removal on their device."; color: Theme.secondary; font-size: 13px; }
+                    MenuText { text: "Remove this message here and queue an encrypted deletion request for the other person. If offline, it will send when messaging reconnects. Relay acceptance does not confirm removal on their device."; color: Theme.secondary; font-size: 13px; }
                     HorizontalLayout {
                         alignment: end; spacing: 8px;
                         MenuAction { label: "Cancel"; clicked => { root.dismiss(); } }
-                        MenuAction { label: "Delete message"; destructive: true; enabled: root.remote-enabled; clicked => { root.delete-message(true); root.dismiss(); } }
+                        MenuAction { label: "Delete message"; destructive: true; enabled: root.delete-everyone-enabled; clicked => { root.delete-message(true); root.dismiss(); } }
                     }
                 }
             }

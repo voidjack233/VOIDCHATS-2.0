@@ -25,6 +25,12 @@ fn viewport(ui: &AppWindow) -> ElementHandle {
 }
 
 fn identifies(bubble: &ElementHandle, message: &StoredMessage) -> bool {
+    if bubble
+        .accessible_label()
+        .is_some_and(|label| label == message.body)
+    {
+        return true;
+    }
     let body = message.body.clone();
     let exact_time = message.exact_time.clone();
     bubble
@@ -59,18 +65,20 @@ fn message_bubble(ui: &AppWindow, key: &str) -> ElementHandle {
             return pair[0].clone();
         }
     }
-    let rendered = ElementHandle::find_by_element_id(ui, "MessageBubble::body")
+    let rendered = ElementHandle::find_by_element_id(ui, "MessageBubble::root")
         .map(|element| {
             (
                 element.id(),
                 element.accessible_label(),
                 element.absolute_position(),
+                element.size(),
             )
         })
         .collect::<Vec<_>>();
     panic!(
-        "anchor bubble {:?} was not visible; body elements: {rendered:?}",
-        message.body
+        "anchor bubble {:?} was not visible; first key={} roots: {rendered:?}",
+        message.body,
+        first_key(ui)
     )
 }
 
@@ -349,6 +357,7 @@ impl Scenario {
                 && ui.get_selected_conversation() == self.chat.to_string()
                 && self.settled() =>
             {
+                snapshot(ui, self.native, "02b-returned-reading-position");
                 assert_anchor(ui, self.saved.as_ref().unwrap());
                 assert_eq!(self.requests.borrow().len(), self.quiet_count);
                 ui.window().set_size(LogicalSize::new(850.0, 560.0));
@@ -581,6 +590,10 @@ impl Scenario {
 }
 
 fn run_scenario(native: bool) {
+    run_fixture(native, false);
+}
+
+fn run_fixture(native: bool, profile: bool) {
     let root = TestDir::new();
     let key = ed25519_dalek::SigningKey::from_bytes(&[119; 32]);
     let public = key.verifying_key();
@@ -645,6 +658,12 @@ fn run_scenario(native: bool) {
     ui.window().set_size(LogicalSize::new(1080.0, 680.0));
     let path = root.0.clone();
     let worker = bind_fixture(&ui, move |_| (path.clone(), key.clone())).unwrap();
+    if profile {
+        profile_native_scroll(&ui, &worker, chat, oldest);
+        worker.finish();
+        assert_fixture_history(&root.0, public.as_bytes(), chat);
+        return;
+    }
     let requests = Rc::new(RefCell::new(Vec::<PageObservation>::new()));
     let observed = requests.clone();
     let inject_while_loading = Rc::new(Cell::new(false));
@@ -738,11 +757,15 @@ fn run_scenario(native: bool) {
     timer.stop();
     worker.finish();
     assert_eq!(scenario.borrow().phase, 22);
+    assert_fixture_history(&root.0, public.as_bytes(), chat);
+}
+
+fn assert_fixture_history(root: &std::path::Path, public: &[u8; 32], chat: i64) {
     let db = Database::open(
-        &root.0,
+        root,
         Owner {
             void_id: "41",
-            public_key: public.as_bytes(),
+            public_key: public,
         },
     )
     .unwrap();
@@ -753,6 +776,124 @@ fn run_scenario(native: bool) {
     assert_eq!(
         db.draft(chat).unwrap().as_deref(),
         Some("Keep the isolated fixture draft")
+    );
+}
+
+// Performance measurements must not include ElementHandle tree searches and
+// repeated geometry inspection from the functional scenario above. Drive the
+// same storage worker and real Slint callbacks using only ordinary wheel input.
+fn profile_native_scroll(ui: &AppWindow, worker: &Worker, chat: i64, oldest: String) {
+    let active = Rc::new(Cell::new(false));
+    let frames = Rc::new(RefCell::new(Vec::<f64>::new()));
+    let measured = frames.clone();
+    let recording = active.clone();
+    let previous = Cell::new(None::<Instant>);
+    ui.window()
+        .set_rendering_notifier(move |phase, _| {
+            if !matches!(phase, slint::RenderingState::BeforeRendering) {
+                return;
+            }
+            if recording.get() {
+                let now = Instant::now();
+                if let Some(last) = previous.replace(Some(now)) {
+                    measured
+                        .borrow_mut()
+                        .push(now.duration_since(last).as_secs_f64() * 1000.0);
+                }
+            } else {
+                previous.set(None);
+            }
+        })
+        .unwrap();
+    let older_pages = Rc::new(Cell::new(0));
+    let newer_pages = Rc::new(Cell::new(0));
+    let (older_count, newer_count) = (older_pages.clone(), newer_pages.clone());
+    let weak = ui.as_weak();
+    let sender = worker.sender.clone();
+    ui.on_page_timeline(move |older| {
+        let count = if older { &older_count } else { &newer_count };
+        count.set(count.get() + 1);
+        let ui = weak.upgrade().unwrap();
+        request_timeline(&ui, &sender, |id, selection| {
+            crate::storage_ui::Command::Page(id, selection, older)
+        });
+    });
+    ui.window().set_size(LogicalSize::new(1600.0, 900.0));
+    ui.show().unwrap();
+    worker.opener()(ui);
+    let weak = ui.as_weak();
+    let stage = Rc::new(Cell::new(0));
+    let state = stage.clone();
+    let warmup = Cell::new(Instant::now());
+    let started = Instant::now();
+    let timer = Timer::default();
+    timer.start(TimerMode::Repeated, Duration::from_millis(8), move || {
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "native paging profile timed out"
+        );
+        let ui = weak.upgrade().unwrap();
+        assert!(ui.get_stored_messages().row_count() <= 120);
+        match state.get() {
+            0 if ui.get_storage_ready() => {
+                ui.invoke_select_stored_conversation(chat.to_string().into());
+                state.set(1);
+            }
+            1 if !ui.get_conversation_loading() && ui.get_stored_messages().row_count() > 0 => {
+                warmup.set(Instant::now());
+                state.set(2);
+            }
+            2 if warmup.get().elapsed() >= Duration::from_secs(8) => {
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: LogicalPosition::new(1000.0, 400.0),
+                });
+                active.set(true);
+                state.set(3);
+            }
+            3 | 4 => {
+                if state.get() == 3
+                    && !ui.get_timeline_loading()
+                    && ui.get_timeline_anchor_key() == oldest
+                    && ui.get_timeline_anchor_offset() >= 0.0
+                {
+                    state.set(4);
+                }
+                if state.get() == 4
+                    && !ui.get_timeline_loading()
+                    && !ui.get_timeline_has_newer()
+                    && ui.get_timeline_following()
+                {
+                    active.set(false);
+                    state.set(5);
+                    ui.hide().unwrap();
+                    slint::quit_event_loop().unwrap();
+                    return;
+                }
+                ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                    position: LogicalPosition::new(1000.0, 400.0),
+                    delta_x: 0.0,
+                    delta_y: if state.get() == 3 { 24.0 } else { -24.0 },
+                });
+            }
+            _ => {}
+        }
+    });
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    assert_eq!(stage.get(), 5);
+    assert!(older_pages.get() >= 3 && newer_pages.get() >= 3);
+    let mut frames = frames.borrow_mut();
+    frames.sort_by(f64::total_cmp);
+    assert!(frames.len() >= 100);
+    let percentile = |p: f64| frames[((frames.len() - 1) as f64 * p).round() as usize];
+    eprintln!(
+        "paging_scroll_frames={} p50_ms={:.3} p95_ms={:.3} max_ms={:.3} older_pages={} newer_pages={}",
+        frames.len(),
+        percentile(0.5),
+        percentile(0.95),
+        frames.last().unwrap(),
+        older_pages.get(),
+        newer_pages.get()
     );
 }
 
@@ -770,4 +911,135 @@ fn viewport_prefetch_preserves_real_worker_history_and_reading_positions() {
 #[ignore = "isolated native history rendering; no saved accounts, registration, or network"]
 fn render_isolated_history_prefetch_at_desktop_sizes() {
     run_scenario(true);
+}
+
+#[test]
+#[ignore = "native frame-time profile; isolated SQLCipher history, no saved accounts or network"]
+fn profile_isolated_native_history_scrolling() {
+    run_fixture(true, true);
+}
+
+#[test]
+fn offscreen_bubbles_keep_geometry_and_keyboard_actions() {
+    if !in_test_process(
+        "storage_ui::tests::history_scrolling::offscreen_bubbles_keep_geometry_and_keyboard_actions",
+    ) {
+        return;
+    }
+    std::thread::spawn(|| {
+        i_slint_backend_testing::init_integration_test_with_mock_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_setup_page(0);
+        ui.set_storage_ready(true);
+        ui.set_selected_conversation("isolated-rendering".into());
+        ui.set_remote_actions_supported(true);
+        ui.window().set_size(LogicalSize::new(1080.0, 680.0));
+        ui.set_stored_messages(ModelRc::new(VecModel::from(
+            (0..120)
+                .map(|i| StoredMessage {
+                    author_id: "123".into(),
+                    event_id: format!("00000000-0000-4000-8000-{i:012}").into(),
+                    key: format!("{i}:m:rendering-{i}").into(),
+                    body: format!("Isolated message {i}").into(),
+                    time: "11:38".into(),
+                    exact_time: "22 November 2026, 11:38:24 (UTC+08:00)".into(),
+                    outgoing: i % 2 != 0,
+                    status: if i % 2 != 0 { "Delivered" } else { "" }.into(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        let actions = Rc::new(Cell::new(0));
+        let observed = actions.clone();
+        ui.on_open_message_actions(move |_, _, _, _| observed.set(observed.get() + 1));
+        ui.show().unwrap();
+        let settle = || {
+            for _ in 0..5 {
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(20));
+                let _ = viewport(&ui).size();
+            }
+        };
+        settle();
+        let history = ElementHandle::find_by_element_id(&ui, "MessageTimeline::history")
+            .next()
+            .unwrap();
+        let original_size = history.size();
+        let original_position = history.absolute_position();
+        let rendered = || ElementHandle::find_by_element_id(&ui, "MessageBubble::root").count();
+        let pointer_count = rendered();
+        assert!(
+            (1..60).contains(&pointer_count),
+            "distant bubbles still render: {pointer_count}"
+        );
+        assert_eq!(ui.get_stored_messages().row_count(), 120);
+        let latest = ElementHandle::find_by_element_id(&ui, "MessageBubble::root")
+            .find(|bubble| {
+                bubble
+                    .accessible_label()
+                    .is_some_and(|label| label == "Isolated message 119")
+            })
+            .unwrap();
+        assert_eq!(
+            latest.accessible_description().unwrap(),
+            "22 November 2026, 11:38:24 (UTC+08:00) · Delivered"
+        );
+        // Tab restores the complete keyboard action order, without collapsing
+        // hidden rows or changing the reading position.
+        let tab = || {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: "\t".into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: "\t".into() });
+        };
+        tab();
+        settle();
+        // ElementHandle clips its search to the viewport. Compare the retained
+        // history geometry, including off-screen rows, rather than tree counts.
+        assert_eq!(history.size(), original_size);
+        assert_eq!(history.absolute_position(), original_position);
+        // Reaching an older message action may intentionally scroll it into
+        // view. That is normal Slint keyboard navigation, not an anchor jump.
+        for _ in 0..6 {
+            tab();
+        }
+        settle();
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: "\n".into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: "\n".into() });
+        assert!(
+            actions.get() > 0,
+            "keyboard message actions stopped working"
+        );
+        let keyboard_position = history.absolute_position();
+        // A pointer click returns to the cheap rendering path, while a focused
+        // action remains available and every row keeps its exact geometry.
+        let reply = ElementHandle::find_by_accessible_label(&ui, "Reply")
+            .find(|element| {
+                let y = element.absolute_position().y;
+                let view = viewport(&ui);
+                y > view.absolute_position().y
+                    && y < view.absolute_position().y + view.size().height - 32.0
+            })
+            .unwrap();
+        let p = reply.absolute_position();
+        let position = LogicalPosition::new(p.x + 16.0, p.y + 16.0);
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle();
+        assert!(rendered() < 60);
+        assert_eq!(history.size(), original_size);
+        assert_eq!(history.absolute_position(), keyboard_position);
+        ui.hide().unwrap();
+    })
+    .join()
+    .unwrap();
 }

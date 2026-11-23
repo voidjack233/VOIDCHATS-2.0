@@ -169,6 +169,12 @@ export component AppWindow inherits Window {
     in property <string> account-void-id;
     in property <string> timeline-today;
     in property <string> timeline-yesterday;
+    in-out property <length> timeline-viewport-y;
+    in-out property <bool> timeline-reflowing;
+    callback remember-timeline-position(string, length);
+    callback timeline-position(string) -> length;
+    timeline-position(key) => { return -1px; }
+    callback prune-timeline-positions();
     in-out property <int> setup-page: -1;
     in property <bool> setup-busy: true;
     in property <bool> setup-can-retry: true;
@@ -712,7 +718,10 @@ export component AppWindow inherits Window {
                     spacing: 8px;
 
                     WrappingText {
-                        text: root.connection-status == "Connected" ? "Relay authenticated" : root.connection-status;
+                        text: (root.connection-status == "Connected" ? "Relay authenticated" : root.connection-status)
+                            + (root.pending-controls && !root.remote-actions-supported ? "\nActions queued" : "");
+                        accessible-description: root.pending-controls && !root.remote-actions-supported
+                            ? "Saved message actions will sync when messaging reconnects." : "";
                         accessible-label: "Relay connection: " + self.text;
                         color: root.connection-status == "Authentication failed" ? Theme.error
                             : root.connection-status == "Connected" ? Theme.accent : Theme.secondary;
@@ -953,6 +962,9 @@ export component AppWindow inherits Window {
 
                 MessageTimeline {
                     stored-messages: root.stored-messages;
+                    timeline-viewport-y <=> root.timeline-viewport-y;
+                    timeline-reflowing <=> root.timeline-reflowing;
+                    remember-message-position(key, y) => { root.remember-timeline-position(key, y); }
                     remote-enabled: root.remote-actions-supported;
                     action-busy: root.action-busy;
                     toggle-reaction(author,event,emoji) => { root.toggle-reaction(author,event,emoji); }
@@ -1005,7 +1017,7 @@ export component AppWindow inherits Window {
                 }
                 if root.message-action-error != "": VerticalLayout {
                     vertical-stretch: 0; padding: 8px; spacing: 4px;
-                    WrappingText { text: root.message-action-error; color: Theme.error; font-size: 12px; }
+                    if root.message-action-error != "": WrappingText { text: root.message-action-error; color: Theme.error; font-size: 12px; }
                     if root.pending-controls && root.remote-actions-supported: Action { label: "Retry pending actions"; clicked => { root.retry-controls(); } }
                 }
                 if root.conversation-can-compose: MessageComposer {
@@ -1038,6 +1050,7 @@ export component AppWindow inherits Window {
         deleted: root.action-message.deleted;
         reactions: root.action-message.reactions;
         remote-enabled: root.remote-actions-supported && !root.action-busy && !root.conversation-peer-deleted && !root.action-message.deleted;
+        delete-everyone-enabled: root.storage-ready && !root.action-busy && !root.conversation-peer-deleted && !root.action-message.deleted;
         dismiss => { root.message-action-mode = ""; }
         reply => { root.choose-reply(root.action-message.author-id,root.action-message.event-id); root.message-action-mode = ""; }
         react(emoji) => { root.toggle-reaction(root.action-message.author-id,root.action-message.event-id,emoji); }

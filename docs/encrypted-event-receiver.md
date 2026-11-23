@@ -88,8 +88,10 @@ cleared, unread markers removed, and reactions deactivated. Message rows,
 timestamps, inbox digests, reply references, and receipt records remain intact.
 An original arriving later is inserted with a blank body and without a new unread
 marker. Redelivery and later reactions cannot resurrect deleted content. The
-UI renders the tombstone as a deleted-message placeholder and resolves
-quoted originals as deleted or unavailable, without storing copied body previews.
+UI excludes tombstoned messages before pagination and preview selection. Deleted
+messages leave no bubble, date row, or deletion placeholder. Quotes of deleted
+originals are hidden; genuinely missing originals retain the unavailable fallback.
+Tombstones and replay evidence remain stored, without copied body previews.
 
 ## Authenticated unsupported content
 

@@ -69,7 +69,7 @@ fn presentation_resolves_original_beyond_window_and_hides_deleted_metadata() {
         b.timeline_before(conversation, None, 1).unwrap()[0]
             .presentation
             .quote,
-        "Message deleted"
+        ""
     );
     let payload = encrypt_raw(
         &mut a,
@@ -82,10 +82,19 @@ fn presentation_resolves_original_beyond_window_and_hides_deleted_metadata() {
     b.close().unwrap();
     let mut b = bob.open();
     let row = b.timeline_before(conversation, None, 1).unwrap().remove(0);
-    assert!(row.presentation.deleted);
+    assert!(!row.presentation.deleted);
     assert!(row.presentation.quote.is_empty());
     assert!(row.presentation.reactions.is_empty());
-    assert_eq!(row.body, "Message deleted");
+    assert_eq!(row.body, "Original text");
+    assert_eq!(
+        b.timeline_before(conversation, None, 120).unwrap().len(),
+        120
+    );
+    assert!(
+        b.reference_cursor(conversation, &reference(ALICE, 136))
+            .unwrap()
+            .is_none()
+    );
     let mut reply = content(ALICE, BOB, 140);
     reply["body"] = json!("Missing original");
     reply["created_at"] = json!(NOW_MS + 140);
@@ -346,6 +355,9 @@ fn deletion_before_original_survives_restart_without_resurrection_or_phantom_unr
     b.decrypt_signal_event(&alice.trusted(), &original_event, at())
         .unwrap();
     assert_received(&b, ALICE, &event_id(1), "", NOW_MS);
+    let chat = b.conversations(true).unwrap()[0].id;
+    assert!(b.timeline_before(chat, None, 120).unwrap().is_empty());
+    assert!(b.last_message_previews([chat]).unwrap().is_empty());
     assert_eq!(count(&b, "SELECT count(*) FROM unread_messages"), 0);
     let state = session(&b, ALICE);
     assert_eq!(
@@ -401,7 +413,8 @@ fn deletion_preserves_reply_references_drafts_history_ids_and_receipts() {
     );
     receive(&mut b, &alice.trusted(), 3, &reaction).unwrap();
     let conversation = b.conversations(true).unwrap().remove(0).id;
-    b.save_draft(conversation, "Unsent draft").unwrap();
+    b.save_reply_draft(conversation, "Unsent draft", Some(&target))
+        .unwrap();
     let before = b
         .conversation_timeline(conversation)
         .unwrap()
@@ -422,12 +435,21 @@ fn deletion_preserves_reply_references_drafts_history_ids_and_receipts() {
         Some("Unsent draft")
     );
     assert_eq!(
-        before,
+        before.into_iter().skip(1).collect::<Vec<_>>(),
         b.conversation_timeline(conversation)
             .unwrap()
             .into_iter()
             .map(|row| row.cursor)
             .collect::<Vec<_>>()
+    );
+    assert!(b.reply_draft(conversation).unwrap().is_none());
+    assert_eq!(
+        b.reply_draft_preview(conversation).unwrap(),
+        (String::new(), String::new())
+    );
+    assert_eq!(
+        b.last_message_previews([conversation]).unwrap()[&conversation].body,
+        "Follow-up"
     );
     assert_eq!(count(&b, "SELECT count(*) FROM receipt_outbox"), 1);
     assert!(

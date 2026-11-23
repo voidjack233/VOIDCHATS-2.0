@@ -45,6 +45,11 @@ impl Database {
             return Ok(payload);
         }
         self.write(|tx| {
+            // Check inside the Signal write transaction so a superseded draft
+            // cannot advance the ratchet or acquire ciphertext through a stale job.
+            if crate::storage::outgoing::control_superseded(tx, id)? {
+                return Err(Error::EventConflict);
+            }
             let (own, _) = local_account(tx)?;
             let routing = Routing {
                 event_id: id,

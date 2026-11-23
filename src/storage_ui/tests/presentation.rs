@@ -1,6 +1,145 @@
 use super::*;
 
 #[test]
+#[ignore = "native message-area visual and keyboard fixture; no accounts or network"]
+fn render_compact_message_area_and_keyboard_actions() {
+    let ui = AppWindow::new().unwrap();
+    ui.set_setup_page(0);
+    ui.set_storage_ready(true);
+    ui.set_selected_conversation("preview".into());
+    ui.set_conversation_title("Message area preview".into());
+    ui.set_remote_actions_supported(true);
+    let messages = [
+        ("w", false, "", false),
+        ("Hello world", true, "Delivered", false),
+        ("First line\n\nA second paragraph keeps its intentional spacing.", false, "", false),
+        ("A longer message wraps naturally as the window becomes narrower. Its timestamp and verified delivery indicator stay together inside the bubble.", true, "Sent to relay", false),
+        ("Deleted content must never appear", true, "Delivered", true),
+    ].into_iter().enumerate().map(|(index, (body, outgoing, status, deleted))| StoredMessage {
+        author_id: if outgoing { "101" } else { "202" }.into(),
+        event_id: format!("00000000-0000-4000-8000-{index:012}").into(),
+        key: format!("{}:m:preview-{index}", 100 + index).into(),
+        body: body.into(), outgoing, status: status.into(), deleted,
+        time: "19:38".into(), exact_time: "19 November 2026, 19:38:24 (UTC+08:00)".into(),
+        day: if index == 0 { "19 November 2026".into() } else { "".into() },
+        reactions: if index == 1 { ModelRc::new(VecModel::from(vec![
+            crate::StoredReaction { emoji: "👍".into(), count: 2, mine: true },
+            crate::StoredReaction { emoji: "🎉".into(), count: 1, mine: false },
+        ])) } else { ModelRc::default() },
+        ..Default::default()
+    }).collect::<Vec<_>>();
+    ui.set_stored_messages(ModelRc::new(VecModel::from(messages)));
+    ui.set_timeline_today("19 November 2026".into());
+    // Keyboard activation is recorded only; this fixture never queues a message.
+    let activated = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let actions = activated.clone();
+    ui.on_open_message_actions(move |message, mode, _, _| {
+        actions
+            .borrow_mut()
+            .push((message.event_id.to_string(), mode.to_string()));
+    });
+    ui.show().unwrap();
+    let weak = ui.as_weak();
+    let step = Cell::new(0);
+    let timer = Timer::default();
+    let completed = activated.clone();
+    timer.start(TimerMode::Repeated, Duration::from_millis(450), move || {
+        let ui = weak.upgrade().unwrap();
+        let i = step.get();
+        if i > 0 {
+            let image = ui.window().take_snapshot().unwrap();
+            let mut bytes = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+            for pixel in image.as_slice() {
+                bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b]);
+            }
+            std::fs::create_dir_all("target/message-area-review/after").unwrap();
+            std::fs::write(format!("target/message-area-review/after/{i}.ppm"), bytes).unwrap();
+        }
+        match i {
+            0 => ui.window().set_size(slint::PhysicalSize::new(850, 560)),
+            1 => ui
+                .window()
+                .dispatch_event(slint::platform::WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(530.0, 370.0),
+                }),
+            2 => {
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerExited);
+                ui.window().set_size(slint::PhysicalSize::new(1080, 680));
+            }
+            3 => ui.window().set_size(slint::PhysicalSize::new(1280, 720)),
+            4 => ui.window().set_size(slint::PhysicalSize::new(1600, 900)),
+            5 => {
+                // The sidebar, New action and then message actions are in Tab order.
+                for _ in 0..7 {
+                    ui.window()
+                        .dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                            text: "\t".into(),
+                        });
+                    ui.window()
+                        .dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                            text: "\t".into(),
+                        });
+                }
+            }
+            6 => {
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::KeyPressed { text: "\n".into() });
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::KeyReleased {
+                        text: "\n".into(),
+                    });
+            }
+            7 => {
+                assert!(
+                    !completed.borrow().is_empty(),
+                    "Tab and Enter must activate message actions"
+                );
+                let bubble = i_slint_backend_testing::ElementHandle::find_by_element_id(
+                    &ui,
+                    "MessageBubble::root",
+                )
+                .find(|element| {
+                    element
+                        .accessible_label()
+                        .is_some_and(|label| label.starts_with("A longer message wraps naturally"))
+                })
+                .expect("the long preview message must be rendered");
+                let origin = bubble.absolute_position();
+                let size = bubble.size();
+                let position = slint::LogicalPosition::new(
+                    origin.x + size.width / 2.0,
+                    origin.y + size.height / 2.0,
+                );
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                        position,
+                        button: slint::platform::PointerEventButton::Right,
+                    });
+                ui.window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                        position,
+                        button: slint::platform::PointerEventButton::Right,
+                    });
+            }
+            _ => {
+                ui.hide().unwrap();
+                slint::quit_event_loop().unwrap();
+            }
+        }
+        step.set(i + 1);
+    });
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    assert!(
+        activated.borrow().iter().any(|(_, mode)| mode == "actions"),
+        "right-click must open the existing message actions menu"
+    );
+}
+
+#[test]
 fn quote_callback_restores_original_outside_the_loaded_window() {
     if !in_test_process(
         "storage_ui::tests::presentation::quote_callback_restores_original_outside_the_loaded_window",

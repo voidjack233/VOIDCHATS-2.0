@@ -33,3 +33,18 @@ slint-build = "1"
 
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"
+
+# Scrolling exercises generated UI, geometry and Windows accessibility code on
+# every frame. Optimize those paths for normal cargo run builds while retaining
+# development debug assertions, overflow checks and debug information.
+[profile.dev.package.voidchats-native]
+opt-level = 2
+
+[profile.dev.package.i-slint-core]
+opt-level = 2
+
+[profile.dev.package.i-slint-backend-winit]
+opt-level = 2
+
+[profile.dev.package.i-slint-renderer-femtovg]
+opt-level = 2

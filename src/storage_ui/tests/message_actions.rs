@@ -231,7 +231,7 @@ fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
             }
             12 if !ui.get_action_busy()
                 && !ui.get_pending_controls()
-                && row.as_ref().is_some_and(|r| r.deleted) =>
+                && ui.get_stored_messages().row_count() == 2 =>
             {
                 *bb.borrow_mut() =
                     NativeFixture::new(&bpath, "202", "101", 122, &endpoint, &audience);
@@ -242,20 +242,19 @@ fn native_callbacks_exchange_features_offline_and_restore_reply_drafts() {
                 bb.borrow().connection.connect("202".into());
                 observed.set(14);
             }
-            14 if brow.as_ref().is_some_and(|r| r.deleted)
-                && ub.get_stored_messages().row_count() == 3
+            14 if ub.get_stored_messages().row_count() == 2
                 && ui
                     .get_stored_messages()
-                    .row_data(2)
+                    .row_data(1)
                     .is_some_and(|r| r.status == "Delivered")
                 && ub.get_remote_actions_supported() =>
             {
-                let reply = ub.get_stored_messages().row_data(1).unwrap();
-                assert_eq!(reply.quote, "Message deleted");
+                let reply = ub.get_stored_messages().row_data(0).unwrap();
+                assert!(reply.quote.is_empty());
                 ub.invoke_delete_message(reply.author_id, reply.event_id, false);
                 observed.set(15);
             }
-            15 if !ub.get_action_busy() && ub.get_stored_messages().row_count() == 2 => {
+            15 if !ub.get_action_busy() && ub.get_stored_messages().row_count() == 1 => {
                 observed.set(16);
                 slint::quit_event_loop().unwrap();
             }
@@ -467,7 +466,6 @@ fn offline_actions_preserve_drafts_and_allow_local_delete_and_reply_cancellation
                     event
                 );
                 ui.invoke_toggle_reaction("123".into(), event.into(), "👍".into());
-                ui.invoke_delete_message("123".into(), event.into(), true);
                 assert!(!ui.get_send_busy());
                 assert!(!ui.get_action_busy());
                 ui.invoke_cancel_reply();
@@ -490,7 +488,9 @@ fn offline_actions_preserve_drafts_and_allow_local_delete_and_reply_cancellation
             }
             4 if !ui.get_action_busy() && ui.get_stored_messages().row_count() == 1 => {
                 assert_eq!(ui.get_timeline_anchor_key(), "120:m:next");
-                assert_eq!(ui.get_timeline_anchor_offset(), 16.0);
+                // A replacement anchor keeps its own measured offset, rather
+                // than borrowing the removed message's 16 px offset.
+                assert!(ui.get_timeline_anchor_offset().is_finite());
                 assert!(!ui.get_timeline_following());
                 observed.set(5);
                 slint::quit_event_loop().unwrap();

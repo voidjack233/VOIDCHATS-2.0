@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Action, Clickable, WrappingText } from "controls.slint";
+import { Action, Clickable } from "controls.slint";
 
 export struct StoredReaction { emoji: string, count: int, mine: bool }
 export struct StoredMessage { author-id: string, event-id: string, deleted: bool, quote: string, quote-author: string, quote-target: string, reactions: [StoredReaction], key: string, body: string, day: string, time: string, exact-time: string, outgoing: bool, status: string, retry-event: string }
@@ -11,13 +11,32 @@ export component MessageBubble inherits Rectangle {
     in property <bool> show-retry;
     in property <bool> remote-enabled;
     in property <bool> actions-enabled;
+    out property <bool> action-focused: root.tools-focused;
+    private property <bool> tools-focused;
+    private property <bool> tools-hovered;
     callback message-action(string, length, length);
     private property <bool> toolbar-visible;
     private property <bool> footer-hovered;
-    hover := TouchArea { changed has-hover => { if self.has-hover { root.toolbar-visible = true; } } }
+    private property <bool> compact-tools: root.row-width - root.width < 100px;
+    changed visible => {
+        if !self.visible {
+            self.tools-hovered = false;
+            self.toolbar-visible = false;
+        }
+    }
+    hover := TouchArea {
+        changed has-hover => { if self.has-hover { root.toolbar-visible = true; } }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.up && event.button == PointerEventButton.right
+                && root.actions-enabled && root.message.event-id != "" {
+                root.message-action("actions", self.absolute-position.x + self.mouse-x,
+                    self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
     Timer {
         interval: 180ms; running: root.toolbar-visible;
-        triggered => { if !hover.has-hover && !root.footer-hovered && !reply-action.hovered && !react-action.hovered && !delete-action.hovered { root.toolbar-visible = false; } }
+        triggered => { if !hover.has-hover && !root.footer-hovered && !root.tools-hovered { root.toolbar-visible = false; } }
     }
     in property <bool> retry-enabled;
     callback retry();
@@ -51,10 +70,16 @@ export component MessageBubble inherits Rectangle {
     min-height: content.min-height;
     preferred-height: content.min-height;
     vertical-stretch: 0;
-    background: root.message.outgoing ? Theme.outgoing : Theme.elevated;
+    background: root.message.deleted ? Theme.surface : root.message.outgoing ? Theme.outgoing : Theme.elevated;
     border-radius: 10px;
     border-width: 1px;
-    border-color: root.message.outgoing ? Theme.selected : Theme.divider;
+    border-color: !root.message.deleted && root.message.outgoing ? Theme.selected : Theme.divider;
+    // One accessible message group retains its text and exact metadata without
+    // making every decorative/footer item a separate moving accessibility node.
+    accessible-role: groupbox;
+    accessible-label: root.message.deleted ? "" : root.message.body;
+    accessible-description: root.message.exact-time
+        + (root.status != "" && root.show-status-icon ? " · " + root.status-label : "");
 
     content := VerticalLayout {
         alignment: start;
@@ -62,28 +87,26 @@ export component MessageBubble inherits Rectangle {
         padding-top: 6px;
         padding-bottom: 6px;
         spacing: 2px;
-        body := WrappingText {
-            text: root.message.deleted ? "Message deleted" : root.message.body;
+        body := Text {
+            accessible-role: none;
+            min-width: 0px;
+            wrap: word-wrap;
+            text: root.message.deleted ? "" : root.message.body;
             color: root.message.deleted ? Theme.secondary : Theme.primary;
             font-italic: root.message.deleted;
             font-size: 14px;
         }
         footer := HorizontalLayout {
-            if root.message.event-id != "": Clickable {
-                width: 18px; height: 18px; label: "Message actions";
-                enabled: root.actions-enabled;
-                changed hovered => { root.footer-hovered = self.hovered; if self.hovered {root.toolbar-visible = true;} }
-                clicked => { root.message-action("actions", self.absolute-position.x, self.absolute-position.y); }
-                Image { source: @image-url("icons/more.svg"); width: 16px; height: 16px; colorize: Theme.secondary; }
-            }
             alignment: end;
             spacing: 4px;
 
             if root.message.time != "": Rectangle {
                 width: clock.preferred-width;
-                height: root.status != "" ? 18px : clock.preferred-height;
+                height: 16px;
 
                 clock := Text {
+                    accessible-role: none;
+                    height: parent.height;
                     vertical-alignment: center;
                     text: root.message.time;
                     accessible-label: root.message.exact-time;
@@ -96,19 +119,14 @@ export component MessageBubble inherits Rectangle {
                     changed has-hover => {
                         root.footer-hovered = self.has-hover;
                         if self.has-hover {root.toolbar-visible = true;}
-                        if self.has-hover {
-                            root.timestamp-hovered(root.message.exact-time,
-                                self.absolute-position.x + self.width / 2, self.absolute-position.y);
-                        } else {
-                            root.timestamp-left();
-                        }
+                        root.timestamp-left();
                     }
                 }
             }
             if root.status != "" && !root.show-retry: Rectangle {
                 width: 14px;
-                height: 18px;
-                accessible-role: text;
+                height: 16px;
+                accessible-role: none;
                 accessible-label: root.show-status-icon ? root.status-label : "";
                 Image {
                     width: 14px;
@@ -161,31 +179,63 @@ export component MessageBubble inherits Rectangle {
             }
         }
     }
-    Rectangle {
-        visible: root.toolbar-visible && root.message.event-id != "";
+    // Unlike opacity/visibility alone, removing dormant toolbars also removes
+    // their off-screen accessibility nodes. The timeline keeps focused and
+    // keyboard-navigation bubbles visible, so their actions remain available.
+    if root.visible && root.message.event-id != "": Rectangle {
+        private property <bool> focused: more-action.keyboard-focused || reply-action.keyboard-focused
+            || react-action.keyboard-focused || delete-action.keyboard-focused;
+        private property <bool> hovered: tools-hover.has-hover || more-action.hovered || reply-action.hovered
+            || react-action.hovered || delete-action.hovered;
+        changed focused => { root.tools-focused = self.focused; }
+        changed hovered => { root.tools-hovered = self.hovered; }
+        // Keep actions in the keyboard focus order while visually tucked away.
+        // Hover/focus changes opacity only, leaving bubble and viewport sizes stable.
+        opacity: root.toolbar-visible || more-action.keyboard-focused || reply-action.keyboard-focused || react-action.keyboard-focused || delete-action.keyboard-focused ? 1 : 0;
+        animate opacity { duration: 100ms; }
         // Sit beside the bubble when possible; never add message-row height.
-        x: root.message.outgoing ? max(-100px, -(root.row-width - root.width)) : min(root.width + 4px, root.row-width - 96px);
-        y: 0px; width: 96px; height: 30px;
+        x: root.message.outgoing ? -(self.width + 4px) : root.width + 4px;
+        y: (root.height - self.height) / 2;
+        width: root.compact-tools ? 32px : 96px; height: 32px;
         background: Theme.surface; border-radius: 8px;
         border-width: 1px; border-color: Theme.divider;
+        tools-hover := TouchArea { changed has-hover => { if self.has-hover { root.toolbar-visible = true; } } }
         HorizontalLayout {
             spacing: 0px;
+            more-action := Clickable {
+                visible: root.compact-tools;
+                width: root.compact-tools ? 32px : 0px;
+                label: "Message actions";
+                enabled: root.actions-enabled;
+                changed hovered => { if self.hovered { root.toolbar-visible = true; } }
+                clicked => { root.message-action("actions", self.absolute-position.x, self.absolute-position.y); }
+                Image { accessible-role: none; source: @image-url("icons/more.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: (parent.height - 16px) / 2; colorize: Theme.secondary; }
+            }
             reply-action := Clickable {
+                visible: !root.compact-tools;
+                width: root.compact-tools ? 0px : 32px;
                 label: "Reply";
                 enabled: root.actions-enabled && root.remote-enabled && !root.message.deleted;
+                changed hovered => { if self.hovered { root.toolbar-visible = true; } }
                 clicked => { root.message-action("reply", self.absolute-position.x, self.absolute-position.y); }
-                Image { source: @image-url("icons/reply.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: 7px; colorize: root.remote-enabled ? Theme.secondary : Theme.divider; }
+                Image { accessible-role: none; source: @image-url("icons/reply.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: (parent.height - 16px) / 2; colorize: reply-action.enabled ? Theme.secondary : Theme.divider; }
             }
             react-action := Clickable {
+                visible: !root.compact-tools;
+                width: root.compact-tools ? 0px : 32px;
                 label: "React";
                 enabled: root.actions-enabled && root.remote-enabled && !root.message.deleted;
+                changed hovered => { if self.hovered { root.toolbar-visible = true; } }
                 clicked => { root.message-action("react", self.absolute-position.x, self.absolute-position.y); }
-                Image { source: @image-url("icons/react.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: 7px; colorize: root.remote-enabled ? Theme.secondary : Theme.divider; }
+                Image { accessible-role: none; source: @image-url("icons/react.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: (parent.height - 16px) / 2; colorize: react-action.enabled ? Theme.secondary : Theme.divider; }
             }
             delete-action := Clickable {
+                visible: !root.compact-tools;
+                width: root.compact-tools ? 0px : 32px;
                 label: "Delete message"; enabled: root.actions-enabled;
+                changed hovered => { if self.hovered { root.toolbar-visible = true; } }
                 clicked => { root.message-action("delete", self.absolute-position.x, self.absolute-position.y); }
-                Image { source: @image-url("icons/delete-message.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: 7px; colorize: Theme.secondary; }
+                Image { accessible-role: none; source: @image-url("icons/delete-message.svg"); width: 16px; height: 16px; x: (parent.width - 16px) / 2; y: (parent.height - 16px) / 2; colorize: Theme.secondary; }
             }
         }
     }

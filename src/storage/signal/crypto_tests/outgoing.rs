@@ -215,6 +215,192 @@ fn outgoing_reaction_limit_scope_and_write_rollback() {
 }
 
 #[test]
+fn pending_reaction_toggles_coalesce_without_consuming_signal_state() {
+    let (alice, bob, mut a, mut b, chat) = pair();
+    let id = original(&mut a, &mut b, &alice, &bob, chat);
+    let target = reference(ALICE, &id);
+    let ratchet = session(&a, BOB);
+    let ids = [event_id(601), event_id(602), event_id(603)];
+    for (index, active) in [true, false, true].into_iter().enumerate() {
+        // Wall-clock order must not override monotonic reaction revisions.
+        a.queue_reaction(
+            chat,
+            &ids[index],
+            &target,
+            "👍",
+            active,
+            NOW_MS - index as i64,
+        )
+        .unwrap();
+    }
+    assert_eq!(a.pending_controls().unwrap(), vec![ids[2].clone()]);
+    for id in &ids[..2] {
+        assert!(a.control_superseded(id).unwrap());
+        assert!(a.encrypt_signal_control(&bob.trusted(), id).is_err());
+        assert!(a.control(id).unwrap().payload.is_none());
+        assert_eq!(a.control(id).unwrap().state, "pending"); // Not falsely accepted.
+    }
+    assert!(session(&a, BOB) == ratchet);
+    assert_eq!(a.control(&ids[0]).unwrap().active, Some(true));
+    assert_eq!(a.control(&ids[1]).unwrap().active, Some(false));
+    a.close().unwrap();
+    let mut a = alice.open();
+    // Submission retries keep the original meaning and cannot undo later choices.
+    assert_eq!(
+        a.queue_reaction(chat, &ids[0], &target, "👍", true, NOW_MS)
+            .unwrap(),
+        ids[0]
+    );
+    assert_eq!(a.pending_controls().unwrap(), vec![ids[2].clone()]);
+    assert_eq!(a.reaction_states(BOB, &target).unwrap()[0].3, 3);
+    let payload = a.encrypt_signal_control(&bob.trusted(), &ids[2]).unwrap();
+    receive(&mut b, &alice.trusted(), &ids[2], &payload).unwrap();
+    assert_eq!(
+        b.reaction_states(ALICE, &target).unwrap(),
+        vec![(ALICE.into(), "👍".into(), true, 3)]
+    );
+    assert_eq!(
+        receive(&mut b, &alice.trusted(), &ids[2], &payload).unwrap(),
+        IncomingOutcome::AlreadyStored
+    );
+    a.close().unwrap();
+    let mut a = alice.open();
+    assert_eq!(
+        a.encrypt_signal_control(&bob.trusted(), &ids[2]).unwrap(),
+        payload
+    );
+}
+
+#[test]
+fn coalesced_removal_delivers_final_inactive_state_without_an_add() {
+    let (alice, bob, mut a, mut b, chat) = pair();
+    let id = original(&mut a, &mut b, &alice, &bob, chat);
+    let target = reference(ALICE, &id);
+    let add = event_id(610);
+    let remove = event_id(611);
+    a.queue_reaction(chat, &add, &target, "👍", true, NOW_MS)
+        .unwrap();
+    a.queue_reaction(chat, &remove, &target, "👍", false, NOW_MS)
+        .unwrap();
+    assert_eq!(a.pending_controls().unwrap(), vec![remove.clone()]);
+    let payload = a.encrypt_signal_control(&bob.trusted(), &remove).unwrap();
+    receive(&mut b, &alice.trusted(), &remove, &payload).unwrap();
+    assert_eq!(
+        b.reaction_states(ALICE, &target).unwrap(),
+        vec![(ALICE.into(), "👍".into(), false, 2)]
+    );
+    let count: i64 = b
+        .connection
+        .query_row("SELECT count(*) FROM control_event_inbox", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    let bchat = b.conversations(true).unwrap()[0].id;
+    assert!(
+        b.timeline_before(bchat, None, 1).unwrap()[0]
+            .presentation
+            .reactions
+            .is_empty()
+    );
+}
+
+#[test]
+fn encrypted_and_uncertain_reactions_are_never_coalesced_or_reencrypted() {
+    let (alice, bob, mut a, mut b, chat) = pair();
+    let id = original(&mut a, &mut b, &alice, &bob, chat);
+    let target = reference(ALICE, &id);
+    let add = event_id(620);
+    let remove = event_id(621);
+    let latest = event_id(622);
+    a.queue_reaction(chat, &add, &target, "👍", true, NOW_MS)
+        .unwrap();
+    let p1 = a.encrypt_signal_control(&bob.trusted(), &add).unwrap();
+    a.queue_reaction(chat, &remove, &target, "👍", false, NOW_MS + 1)
+        .unwrap();
+    // Even pending state is immutable once ciphertext exists.
+    assert!(!a.control_superseded(&add).unwrap());
+    assert_eq!(
+        a.pending_controls().unwrap(),
+        vec![add.clone(), remove.clone()]
+    );
+    a.set_control_state(&add, "unconfirmed").unwrap();
+    a.queue_reaction(chat, &latest, &target, "👍", true, NOW_MS + 2)
+        .unwrap();
+    assert_eq!(
+        a.pending_controls().unwrap(),
+        vec![add.clone(), latest.clone()]
+    );
+    assert!(a.control_superseded(&remove).unwrap());
+    a.close().unwrap();
+    let mut a = alice.open();
+    let ratchet = session(&a, BOB);
+    assert_eq!(a.encrypt_signal_control(&bob.trusted(), &add).unwrap(), p1);
+    assert!(session(&a, BOB) == ratchet);
+    let p3 = a.encrypt_signal_control(&bob.trusted(), &latest).unwrap();
+    receive(&mut b, &alice.trusted(), &latest, &p3).unwrap();
+    receive(&mut b, &alice.trusted(), &add, &p1).unwrap();
+    assert_eq!(b.reaction_states(ALICE, &target).unwrap()[0].3, 3);
+    assert!(b.reaction_states(ALICE, &target).unwrap()[0].2);
+    a.set_control_state(&add, "accepted").unwrap();
+    assert!(!a.control_superseded(&add).unwrap());
+    assert_eq!(a.control(&add).unwrap().payload.unwrap(), p1);
+}
+
+#[test]
+fn reaction_coalescing_is_scoped_and_failed_writes_do_not_cancel_old_intents() {
+    let (alice, bob, mut a, mut b, chat) = pair();
+    let id = original(&mut a, &mut b, &alice, &bob, chat);
+    let target = reference(ALICE, &id);
+    let other = a.create_conversation("303", NOW_MS).unwrap();
+    let (other_message, _) = a.queue_outgoing(other, "Another peer", NOW_MS).unwrap();
+    let (second, _) = a.queue_outgoing(chat, "Another message", NOW_MS).unwrap();
+    let add = event_id(630);
+    let failure = event_id(634);
+    a.queue_reaction(chat, &add, &target, "👍", true, NOW_MS)
+        .unwrap();
+    a.queue_reaction(chat, &event_id(631), &target, "🔥", true, NOW_MS)
+        .unwrap();
+    a.queue_reaction(
+        chat,
+        &event_id(632),
+        &reference(ALICE, &second),
+        "👍",
+        true,
+        NOW_MS,
+    )
+    .unwrap();
+    a.queue_reaction(
+        other,
+        &event_id(633),
+        &reference(ALICE, &other_message),
+        "👍",
+        true,
+        NOW_MS,
+    )
+    .unwrap();
+    a.connection.execute_batch("CREATE TEMP TRIGGER reject_reaction BEFORE UPDATE ON message_reactions BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+    assert!(
+        a.queue_reaction(chat, &failure, &target, "👍", false, NOW_MS)
+            .is_err()
+    );
+    assert!(!a.control_superseded(&add).unwrap());
+    assert!(a.control(&failure).is_err());
+    assert_eq!(a.pending_controls().unwrap().len(), 4);
+    a.connection
+        .execute_batch("DROP TRIGGER reject_reaction;")
+        .unwrap();
+    a.queue_reaction(chat, &failure, &target, "👍", false, NOW_MS)
+        .unwrap();
+    assert!(a.control_superseded(&add).unwrap());
+    assert_eq!(a.pending_controls().unwrap().len(), 4);
+    for id in [event_id(631), event_id(632), event_id(633)] {
+        assert!(!a.control_superseded(&id).unwrap());
+        assert!(a.pending_controls().unwrap().contains(&id));
+    }
+}
+
+#[test]
 fn outgoing_control_ciphertext_write_rolls_back_signal_ratchet() {
     let (alice, bob, mut a, mut b, chat) = pair();
     let id = original(&mut a, &mut b, &alice, &bob, chat);
@@ -263,6 +449,74 @@ fn delete_for_me_hides_history_quotes_and_resends_without_losing_dedup() {
 }
 
 #[test]
+fn silent_remote_delete_removes_only_target_and_local_delete_stays_local() {
+    let (alice, bob, mut a, mut b, chat) = pair();
+    let mut ids = Vec::new();
+    for (index, text) in ["Hello!", "Remove me", "How are you?"]
+        .into_iter()
+        .enumerate()
+    {
+        let (id, _) = a.queue_outgoing(chat, text, NOW_MS + index as i64).unwrap();
+        let payload = a
+            .encrypt_signal_message(&bob.trusted(), chat, &id, text, NOW_MS + index as i64)
+            .unwrap();
+        receive(&mut b, &alice.trusted(), &id, &payload).unwrap();
+        ids.push(id);
+    }
+    let bchat = b.conversations(true).unwrap()[0].id;
+    assert_eq!(a.timeline_before(chat, None, 120).unwrap().len(), 3);
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 3);
+    let delete = event_id(590);
+    a.queue_delete_everyone(chat, &delete, &reference(ALICE, &ids[1]), NOW_MS + 3)
+        .unwrap();
+    let payload = a.encrypt_signal_control(&bob.trusted(), &delete).unwrap();
+    // Recipient restarts before the pending encrypted deletion is delivered.
+    b.close().unwrap();
+    let mut b = bob.open();
+    receive(&mut b, &alice.trusted(), &delete, &payload).unwrap();
+    let ratchet = session(&b, ALICE);
+    assert_eq!(
+        receive(&mut b, &alice.trusted(), &delete, &payload).unwrap(),
+        IncomingOutcome::AlreadyStored
+    );
+    assert!(session(&b, ALICE) == ratchet);
+    for (db, conversation) in [(&a, chat), (&b, bchat)] {
+        let visible = db.timeline_before(conversation, None, 120).unwrap();
+        assert_eq!(
+            visible
+                .iter()
+                .map(|row| row.body.as_str())
+                .collect::<Vec<_>>(),
+            ["Hello!", "How are you?"]
+        );
+        assert!(
+            db.reference_cursor(conversation, &reference(ALICE, &ids[1]))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            db.last_message_previews([conversation]).unwrap()[&conversation].body,
+            "How are you?"
+        );
+    }
+    let controls = a.pending_controls().unwrap();
+    a.delete_for_me(chat, &reference(ALICE, &ids[0])).unwrap();
+    assert_eq!(a.pending_controls().unwrap(), controls);
+    assert_eq!(a.timeline_before(chat, None, 120).unwrap().len(), 1);
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
+    a.close().unwrap();
+    b.close().unwrap();
+    let a = alice.open();
+    let b = bob.open();
+    assert_eq!(a.timeline_before(chat, None, 120).unwrap().len(), 1);
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
+    assert!(
+        b.message_deleted(ALICE, &reference(ALICE, &ids[1]))
+            .unwrap()
+    );
+}
+
+#[test]
 fn delete_everyone_tombstone_intent_restart_and_late_target() {
     let (alice, bob, mut a, mut b, chat) = pair();
     // Prepare original but leave it offline; deletion must survive arriving first.
@@ -279,11 +533,8 @@ fn delete_everyone_tombstone_intent_restart_and_late_target() {
             .unwrap(),
         deletion
     );
-    assert!(
-        a.timeline_before(chat, None, 1).unwrap()[0]
-            .presentation
-            .deleted
-    );
+    assert!(a.timeline_before(chat, None, 1).unwrap().is_empty());
+    assert!(a.last_message_previews([chat]).unwrap().is_empty());
     assert!(a.outgoing_message_blocked(&id).unwrap());
     assert!(crate::messaging::send(&mut a, None, &id).is_err());
     a.close().unwrap();
@@ -294,11 +545,8 @@ fn delete_everyone_tombstone_intent_restart_and_late_target() {
     receive(&mut b, &alice.trusted(), &id, &original).unwrap();
     let bchat = b.conversations(true).unwrap()[0].id;
     assert_eq!(b.messages(bchat).unwrap()[0].body, "");
-    assert!(
-        b.timeline_before(bchat, None, 120).unwrap()[0]
-            .presentation
-            .deleted
-    );
+    assert!(b.timeline_before(bchat, None, 120).unwrap().is_empty());
+    assert!(b.last_message_previews([bchat]).unwrap().is_empty());
     assert!(
         b.queue_delete_everyone(bchat, &event_id(562), &target, NOW_MS)
             .is_err()

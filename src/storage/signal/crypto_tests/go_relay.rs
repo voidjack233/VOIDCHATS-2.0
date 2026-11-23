@@ -239,8 +239,8 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
     assert!(b.message_deleted(ALICE, &target).unwrap());
     assert_eq!(count(&b, "SELECT count(*) FROM messages"), 2);
     let rows = b.timeline_before(bchat, None, 120).unwrap();
-    assert!(rows[0].presentation.deleted);
-    assert_eq!(rows[1].presentation.quote, "Message deleted");
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].presentation.quote.is_empty());
     ac.reconnect();
     bc.reconnect();
     // Existing text uses legacy send after reconnect, without extra bubbles.
@@ -258,10 +258,10 @@ fn actual_go_outgoing_features_resume_offline_intents_and_preserve_legacy_receip
         },
     )
     .unwrap();
-    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 1);
     b.close().unwrap();
     let b = bob.open();
-    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 2);
+    assert_eq!(b.timeline_before(bchat, None, 120).unwrap().len(), 1);
     assert_eq!(
         crate::relay::SUPPORTED_APPLICATION_PROTOCOL,
         ApplicationProtocolVersion::V1

@@ -304,6 +304,11 @@ pub(crate) fn send(db: &mut Database, session: Option<&Session>, event_id: &str)
 /// Persistent controls resume through the worker's bounded retry dispatcher.
 /// Acceptance is only relay acceptance, never proof of recipient application.
 pub(crate) fn send_control(db: &mut Database, session: &Session, id: &str) -> Result<()> {
+    // A stale dispatcher entry is a local no-op, not relay acceptance. Its
+    // immutable intent remains stored; only the newer revision is dispatched.
+    if db.control_superseded(id)? {
+        return Ok(());
+    }
     if !session.is_active() {
         return Err(Error::Offline);
     }

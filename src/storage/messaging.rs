@@ -137,14 +137,36 @@ const STANDALONE_MESSAGE: &str =
                  WHERE b.message_id = m.id)";
 
 impl Database {
-    fn visibility_filters(&self) -> Result<(&'static str, &'static str)> {
-        if !super::outgoing::schema_ready(&self.connection)? {
-            return Ok(("", ""));
+    fn visibility_filters(&self) -> Result<(String, String)> {
+        let version: i64 = self
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let mut saved = String::new();
+        let mut outgoing = String::new();
+        if version >= 10 {
+            // Keep inbox/outbox and tombstones as replay evidence, but exclude their
+            // messages before LIMIT so hidden rows never consume a history page.
+            saved.push_str(" AND NOT EXISTS (
+                SELECT 1 FROM inbox i JOIN message_tombstones t
+                ON t.peer_void_id=(SELECT peer_void_id FROM conversations WHERE id=m.conversation_id)
+                AND t.original_author_void_id=i.sender_void_id AND t.original_event_id=i.event_id
+                WHERE i.message_id=m.id)
+                AND NOT EXISTS (SELECT 1 FROM outbox b JOIN message_tombstones t
+                ON t.peer_void_id=(SELECT peer_void_id FROM conversations WHERE id=m.conversation_id)
+                AND t.original_author_void_id=(SELECT void_id FROM local_account)
+                AND t.original_event_id=b.event_id WHERE b.message_id=m.id)");
+            outgoing.push_str(" AND NOT EXISTS (SELECT 1 FROM message_tombstones t
+                WHERE t.peer_void_id=(SELECT peer_void_id FROM conversations WHERE id=o.conversation_id)
+                AND t.original_author_void_id=(SELECT void_id FROM local_account)
+                AND t.original_event_id=o.event_id)");
         }
-        Ok((
-            "AND NOT EXISTS(SELECT 1 FROM local_message_hides h WHERE h.message_id=m.id)",
-            "AND NOT EXISTS(SELECT 1 FROM local_message_hides h WHERE h.conversation_id=o.conversation_id AND h.event_id=o.event_id AND h.author_void_id=(SELECT void_id FROM local_account))",
-        ))
+        if version >= 12 {
+            saved.push_str(
+                " AND NOT EXISTS(SELECT 1 FROM local_message_hides h WHERE h.message_id=m.id)",
+            );
+            outgoing.push_str(" AND NOT EXISTS(SELECT 1 FROM local_message_hides h WHERE h.conversation_id=o.conversation_id AND h.event_id=o.event_id AND h.author_void_id=(SELECT void_id FROM local_account))");
+        }
+        Ok((saved, outgoing))
     }
     pub(crate) fn recover_interrupted_sends(&self) -> Result<()> {
         self.connection.execute(
@@ -432,11 +454,8 @@ impl Database {
             message.reference = self.message_reference(conversation_id, &message.cursor.key())?;
             message.presentation =
                 self.message_presentation(conversation_id, &message.cursor.key())?;
-            if message.presentation.deleted {
-                message.body = "Message deleted".into();
-                message.retry_event.clear();
-            }
         }
+        messages.retain(|message| !message.presentation.deleted);
         if order == "DESC" {
             messages.reverse();
         }

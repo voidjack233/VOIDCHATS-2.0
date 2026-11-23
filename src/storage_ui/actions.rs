@@ -43,9 +43,8 @@ pub(super) fn apply(
         }
         MessageAction::Delete(target, everyone) => {
             if everyone {
-                if !remote {
-                    return Err(storage::Error::MessagingUnavailable);
-                }
+                // Save deletion intent and the local tombstone even offline.
+                // The existing control dispatcher waits for messaging readiness.
                 db.queue_delete_everyone(
                     conversation,
                     &storage::messaging::new_event_id()?,
@@ -94,6 +93,12 @@ impl Dispatch {
     pub fn resume(&mut self, db: &storage::Database) -> storage::Result<bool> {
         let ids = db.pending_controls()?;
         let pending = !ids.is_empty();
+        let live: HashSet<_> = ids.iter().cloned().collect();
+        self.queue.retain(|id| live.contains(id));
+        self.attempts.retain(|id, _| live.contains(id));
+        if self.queue.is_empty() {
+            self.due = None;
+        }
         {
             for id in ids {
                 if !self.queue.contains(&id) && self.attempts.get(&id).copied().unwrap_or(0) < 5 {
@@ -131,6 +136,54 @@ impl Dispatch {
             self.due = Some(Instant::now() + delay);
         }
         result
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use storage::{Database, Owner, tests::TestDir};
+
+    #[test]
+    fn dispatcher_replaces_stale_unencrypted_reactions_without_duplicate_jobs() {
+        let root = TestDir::new();
+        let mut db = Database::open(
+            &root.0,
+            Owner {
+                void_id: "41",
+                public_key: &[5; 32],
+            },
+        )
+        .unwrap();
+        let chat = db.create_conversation("123", 100).unwrap();
+        let (message, _) = db.queue_outgoing(chat, "Original", 101).unwrap();
+        let target = MessageReference {
+            author_void_id: "41".into(),
+            event_id: message,
+        };
+        let add = "00000000-0000-4000-8000-000000000001";
+        let remove = "00000000-0000-4000-8000-000000000002";
+        db.queue_reaction(chat, add, &target, "👍", true, 102)
+            .unwrap();
+        let mut dispatch = Dispatch::default();
+        assert!(dispatch.resume(&db).unwrap());
+        assert_eq!(dispatch.queue, VecDeque::from([add.to_owned()]));
+        dispatch.attempts.insert(add.into(), 2);
+        db.queue_reaction(chat, remove, &target, "👍", false, 103)
+            .unwrap();
+        assert!(dispatch.resume(&db).unwrap());
+        assert_eq!(dispatch.queue, VecDeque::from([remove.to_owned()]));
+        assert!(!dispatch.attempts.contains_key(add));
+        assert!(dispatch.due.is_some());
+        // A delayed repeat of the old submission must not resurrect its job.
+        assert_eq!(
+            db.queue_reaction(chat, add, &target, "👍", true, 102)
+                .unwrap(),
+            add
+        );
+        dispatch.resume(&db).unwrap();
+        dispatch.resume(&db).unwrap();
+        assert_eq!(dispatch.queue, VecDeque::from([remove.to_owned()]));
     }
 }
 
@@ -209,7 +262,7 @@ pub(super) fn bind(ui: &AppWindow, sender: Sender<Command>) {
                     },
                     everyone,
                 ),
-                everyone,
+                false,
             );
         }
     });

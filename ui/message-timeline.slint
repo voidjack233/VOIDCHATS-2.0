@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Action, PaneScroll, Clickable } from "controls.slint";
+import { Action, PaneScroll, Clickable, NavigationInput } from "controls.slint";
 import { MessageBubble, StoredMessage } from "message-bubble.slint";
 
 export component MessageTimeline inherits Rectangle {
@@ -14,6 +14,9 @@ export component MessageTimeline inherits Rectangle {
     in-out property <bool> timeline-following: true;
     in-out property <string> timeline-anchor-key;
     in-out property <length> timeline-anchor-offset;
+    in-out property <length> timeline-viewport-y <=> timeline.content-y;
+    in-out property <bool> timeline-reflowing <=> timeline.reflowing;
+    callback remember-message-position(string, length);
     in property <string> timeline-today;
     in property <string> timeline-yesterday;
     in property <bool> conversation-loading;
@@ -61,6 +64,7 @@ export component MessageTimeline inherits Rectangle {
         private property <int> page-direction;
         private property <bool> capture-pending;
         private property <bool> awaiting-page;
+        private property <bool> reflowing;
         private property <int> model-revision: root.timeline-revision;
         private property <bool> following: root.timeline-following;
         private property <bool> opening: root.conversation-loading;
@@ -90,7 +94,7 @@ export component MessageTimeline inherits Rectangle {
             self.tracked-y = self.content-y;
             // Model reconciliation, resizing and anchor placement can clamp the
             // viewport too. Only real ScrollView input may create demand then.
-            if self.opening || (!explicit-input && self.geometry != self.settled-geometry) { return; }
+            if self.opening || (!explicit-input && (self.reflowing || self.geometry != self.settled-geometry)) { return; }
             // Retain movement immediately, even if the worker commits before
             // reactive row capture runs. The next capture picks the visible key.
             if !root.timeline-following && root.timeline-anchor-key != "" {
@@ -124,9 +128,13 @@ export component MessageTimeline inherits Rectangle {
                 self.awaiting-page = false;
             }
         }
-        changed model-revision => { self.sync-viewport(); }
+        changed model-revision => {
+            self.reflowing = true;
+            self.sync-viewport();
+        }
         changed end-offset => { self.sync-viewport(); }
         changed geometry => {
+            self.reflowing = true;
             self.sync-viewport();
             self.settled-geometry = self.geometry;
             self.capture-pending = false;
@@ -143,12 +151,20 @@ export component MessageTimeline inherits Rectangle {
         Timer {
             interval: 8ms;
             running: !root.conversation-loading && (timeline.awaiting-page
-                || timeline.page-direction != 0 || timeline.geometry != timeline.settled-geometry);
+                || timeline.reflowing || timeline.page-direction != 0 || timeline.geometry != timeline.settled-geometry);
             triggered => {
                 if root.timeline-loading { return; }
                 // Let geometry change handlers restore the anchor before consuming
                 // retained input. Proximity alone cannot authorize another page.
                 if timeline.geometry != timeline.settled-geometry { return; }
+                if timeline.reflowing {
+                    // Geometry notifications and anchor corrections can arrive
+                    // in different orders. Finish one settled turn before an
+                    // implicit position change is interpreted as fresh input.
+                    timeline.tracked-y = timeline.content-y;
+                    timeline.reflowing = false;
+                    return;
+                }
                 timeline.awaiting-page = false;
                 let older = timeline.page-direction < 0;
                 let eligible = older
@@ -169,8 +185,7 @@ export component MessageTimeline inherits Rectangle {
                 }
                 timeline.page-direction = 0;
                 timeline.capture-pending = false;
-                // End the old kinetic binding at this captured position. Fresh
-                // input during the load must not fight a pre-pagination animation.
+                // Keep the captured input baseline across the asynchronous page.
                 timeline.tracked-y = timeline.content-y;
                 timeline.content-y = timeline.tracked-y;
                 // Keep this same timer alive through the asynchronous commit;
@@ -199,6 +214,20 @@ export component MessageTimeline inherits Rectangle {
                 alignment: start;
                 spacing: 4px;
                 private property <length> bubble-top: self.y + bubble-row.y;
+                // Cache content coordinates only when layout changes. Scrolling
+                // does not change these values or update the Rust message model.
+                private property <{ key: string, y: length, tracking: bool }> position:
+                    { key: message.key, y: self.bubble-top, tracking: !root.timeline-following };
+                changed position => {
+                    if self.position.tracking {
+                        root.remember-message-position(self.position.key, self.position.y);
+                    }
+                }
+                // Retain every row's layout/anchor geometry, but avoid rendering
+                // distant bubble subtrees. Overscan prevents edge pop-in. Keyboard
+                // navigation keeps all actions available in their original order.
+                private property <bool> near-viewport: self.y + self.height >= -timeline.content-y - timeline.visible-height / 2
+                    && self.y <= -timeline.content-y + 1.5 * timeline.visible-height;
                 private property <int> user-scroll: timeline.scroll-revision;
                 private property <bool> anchored: message.key != ""
                     && message.key == root.timeline-anchor-key && !root.timeline-following
@@ -209,6 +238,9 @@ export component MessageTimeline inherits Rectangle {
                     : { y: 0px, revision: 0 };
 
                 init => {
+                    if !root.timeline-following {
+                        root.remember-message-position(message.key, self.bubble-top);
+                    }
                     if self.anchored {
                         timeline.place-content(self.anchor-placement.y);
                     }
@@ -223,7 +255,7 @@ export component MessageTimeline inherits Rectangle {
                     // Store the bubble position so inserting a date marker doesn't move it.
                     let viewport-top = -timeline.content-y;
                     if !root.timeline-following && message.key != ""
-                        && timeline.geometry == timeline.settled-geometry
+                        && !timeline.reflowing && timeline.geometry == timeline.settled-geometry
                         && (index == 0 || self.y <= viewport-top + history.spacing)
                         && self.y + self.height > viewport-top {
                         root.timeline-anchor-key = message.key;
@@ -277,6 +309,10 @@ export component MessageTimeline inherits Rectangle {
                 bubble-row := HorizontalLayout {
                     alignment: message.outgoing ? end : start;
                     MessageBubble {
+                        // Keep the saved anchor active while restoring it from
+                        // outside the viewport, as well as keyboard-focused rows.
+                        visible: row.near-viewport || message.key == root.timeline-anchor-key
+                            || NavigationInput.keyboard || self.action-focused;
                         message: message;
                         remote-enabled: root.remote-enabled && !root.conversation-peer-deleted;
                         actions-enabled: !root.conversation-loading && !root.action-busy;
@@ -300,14 +336,14 @@ export component MessageTimeline inherits Rectangle {
                         horizontal-stretch: 0; spacing: 4px;
                         for reaction[index] in message.reactions: Clickable {
                             row: floor(index / 3); col: mod(index, 3);
-                            width: 74px; height: 26px; border-radius: 13px;
+                            width: clamp(reaction-label.preferred-width + 18px, 44px, 74px); height: 26px; border-radius: 13px;
                             background: reaction.mine ? Theme.selected : Theme.surface;
                             border-width: 1px; border-color: reaction.mine ? Theme.accent : Theme.divider;
                             enabled: root.remote-enabled && !root.conversation-peer-deleted && !root.action-busy;
                             label: "Toggle reaction " + reaction.emoji;
                             clicked => { root.toggle-reaction(message.author-id, message.event-id, reaction.emoji); }
                             accessible-label: reaction.emoji + " " + reaction.count + (reaction.mine ? " including you" : "");
-                            Text { text: reaction.emoji + " " + reaction.count; color: Theme.secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            reaction-label := Text { text: reaction.emoji + " " + reaction.count; color: Theme.secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                         }
                     }
                 }

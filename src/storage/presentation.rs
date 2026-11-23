@@ -8,6 +8,80 @@ mod tests {
     use crate::storage::{DeliveryState, Direction, Message, Owner, tests::TestDir};
 
     #[test]
+    fn silent_deletes_filter_before_page_limits_and_preview_selection() {
+        let root = TestDir::new();
+        let owner = Owner {
+            void_id: "41",
+            public_key: &[5; 32],
+        };
+        let mut db = Database::open(&root.0, owner).unwrap();
+        let chat = db.create_conversation("123", 100).unwrap();
+        // More hidden rows than an entire page: filtering after LIMIT would
+        // falsely return an empty conversation and prevent further pagination.
+        for index in 1..=150 {
+            let event = format!("00000000-0000-4000-8000-{index:012}");
+            db.commit_incoming("123", &event, &[7; 32], |_| {
+                Ok(Message {
+                    id: format!("message-{index}"),
+                    conversation_id: chat,
+                    direction: Direction::Incoming,
+                    body: format!("Message {index}"),
+                    created_at: 100 + index,
+                    delivery_state: DeliveryState::Received,
+                })
+            })
+            .unwrap();
+            if index > 70 {
+                db.connection
+                    .execute(
+                        "INSERT INTO message_tombstones VALUES ('123','123',?1,?1)",
+                        [&event],
+                    )
+                    .unwrap();
+            }
+        }
+        let page = db.timeline_before(chat, None, 60).unwrap();
+        assert_eq!(page.len(), 60);
+        assert_eq!(page.first().unwrap().body, "Message 11");
+        assert_eq!(page.last().unwrap().body, "Message 70");
+        let older = db.timeline_before(chat, Some(&page[0].cursor), 40).unwrap();
+        assert_eq!(older.len(), 10);
+        assert_eq!(
+            db.timeline_after(chat, &older.last().unwrap().cursor, 120)
+                .unwrap()
+                .len(),
+            60
+        );
+        assert_eq!(
+            db.last_message_previews([chat]).unwrap()[&chat].body,
+            "Message 70"
+        );
+        // Queued and committed outgoing rows use the same visibility rules.
+        let (outgoing, _) = db.queue_outgoing(chat, "Outgoing secret", 500).unwrap();
+        db.queue_delete_everyone(
+            chat,
+            "00000000-0000-4000-8000-000000009999",
+            &MessageReference {
+                author_void_id: "41".into(),
+                event_id: outgoing,
+            },
+            501,
+        )
+        .unwrap();
+        assert_eq!(
+            db.last_message_previews([chat]).unwrap()[&chat].body,
+            "Message 70"
+        );
+        db.close().unwrap();
+        let db = Database::open(&root.0, owner).unwrap();
+        assert_eq!(db.timeline_before(chat, None, 120).unwrap().len(), 70);
+        assert_eq!(
+            db.last_message_previews([chat]).unwrap()[&chat].body,
+            "Message 70"
+        );
+    }
+
+    #[test]
     fn reaction_counts_and_local_highlight_refresh_without_leaking_tombstoned_content() {
         let root = TestDir::new();
         let mut db = Database::open(
@@ -50,9 +124,11 @@ mod tests {
             vec![("👍".into(), 1, false)]
         );
         db.connection.execute("INSERT INTO message_tombstones VALUES ('123','123',?1,'00000000-0000-4000-8000-000000000004')",[id]).unwrap();
-        let message = db.timeline_before(chat, None, 1).unwrap().remove(0);
-        assert_eq!(message.body, "Message deleted");
-        assert!(message.presentation.reactions.is_empty());
+        assert!(db.timeline_before(chat, None, 1).unwrap().is_empty());
+        assert!(db.last_message_previews([chat]).unwrap().is_empty());
+        let metadata = db.message_presentation(chat, &key).unwrap();
+        assert!(metadata.deleted);
+        assert!(metadata.reactions.is_empty());
     }
 }
 
@@ -98,10 +174,7 @@ impl Database {
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "Contact".into())
         };
-        let peer = self.conversation(conversation)?.peer_void_id;
-        let text = if self.message_deleted(&peer, &target)? {
-            "Message deleted".into()
-        } else if let Some(key) = self.reference_cursor(conversation, &target)? {
+        let text = if let Some(key) = self.reference_cursor(conversation, &target)? {
             let mut parts = key.splitn(3, ':');
             parts.next();
             let source = parts.next().unwrap_or_default();
@@ -132,6 +205,9 @@ impl Database {
         conversation: i64,
         target: &MessageReference,
     ) -> Result<Option<String>> {
+        if self.message_deleted(&self.conversation(conversation)?.peer_void_id, target)? {
+            return Ok(None);
+        }
         if super::outgoing::schema_ready(&self.connection)? && self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_message_hides WHERE conversation_id=?1 AND author_void_id=?2 AND event_id=?3)",
             params![conversation,target.author_void_id,target.event_id],|r|r.get::<_,bool>(0))? { return Ok(None); }
@@ -203,7 +279,9 @@ impl Database {
             Some(id) => self.reply_reference(&id)?,
             None => None,
         });
-        if let Some(target) = reply {
+        if let Some(target) = reply
+            && !self.message_deleted(&peer.peer_void_id, &target)?
+        {
             result.author = if target.author_void_id == local {
                 "You".into()
             } else {
@@ -215,9 +293,7 @@ impl Database {
             result.target = self
                 .reference_cursor(conversation, &target)?
                 .unwrap_or_default();
-            result.quote = if self.message_deleted(&peer.peer_void_id, &target)? {
-                "Message deleted".into()
-            } else if result.target.is_empty() {
+            result.quote = if result.target.is_empty() {
                 "Message unavailable".into()
             } else {
                 let mut parts = result.target.splitn(3, ':');

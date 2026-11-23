@@ -105,6 +105,7 @@ fn bind_with(
     + Send
     + 'static,
 ) -> io::Result<Worker> {
+    bind_timeline_positions(ui);
     let (sender, receiver) = mpsc::channel();
     let weak = ui.as_weak();
     let thread = thread::Builder::new()
@@ -182,9 +183,14 @@ fn bind_with(
                         });
                         match opened {
                             Ok((db, lists, confirmed)) => {
+                                let pending_controls = db
+                                    .pending_controls()
+                                    .map(|ids| !ids.is_empty())
+                                    .unwrap_or(true);
                                 database = Some(db);
                                 let _ = weak.upgrade_in_event_loop(move |ui| {
                                     lists.show(&ui);
+                                    ui.set_pending_controls(pending_controls);
                                     ui.set_storage_loading(false);
                                     ui.set_storage_ready(true);
                                     if confirmed {
@@ -401,13 +407,39 @@ fn bind_with(
                         event_id,
                         json,
                     }) => {
-                        if let (Some(db), Some(session)) = (&mut database, &relay)
-                            && session.generation == generation
-                            && session.is_active()
-                        {
-                            let result = messaging::receive(db, session, &sender, &event_id, &json);
+                        if let (Some(db), Some(session)) = (&mut database, &relay) {
+                            // Drain only contiguous, already-queued deliveries. A saved
+                            // message and its queued deletion reach the UI together;
+                            // each event still commits and ACKs independently. Bound
+                            // the batch so input commands cannot be starved.
+                            let mut delivery = (generation, sender, event_id, json);
+                            for index in 0..64 {
+                                let (generation, sender, event_id, json) = delivery;
+                                if session.generation == generation && session.is_active() {
+                                    let result =
+                                        messaging::receive(db, session, &sender, &event_id, &json);
+                                    show_messaging_result(&weak, result);
+                                }
+                                if index == 63 {
+                                    break;
+                                }
+                                match receiver.try_recv() {
+                                    Ok(Command::Relay(Activity::Delivery {
+                                        generation,
+                                        sender,
+                                        event_id,
+                                        json,
+                                    })) => {
+                                        delivery = (generation, sender, event_id, json);
+                                    }
+                                    Ok(other) => {
+                                        queued = Some(other);
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
                             refresh_messages(&weak, db, &mut history, None, None);
-                            show_messaging_result(&weak, result);
                         }
                     }
                     Command::SendDraft(id, body, revision) => {
@@ -468,20 +500,6 @@ fn bind_with(
                             // Preserve an already-submitted intent if this negotiated
                             // socket closes just before the worker handles it.
                             let remote = messaging_ready && relay.is_some();
-                            // Choose a surviving neighbor before hiding an anchored message.
-                            let removed =
-                                if let actions::MessageAction::Delete(target, false) = &action {
-                                    db.reference_cursor(id, target).ok().flatten()
-                                } else {
-                                    None
-                                };
-                            let neighbor = removed.as_ref().and_then(|key| {
-                                history
-                                    .active
-                                    .as_ref()
-                                    .filter(|v| v.conversation == id)
-                                    .and_then(|v| v.neighbor(key))
-                            });
                             let result = actions::apply(db, id, action, remote);
                             if result.is_ok() {
                                 let pending = db
@@ -491,15 +509,6 @@ fn bind_with(
                                 let _ = weak.upgrade_in_event_loop(move |ui| {
                                     ui.set_pending_controls(pending)
                                 });
-                                if let (Some(removed), Some(neighbor)) = (removed, neighbor) {
-                                    let _ = weak.upgrade_in_event_loop(move |ui| {
-                                        if is_current_timeline(&ui, id, selection)
-                                            && ui.get_timeline_anchor_key() == removed
-                                        {
-                                            ui.set_timeline_anchor_key(neighbor.into());
-                                        }
-                                    });
-                                }
                                 refresh_messages(&weak, db, &mut history, None, None);
                                 actions::show_reply(&weak, db, id, selection);
                                 if remote {
@@ -968,7 +977,7 @@ fn show_timeline_result(
         }
         ui.set_timeline_loading(false);
         match result {
-            Ok(window) => update_timeline(&ui, window, to_present),
+            Ok(window) => update_timeline(&ui, window, to_present, false),
             Err(_) => {
                 ui.set_conversation_error("Message history could not be loaded. Try again.".into())
             }
@@ -976,7 +985,35 @@ fn show_timeline_result(
     });
 }
 
-fn update_timeline(ui: &AppWindow, window: TimelineWindow, to_present: bool) {
+/// A bounded cache of settled row geometry, owned by this window's UI thread.
+/// It has no per-scroll model writes and never contains message bodies.
+fn bind_timeline_positions(ui: &AppWindow) {
+    use std::{cell::RefCell, rc::Rc};
+    let positions = Rc::new(RefCell::new(HashMap::<slint::SharedString, f32>::new()));
+    let cache = positions.clone();
+    ui.on_remember_timeline_position(move |key, y| {
+        if !key.is_empty() && y.is_finite() && y >= 0.0 {
+            cache.borrow_mut().insert(key, y);
+        }
+    });
+    let cache = positions.clone();
+    ui.on_timeline_position(move |key| cache.borrow().get(&key).copied().unwrap_or(-1.0));
+    let weak = ui.as_weak();
+    ui.on_prune_timeline_positions(move || {
+        if let Some(ui) = weak.upgrade() {
+            let keys: HashSet<_> = ui.get_stored_messages().iter().map(|row| row.key).collect();
+            positions.borrow_mut().retain(|key, _| keys.contains(key));
+        }
+    });
+}
+
+fn update_timeline(
+    ui: &AppWindow,
+    window: TimelineWindow,
+    to_present: bool,
+    content_refresh: bool,
+) {
+    let mut restore_anchor = None;
     if !to_present {
         if window.has_newer && !ui.get_timeline_has_newer() && ui.get_timeline_following() {
             ui.invoke_jump_to_present();
@@ -986,15 +1023,59 @@ fn update_timeline(ui: &AppWindow, window: TimelineWindow, to_present: bool) {
         if let Some(cursor) = TimelineCursor::from_key(&key)
             && !window.messages.iter().any(|row| row.cursor == cursor)
         {
-            // Scroll input may have moved beyond the overlap while a page was loading.
-            ui.invoke_restore_timeline(key);
-            return;
+            let previous = ui.get_stored_messages();
+            if let Some(index) = previous
+                .iter()
+                .position(|row| row.key == key)
+                .filter(|_| content_refresh)
+            {
+                // Choose a survivor, but preserve ITS measured screen position,
+                // not the deleted row's offset. The latter causes a visible jump.
+                let neighbor = previous
+                    .iter()
+                    .skip(index + 1)
+                    .chain(
+                        previous
+                            .iter()
+                            .take(index)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev(),
+                    )
+                    .find(|row| window.messages.iter().any(|m| row.key == m.cursor.key()));
+                let survivor = neighbor
+                    .map(|row| row.key)
+                    .or_else(|| window.messages.first().map(|m| m.cursor.key().into()))
+                    .unwrap_or_default();
+                restore_anchor = Some((survivor.clone(), measured_timeline_offset(ui, &survivor)));
+            } else {
+                // Scroll input may have moved beyond the overlap while a page was loading.
+                ui.invoke_restore_timeline(key);
+                return;
+            }
+        } else if content_refresh {
+            // Normalize a surviving anchor against actual, pre-mutation layout
+            // as well, including movement that happened while the worker ran.
+            restore_anchor = Some((key.clone(), measured_timeline_offset(ui, &key)));
         }
     }
     show_window(ui, window);
+    if let Some((key, offset)) = restore_anchor {
+        // Apply against the reconciled rows, never the old delegate geometry.
+        if let Some(offset) = offset {
+            ui.set_timeline_anchor_offset(offset);
+        }
+        ui.set_timeline_anchor_key(key);
+    }
     if to_present {
         pin_to_present(ui);
     }
+}
+
+fn measured_timeline_offset(ui: &AppWindow, key: &slint::SharedString) -> Option<f32> {
+    let viewport = ui.get_timeline_viewport_y();
+    let y = ui.invoke_timeline_position(key.clone());
+    (y >= 0.0).then_some(y + viewport)
 }
 
 fn refresh_messages(
@@ -1040,7 +1121,7 @@ fn refresh_messages(
         if let Some((id, selection, window, unread_through, to_present)) = timeline
             && is_current_timeline(&ui, id, selection)
         {
-            update_timeline(&ui, window, to_present);
+            update_timeline(&ui, window, to_present, true);
             ui.set_conversation_read_through(read_through_label(unread_through).into());
         }
     });
@@ -1293,6 +1374,7 @@ fn show_window(ui: &AppWindow, window: TimelineWindow) {
     let messages: Vec<_> = window
         .messages
         .into_iter()
+        .filter(|message| !message.presentation.deleted)
         .map(|message| {
             let time = MessageTime::local(message.created_at);
             let mut heading = String::new();
@@ -1350,7 +1432,9 @@ fn show_window(ui: &AppWindow, window: TimelineWindow) {
             }
         })
         .collect();
-    if reconcile_messages(ui, messages) || changed_edges {
+    let changed = reconcile_messages(ui, messages);
+    ui.invoke_prune_timeline_positions();
+    if changed || changed_edges {
         advance_timeline_revision(ui);
     }
 }
@@ -1358,6 +1442,7 @@ fn show_window(ui: &AppWindow, window: TimelineWindow) {
 fn reconcile_messages(ui: &AppWindow, messages: Vec<StoredMessage>) -> bool {
     let model = ui.get_stored_messages();
     let Some(model) = model.as_any().downcast_ref::<VecModel<StoredMessage>>() else {
+        ui.set_timeline_reflowing(true);
         ui.set_stored_messages(ModelRc::new(VecModel::from(messages)));
         return true;
     };
@@ -1370,6 +1455,7 @@ fn reconcile_messages(ui: &AppWindow, messages: Vec<StoredMessage>) -> bool {
             .row_data(index)
             .is_some_and(|row| !keys.contains(&row.key))
         {
+            ui.set_timeline_reflowing(true);
             model.remove(index);
             changed = true;
         }
@@ -1384,8 +1470,14 @@ fn reconcile_messages(ui: &AppWindow, messages: Vec<StoredMessage>) -> bool {
         }
         match model.row_data(index) {
             Some(current) if current == row => continue,
-            Some(current) if current.key == row.key => model.set_row_data(index, row),
-            _ => model.insert(index, row),
+            Some(current) if current.key == row.key => {
+                ui.set_timeline_reflowing(true);
+                model.set_row_data(index, row);
+            }
+            _ => {
+                ui.set_timeline_reflowing(true);
+                model.insert(index, row);
+            }
         }
         changed = true;
     }
@@ -1429,9 +1521,12 @@ fn show_conversation(
 
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
+    mod deletion_scrolling;
     mod history_scrolling;
     mod message_actions;
+    mod offline_deletion;
     mod presentation;
+    mod silent_deletion;
     mod update_required;
     use super::*;
     use crate::storage::{Database, DeliveryState, Direction, Message, Owner, tests::TestDir};

@@ -7,6 +7,26 @@ use super::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+// Keep immutable submission records for idempotency. Only never-encrypted,
+// never-attempted reactions may yield to a newer durable revision. The current
+// reaction and control primary keys avoid scanning the full control history.
+const SUPERSEDED_REACTION: &str = "o.kind='reaction' AND o.state='pending' AND o.payload IS NULL
+    AND EXISTS (SELECT 1 FROM message_reactions r
+        JOIN outgoing_controls n ON n.event_id=r.source_event_id
+        WHERE r.peer_void_id=(SELECT peer_void_id FROM conversations WHERE id=o.conversation_id)
+        AND r.original_author_void_id=o.author_void_id AND r.original_event_id=o.original_event_id
+        AND r.reactor_void_id=(SELECT void_id FROM local_account) AND r.emoji=o.emoji
+        AND r.revision>o.revision AND n.revision=r.revision AND n.kind='reaction'
+        AND n.conversation_id=o.conversation_id AND n.author_void_id=o.author_void_id
+        AND n.original_event_id=o.original_event_id AND n.emoji=o.emoji)";
+
+pub(super) fn control_superseded(connection: &Connection, id: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM outgoing_controls o WHERE o.event_id=?1 AND ({SUPERSEDED_REACTION}))"),
+        [id], |row| row.get(0),
+    )?)
+}
+
 #[derive(Clone)]
 #[allow(dead_code)] // Persisted operation metadata; never logged.
 pub(crate) struct Control {
@@ -91,7 +111,7 @@ impl Database {
         local(&self.connection)
     }
     pub(crate) fn reply_draft(&self, conversation: i64) -> Result<Option<MessageReference>> {
-        Ok(self
+        let target = self
             .connection
             .query_row(
                 "SELECT author_void_id,event_id FROM draft_reply_refs WHERE conversation_id=?1",
@@ -103,7 +123,14 @@ impl Database {
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        // Keep the draft text, but stop quoting a remotely deleted original.
+        if let Some(target) = &target
+            && self.message_deleted(&self.conversation(conversation)?.peer_void_id, target)?
+        {
+            return Ok(None);
+        }
+        Ok(target)
     }
     pub(crate) fn save_reply_draft(
         &mut self,
@@ -132,7 +159,10 @@ impl Database {
           UNION ALL SELECT 1 FROM message_tombstones WHERE original_author_void_id=?2 AND original_event_id=?1)",params![id,own],|r|r.get(0))?)
     }
     pub(crate) fn pending_controls(&self) -> Result<Vec<String>> {
-        Ok(self.connection.prepare("SELECT event_id FROM outgoing_controls WHERE state<>'accepted' ORDER BY created_at,event_id")?.query_map([],|r|r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?)
+        Ok(self.connection.prepare(&format!("SELECT o.event_id FROM outgoing_controls o WHERE o.state<>'accepted' AND NOT ({SUPERSEDED_REACTION}) ORDER BY o.created_at,o.event_id"))?.query_map([],|r|r.get(0))?.collect::<std::result::Result<Vec<_>,_>>()?)
+    }
+    pub(crate) fn control_superseded(&self, id: &str) -> Result<bool> {
+        control_superseded(&self.connection, id)
     }
     pub(crate) fn control(&self, id: &str) -> Result<Control> {
         Ok(self.connection.query_row("SELECT o.event_id,o.conversation_id,c.peer_void_id,o.kind,o.author_void_id,o.original_event_id,o.emoji,o.active,o.revision,o.claim_id,o.payload,o.state FROM outgoing_controls o JOIN conversations c ON c.id=o.conversation_id WHERE o.event_id=?1",[id],|r|Ok(Control{id:r.get(0)?,conversation:r.get(1)?,peer:r.get(2)?,kind:r.get(3)?,target:MessageReference{author_void_id:r.get(4)?,event_id:r.get(5)?},emoji:r.get(6)?,active:r.get(7)?,revision:r.get(8)?,claim_id:r.get(9)?,payload:r.get(10)?,state:r.get(11)?}))?)
