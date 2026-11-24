@@ -227,7 +227,9 @@ impl Database {
             }
             tx.execute("UPDATE conversations SET last_activity_at = max(last_activity_at, ?2) WHERE id = ?1",
                 params![conversation_id, created_at])?;
-            Ok(tx.execute("DELETE FROM requests WHERE conversation_id = ?1", [conversation_id])? != 0)
+            let promoted = tx.execute("DELETE FROM requests WHERE conversation_id = ?1", [conversation_id])? != 0;
+            super::records::establish_contacts(tx, Some(conversation_id))?;
+            Ok(promoted)
         })?;
         Ok((event_id, promoted))
     }

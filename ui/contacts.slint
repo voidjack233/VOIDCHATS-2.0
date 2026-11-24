@@ -1,0 +1,103 @@
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Action, Clickable, WrappingText } from "controls.slint";
+
+export component ContactRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> enabled: true;
+    callback open();
+    callback options(length, length);
+    height: 56px;
+    border-radius: 10px;
+    background: open-button.hovered || menu-button.hovered ? Theme.elevated : transparent;
+    HorizontalLayout {
+        padding: 6px; spacing: 4px;
+        open-button := Clickable {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            enabled: root.enabled;
+            label: "Open chat with " + root.name;
+            background: transparent;
+            clicked => { root.open(); }
+            HorizontalLayout {
+                padding-left: 4px; padding-right: 6px; spacing: 10px;
+                VerticalLayout {
+                    width: 34px; alignment: center;
+                    Rectangle {
+                        width: 34px; height: 34px; border-radius: 17px;
+                        background: Theme.selected;
+                        Image { accessible-role: none; source: @image-url("icons/user.svg"); width: 18px; height: 18px; x: 8px; y: 8px; colorize: Theme.accent; }
+                    }
+                }
+                Text {
+                    accessible-role: none;
+                    text: root.name; color: Theme.primary; font-size: 14px; font-weight: 600;
+                    min-width: 0px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center;
+                }
+            }
+        }
+        menu-button := Clickable {
+            width: 44px; height: 44px;
+            enabled: root.enabled;
+            label: "Contact options for " + root.name;
+            clicked => { root.options(self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+            Image { accessible-role: none; source: @image-url("icons/more.svg"); width: 18px; height: 18px; x: 13px; y: 13px; colorize: Theme.secondary; }
+        }
+    }
+}
+
+export component ContactActions inherits Rectangle {
+    in-out property <string> mode;
+    in-out property <string> name;
+    in property <bool> busy;
+    in property <string> error;
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    callback dismiss();
+    callback save();
+    background: root.mode == "edit" ? #00000035 : transparent;
+    TouchArea { clicked => { if !root.busy { root.dismiss(); } } }
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape { if !root.busy { root.dismiss(); } return accept; }
+            return reject;
+        }
+        panel := Rectangle {
+            width: min(root.mode == "edit" ? 360px : 200px, root.width - 24px);
+            height: content.preferred-height;
+            x: root.mode == "edit" ? (root.width - self.width) / 2
+                : clamp(root.anchor-x - self.width, 12px, root.width - self.width - 12px);
+            y: root.mode == "edit" ? (root.height - self.height) / 2
+                : clamp(root.anchor-y, 12px, root.height - self.height - 12px);
+            background: Theme.surface; border-radius: 12px;
+            border-width: 1px; border-color: Theme.divider;
+            content := VerticalLayout {
+                padding: 12px; spacing: 12px; alignment: start;
+                if root.mode == "menu": Action {
+                    label: "Edit name"; horizontal-stretch: 1;
+                    clicked => { root.mode = "edit"; }
+                }
+                if root.mode == "edit": VerticalLayout {
+                    spacing: 12px;
+                    Text { text: "Edit contact name"; color: Theme.primary; font-size: 16px; font-weight: 600; }
+                    WrappingText { text: "Only visible to you. Leave blank to use Contact."; color: Theme.secondary; font-size: 12px; }
+                    editor := LineEdit {
+                        accessible-label: "Local contact name";
+                        placeholder-text: "Contact";
+                        text <=> root.name;
+                        enabled: !root.busy;
+                        init => { self.focus(); }
+                        accepted => { if !root.busy { root.save(); } }
+                    }
+                    if root.error != "": WrappingText { text: root.error; color: Theme.error; font-size: 12px; }
+                    HorizontalLayout {
+                        alignment: end; spacing: 8px;
+                        Action { label: "Cancel"; enabled: !root.busy; clicked => { root.dismiss(); } }
+                        Action { label: root.busy ? "Saving…" : "Save"; enabled: !root.busy; primary: true; clicked => { root.save(); } }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -103,6 +103,39 @@ fn outgoing_reply_draft_commit_receipt_and_ciphertext_survive_restart() {
 }
 
 #[test]
+fn both_peers_gain_contacts_only_after_the_first_reply_is_durable() {
+    let (alice, bob, mut a, mut b, chat) = pair();
+    original(&mut a, &mut b, &alice, &bob, chat);
+    assert!(a.contacts().unwrap().is_empty());
+    assert!(b.contacts().unwrap().is_empty());
+    let bchat = b.conversations(true).unwrap()[0].id;
+    b.mark_read(bchat, i64::MAX).unwrap();
+    assert!(b.contacts().unwrap().is_empty());
+    let ratchet = session(&b, ALICE);
+    let (reply, promoted) = b.queue_outgoing(bchat, "First reply", NOW_MS + 1).unwrap();
+    assert!(promoted);
+    assert_eq!(b.contacts().unwrap().len(), 1);
+    assert!(session(&b, ALICE) == ratchet);
+    assert!(a.contacts().unwrap().is_empty());
+    let payload = b
+        .encrypt_signal_message(&alice.trusted(), bchat, &reply, "First reply", NOW_MS + 1)
+        .unwrap();
+    let mut invalid = payload.clone();
+    invalid[0] ^= 1;
+    assert!(receive(&mut a, &bob.trusted(), &reply, &invalid).is_err());
+    assert!(a.contacts().unwrap().is_empty());
+    receive(&mut a, &bob.trusted(), &reply, &payload).unwrap();
+    receive(&mut a, &bob.trusted(), &reply, &payload).unwrap();
+    assert_eq!(a.contacts().unwrap().len(), 1);
+    a.rename_contact(BOB, "Local nickname").unwrap();
+    assert!(b.contact(ALICE).unwrap().unwrap().display_name.is_none());
+    a.close().unwrap();
+    b.close().unwrap();
+    assert_eq!(alice.open().contacts().unwrap().len(), 1);
+    assert_eq!(bob.open().contacts().unwrap().len(), 1);
+}
+
+#[test]
 fn outgoing_reactions_are_idempotent_revisioned_and_order_independent() {
     let (alice, bob, mut a, mut b, chat) = pair();
     let id = original(&mut a, &mut b, &alice, &bob, chat);

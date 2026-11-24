@@ -31,6 +31,8 @@ enum Command {
     Quote(i64, i32, TimelineCursor),
     MarkRead(i64, i64),
     Create(String, i32, Option<ReadingPosition>),
+    OpenContact(String, i32, Option<ReadingPosition>),
+    RenameContact(String, String),
     SaveDraft(i64, String, i32),
     SendDraft(i64, String, i32),
     Resend(String),
@@ -165,6 +167,7 @@ fn bind_with(
                     Command::Relay(_) | Command::RetryMessaging | Command::UploadReceipt
                 );
                 let selected = history.active.as_ref().map(|view| view.conversation);
+                let opening_contact = matches!(&command, Command::OpenContact(..));
                 match command {
                     Command::Open(id) => {
                         if database.is_some() {
@@ -280,14 +283,17 @@ fn bind_with(
                             });
                         }
                     }
-                    Command::Create(peer, selection, previous) => {
+                    Command::Create(peer, selection, previous)
+                    | Command::OpenContact(peer, selection, previous) => {
                         if let Some(db) = &database {
                             history.remember(previous);
                             let now = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as i64;
-                            let result = db.create_conversation(&peer, now).and_then(|id| {
+                            let result = (if opening_contact && !db.contact(&peer).is_ok_and(|c| c.is_some()) {
+                                Err(storage::Error::EventConflict)
+                            } else { db.create_conversation(&peer, now) }).and_then(|id| {
                                 Ok((
                                     load_lists(db)?,
                                     load_conversation(db, &mut history, id, selection)?,
@@ -305,7 +311,7 @@ fn bind_with(
                                         return;
                                     }
                                     ui.set_conversation_loading(false);
-                                    if ui.get_creating_conversation() {
+                                    if ui.get_creating_conversation() || opening_contact {
                                         ui.set_creating_conversation(false);
                                         ui.set_section(
                                             if detail.conversation.is_request {
@@ -327,6 +333,29 @@ fn bind_with(
                                 Err(_) => (),
                             });
                         }
+                    }
+                    Command::RenameContact(peer, name) => {
+                        let error = if let Some(db) = &mut database {
+                            match db.rename_contact(&peer, &name) {
+                                Ok(true) => {
+                                    refresh_messages(&weak, db, &mut history, None, None);
+                                    if let Some(view) = &history.active
+                                        && let Ok(conversation) = db.conversation(view.conversation)
+                                    {
+                                        let (id, selection) = (view.conversation, view.selection);
+                                        let title = contact_title(conversation.display_name);
+                                        let _ = weak.upgrade_in_event_loop(move |ui| {
+                                            if is_current_timeline(&ui, id, selection) { ui.set_conversation_title(title); }
+                                        });
+                                    }
+                                    ""
+                                }
+                                Ok(false) => "This contact is no longer available.",
+                                Err(storage::Error::InvalidContactName) => "Use up to 100 characters without line breaks or control characters.",
+                                Err(_) => "The name could not be saved. Try again.",
+                            }
+                        } else { "Local storage is unavailable." };
+                        let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_contact_name_saved(peer.into(), error.into()));
                     }
                     Command::SaveDraft(id, body, revision) => {
                         if let Some(db) = &database {
@@ -654,6 +683,7 @@ fn bind_with(
     });
 
     bind_drafts(ui, worker.sender.clone());
+    bind_contacts(ui, worker.sender.clone());
     bind_sending(ui, worker.sender.clone());
     actions::bind(ui, worker.sender.clone());
     let weak = ui.as_weak();
@@ -1190,7 +1220,8 @@ impl Lists {
             .contacts
             .into_iter()
             .map(|contact| StoredContact {
-                title: contact_title(contact.display_name),
+                title: contact_title(contact.display_name.clone()),
+                name: contact.display_name.unwrap_or_default().into(),
                 void_id: contact.void_id.into(),
             })
             .collect();
@@ -1240,6 +1271,45 @@ fn presentation_rows(
             }
         })
         .collect()
+}
+
+fn bind_contacts(ui: &AppWindow, sender: Sender<Command>) {
+    let weak = ui.as_weak();
+    let open = sender.clone();
+    ui.on_open_stored_contact(move |peer| {
+        if let Some(ui) = weak.upgrade()
+            && ui.get_storage_ready()
+            && !ui.get_conversation_loading()
+            && !ui.get_update_required()
+        {
+            let previous = ReadingPosition::capture(&ui);
+            let selection = begin_selection(&ui);
+            if open
+                .send(Command::OpenContact(peer.into(), selection, previous))
+                .is_err()
+            {
+                worker_stopped(&ui);
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_save_contact_name(move |peer, name| {
+        if let Some(ui) = weak.upgrade()
+            && ui.get_storage_ready()
+            && !ui.get_contact_save_busy()
+            && !ui.get_update_required()
+        {
+            ui.set_contact_save_busy(true);
+            ui.set_contact_action_error("".into());
+            if sender
+                .send(Command::RenameContact(peer.into(), name.into()))
+                .is_err()
+            {
+                ui.set_contact_save_busy(false);
+                ui.set_contact_action_error("Local storage stopped. Reopen VOID.".into());
+            }
+        }
+    });
 }
 
 fn contact_title(saved: Option<String>) -> slint::SharedString {
@@ -1521,6 +1591,7 @@ fn show_conversation(
 
 #[cfg(all(test, windows))]
 pub(crate) mod tests {
+    mod contacts;
     mod deletion_scrolling;
     mod history_scrolling;
     mod message_actions;

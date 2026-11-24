@@ -66,6 +66,7 @@ pub(crate) enum Error {
     EventConflict,
     MessagingUnavailable,
     ReactionLimit,
+    InvalidContactName,
     SignalState,
     SignalPeer,
     SignalClaim,
@@ -111,6 +112,9 @@ impl Error {
                 "Messaging is not ready. Connect and finish encryption setup, then try again."
             }
             Self::ReactionLimit => "A message can have at most 10 distinct reaction emojis.",
+            Self::InvalidContactName => {
+                "Use a name of up to 100 characters without line breaks or control characters."
+            }
             Self::SignalState => {
                 "Local Signal keys could not be initialized or verified. Keep your VOID files and restore a matching backup if available."
             }
@@ -204,10 +208,14 @@ impl Database {
         let key = read_key(&directory.join(KEY_FILE))?;
         let mut connection = open_keyed(&directory.join(DATABASE), &key, writable_flags(false))?;
         migrate(&mut connection, owner, false)?;
-        Ok(Self {
+        let mut database = Self {
             connection,
             _lock: lock,
-        })
+        };
+        // Non-destructively recover contacts from existing two-way history.
+        // This needs no schema migration and never replaces saved names or keys.
+        database.write(|tx| records::establish_contacts(tx, None))?;
+        Ok(database)
     }
 
     pub(crate) fn close(self) -> Result<()> {

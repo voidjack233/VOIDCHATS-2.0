@@ -3,12 +3,13 @@ import { AccountRemovalPage, AccountSetup } from "account-pages.slint";
 import { MessageTimeline } from "message-timeline.slint";
 import { MessageActions } from "message-actions.slint";
 import { MessageComposer } from "message-composer.slint";
+import { ContactRow, ContactActions } from "contacts.slint";
 import { StoredMessage } from "message-bubble.slint";
 import { Theme } from "theme.slint";
 import { Action, Clickable, PaneScroll, WrappingText } from "controls.slint";
 
 export struct StoredConversation { id: string, title: string, preview: string, activity: string, unread: bool }
-export struct StoredContact { title: string, void-id: string }
+export struct StoredContact { title: string, void-id: string, name: string }
 export { StoredMessage } from "message-bubble.slint";
 
 enum NavIcon { chats, requests, contacts, settings }
@@ -242,6 +243,23 @@ export component AppWindow inherits Window {
     in property <bool> window-foreground;
     in property <[StoredConversation]> stored-requests;
     in property <[StoredContact]> stored-contacts;
+    callback open-stored-contact(string);
+    callback save-contact-name(string, string);
+    in-out property <bool> contact-save-busy;
+    in-out property <string> contact-action-error;
+    private property <string> contact-action-mode;
+    private property <string> contact-action-peer;
+    private property <string> contact-edited-name;
+    private property <length> contact-action-x;
+    private property <length> contact-action-y;
+    callback contact-name-saved(string, string);
+    contact-name-saved(peer,error) => {
+        root.contact-save-busy = false;
+        if root.contact-action-peer == peer {
+            root.contact-action-error = error;
+            if error == "" { root.contact-action-mode = ""; }
+        }
+    }
     in property <[StoredMessage]> stored-messages;
     in property <bool> timeline-has-older;
     in property <bool> timeline-has-newer;
@@ -355,6 +373,7 @@ export component AppWindow inherits Window {
         ? "This user account has been deleted." : "";
 
     changed section => {
+        root.contact-action-mode = "";
         root.message-action-mode = "";
         root.cancel-permanent-deletion();
         root.cancel-local-removal();
@@ -668,11 +687,17 @@ export component AppWindow inherits Window {
                             if root.section == "Contacts": VerticalLayout {
                                 alignment: start;
                                 spacing: 4px;
-                                for contact in root.stored-contacts: StorageRow {
-                                    label: contact.title;
-                                    detail: contact.void-id;
-                                    enabled: !root.conversation-loading;
-                                    clicked => { root.create-stored-conversation(contact.void-id); }
+                                for contact in root.stored-contacts: ContactRow {
+                                    name: contact.title;
+                                    enabled: !root.conversation-loading && !root.contact-save-busy;
+                                    open => { root.open-stored-contact(contact.void-id); }
+                                    options(x,y) => {
+                                        root.contact-action-peer = contact.void-id;
+                                        root.contact-edited-name = contact.name;
+                                        root.contact-action-error = "";
+                                        root.contact-action-x = x; root.contact-action-y = y;
+                                        root.contact-action-mode = "menu";
+                                    }
                                 }
                             }
                             if root.section != "Contacts": VerticalLayout {
@@ -1039,6 +1064,16 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    if root.contact-action-mode != "" && root.section == "Contacts" && root.setup-page == 0 && !root.update-required && !root.showing-account-removal: ContactActions {
+        z: 8; width: root.width; height: root.height;
+        mode <=> root.contact-action-mode;
+        name <=> root.contact-edited-name;
+        busy: root.contact-save-busy; error: root.contact-action-error;
+        anchor-x: root.contact-action-x; anchor-y: root.contact-action-y;
+        dismiss => { if !root.contact-save-busy { root.contact-action-mode = ""; } }
+        save => { root.save-contact-name(root.contact-action-peer, root.contact-edited-name); }
     }
 
     if root.message-action-mode != "" && root.setup-page == 0 && !root.update-required && root.show-conversation && !root.showing-account-removal: MessageActions {

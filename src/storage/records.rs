@@ -1,5 +1,32 @@
-use super::{Database, Result};
+use super::{Database, Error, Result};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
+
+// Durable evidence, including hidden/deleted history, establishes a relationship.
+// A draft or an empty conversation created by entering an ID is not evidence.
+const TWO_WAY: &str =
+    "EXISTS (SELECT 1 FROM inbox i WHERE i.sender_void_id=c.peer_void_id)
+    AND (EXISTS (SELECT 1 FROM outgoing_operations o WHERE o.conversation_id=c.id)
+         OR EXISTS (SELECT 1 FROM messages m JOIN outbox b ON b.message_id=m.id WHERE m.conversation_id=c.id))";
+
+pub(super) fn establish_contacts(tx: &Transaction<'_>, conversation: Option<i64>) -> Result<()> {
+    tx.execute(
+        &format!(
+            "INSERT INTO contacts (void_id,display_name)
+        SELECT c.peer_void_id,c.display_name FROM conversations c
+        WHERE (?1 IS NULL OR c.id=?1) AND ({TWO_WAY})
+        ON CONFLICT(void_id) DO NOTHING"
+        ),
+        [conversation],
+    )?;
+    tx.execute(
+        &format!(
+            "DELETE FROM requests WHERE conversation_id IN (
+        SELECT c.id FROM conversations c WHERE (?1 IS NULL OR c.id=?1) AND ({TWO_WAY}))"
+        ),
+        [conversation],
+    )?;
+    Ok(())
+}
 
 pub(crate) struct Conversation {
     pub id: i64,
@@ -108,7 +135,7 @@ impl Database {
 
     pub(crate) fn conversations(&self, requests: bool) -> Result<Vec<Conversation>> {
         let mut query = self.connection.prepare(
-            "SELECT c.id, c.peer_void_id, coalesce(c.display_name, contact.display_name),
+            "SELECT c.id, c.peer_void_id, coalesce(contact.display_name, c.display_name),
                     c.created_at, c.last_activity_at, r.conversation_id IS NOT NULL,
                     (SELECT max(sequence) FROM unread_messages WHERE conversation_id = c.id)
              FROM conversations c
@@ -124,7 +151,7 @@ impl Database {
 
     pub(crate) fn conversation(&self, id: i64) -> Result<Conversation> {
         Ok(self.connection.query_row(
-            "SELECT c.id, c.peer_void_id, coalesce(c.display_name, contact.display_name),
+            "SELECT c.id, c.peer_void_id, coalesce(contact.display_name, c.display_name),
                     c.created_at, c.last_activity_at, r.conversation_id IS NOT NULL,
                     (SELECT max(sequence) FROM unread_messages WHERE conversation_id = c.id)
              FROM conversations c
@@ -213,6 +240,45 @@ impl Database {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub(crate) fn contact(&self, peer: &str) -> Result<Option<Contact>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT void_id,display_name,public_identity FROM contacts WHERE void_id=?1",
+                [peer],
+                |row| {
+                    Ok(Contact {
+                        void_id: row.get(0)?,
+                        display_name: row.get(1)?,
+                        public_identity: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn rename_contact(&mut self, peer: &str, name: &str) -> Result<bool> {
+        let name = name.trim();
+        if name.chars().count() > 100 || name.chars().any(char::is_control) {
+            return Err(Error::InvalidContactName);
+        }
+        self.write(|tx| {
+            let changed = tx.execute(
+                "UPDATE contacts SET display_name=?2 WHERE void_id=?1",
+                params![peer, (!name.is_empty()).then_some(name)],
+            )? != 0;
+            if changed {
+                // Contacts own local names. Clearing a nickname must not revive
+                // an older conversation alias through the fallback query.
+                tx.execute(
+                    "UPDATE conversations SET display_name=NULL WHERE peer_void_id=?1",
+                    [peer],
+                )?;
+            }
+            Ok(changed)
+        })
     }
 
     pub(crate) fn save_draft(&self, conversation_id: i64, body: &str) -> Result<()> {

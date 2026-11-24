@@ -87,6 +87,7 @@ impl Database {
             }
             tx.execute("INSERT INTO outbox (event_id, message_id, payload, receipt_requested) VALUES (?1, ?2, ?3, ?4)",
                 params![event_id, message.id, payload, receipt_requested])?;
+            super::records::establish_contacts(tx, Some(conversation_id))?;
             Ok(payload)
         })
     }
@@ -190,6 +191,7 @@ pub(super) fn apply_incoming(
             if let Some(now) = receipt_at {
                 super::receipts::queue(tx, sender, event_id, now)?;
             }
+            super::records::establish_contacts(tx, Some(message.conversation_id))?;
         }
         Incoming::Receipt { original_event_id } => {
             super::receipts::verify(tx, sender, event_id, digest, &original_event_id)?;

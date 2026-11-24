@@ -1,5 +1,6 @@
 use super::*;
 
+mod contacts;
 pub(crate) mod encrypted_events;
 pub(crate) mod relay_messaging;
 
