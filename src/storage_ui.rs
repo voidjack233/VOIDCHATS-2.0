@@ -311,7 +311,7 @@ fn bind_with(
                                         return;
                                     }
                                     ui.set_conversation_loading(false);
-                                    if ui.get_creating_conversation() || opening_contact {
+                                    if ui.get_creating_conversation() && !opening_contact {
                                         ui.set_creating_conversation(false);
                                         ui.set_section(
                                             if detail.conversation.is_request {
@@ -636,7 +636,15 @@ fn bind_with(
     let weak = ui.as_weak();
     let sender = worker.sender.clone();
     ui.on_select_stored_conversation(move |id| {
-        if let (Some(ui), Ok(id)) = (weak.upgrade(), id.parse()) {
+        if let (Some(ui), Ok(id)) = (weak.upgrade(), id.parse::<i64>()) {
+            if !ui.get_conversation_loading()
+                && !ui.get_creating_conversation()
+                && !ui.get_conversation_is_request()
+                && ui.get_conversation_error().is_empty()
+                && ui.get_selected_conversation() == id.to_string()
+            {
+                return;
+            }
             let previous = ReadingPosition::capture(&ui);
             let selection = begin_selection(&ui);
             let from_requests = ui.get_section() == "Requests";
@@ -1282,6 +1290,16 @@ fn bind_contacts(ui: &AppWindow, sender: Sender<Command>) {
             && !ui.get_conversation_loading()
             && !ui.get_update_required()
         {
+            // Contacts and Chats share the active timeline. Selecting the same
+            // peer must not show a loading row, reload drafts or restore anchors.
+            if !ui.get_selected_conversation().is_empty()
+                && !ui.get_creating_conversation()
+                && !ui.get_conversation_is_request()
+                && ui.get_conversation_error().is_empty()
+                && ui.get_conversation_peer_id() == peer
+            {
+                return;
+            }
             let previous = ReadingPosition::capture(&ui);
             let selection = begin_selection(&ui);
             if open
@@ -1362,6 +1380,7 @@ impl Detail {
         } = self;
         ui.set_conversation_read_through("".into());
         ui.set_selected_conversation(conversation.id.to_string().into());
+        ui.set_conversation_peer_id(conversation.peer_void_id.into());
         ui.set_conversation_title(contact_title(conversation.display_name));
         ui.set_conversation_is_request(conversation.is_request);
         ui.set_conversation_peer_deleted(account_status == AccountStatus::Deleted);

@@ -249,6 +249,7 @@ export component AppWindow inherits Window {
     in-out property <string> contact-action-error;
     private property <string> contact-action-mode;
     private property <string> contact-action-peer;
+    private property <string> selected-contact-peer;
     private property <string> contact-edited-name;
     private property <length> contact-action-x;
     private property <length> contact-action-y;
@@ -278,6 +279,7 @@ export component AppWindow inherits Window {
     in property <string> conversation-title;
     in property <string> conversation-read-through;
     in property <bool> conversation-is-request;
+    in property <string> conversation-peer-id;
     in property <bool> conversation-peer-deleted;
     in-out property <bool> conversation-loading;
     in-out property <bool> creating-conversation;
@@ -349,7 +351,7 @@ export component AppWindow inherits Window {
         ? root.stored-requests : root.stored-chats;
     private property <bool> show-conversation: root.selected-conversation != "" && !root.creating-conversation
         && ((root.section == "Requests" && root.conversation-is-request)
-            || (root.section == "Chats" && !root.conversation-is-request));
+            || ((root.section == "Chats" || root.section == "Contacts") && !root.conversation-is-request));
     out property <bool> conversation-can-compose: root.show-conversation && !root.conversation-peer-deleted;
     private property <string> timestamp-tip;
     private property <int> timestamp-tip-row: -1;
@@ -373,6 +375,7 @@ export component AppWindow inherits Window {
         ? "This user account has been deleted." : "";
 
     changed section => {
+        root.selected-contact-peer = "";
         root.contact-action-mode = "";
         root.message-action-mode = "";
         root.cancel-permanent-deletion();
@@ -689,8 +692,13 @@ export component AppWindow inherits Window {
                                 spacing: 4px;
                                 for contact in root.stored-contacts: ContactRow {
                                     name: contact.title;
+                                    selected: root.selected-contact-peer == contact.void-id
+                                        && root.show-conversation && root.conversation-peer-id == contact.void-id;
                                     enabled: !root.conversation-loading && !root.contact-save-busy;
-                                    open => { root.open-stored-contact(contact.void-id); }
+                                    open => {
+                                        root.selected-contact-peer = contact.void-id;
+                                        root.open-stored-contact(contact.void-id);
+                                    }
                                     options(x,y) => {
                                         root.contact-action-peer = contact.void-id;
                                         root.contact-edited-name = contact.name;

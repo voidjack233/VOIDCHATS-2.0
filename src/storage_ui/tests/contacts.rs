@@ -41,6 +41,28 @@ fn click(ui: &AppWindow, label: &str) {
         button: PointerEventButton::Left,
     });
 }
+
+fn assert_reuses_view(ui: &AppWindow, activate: impl FnOnce()) {
+    let selection = ui.get_storage_selection_token();
+    let revision = ui.get_timeline_revision();
+    let model = ui.get_stored_messages();
+    let draft = ui.get_stored_draft();
+    let anchor = ui.get_timeline_anchor_key();
+    let offset = ui.get_timeline_anchor_offset();
+    let viewport = ui.get_timeline_viewport_y();
+    activate();
+    assert!(
+        !ui.get_conversation_loading(),
+        "Same-conversation clicks must not insert a loading row"
+    );
+    assert_eq!(ui.get_storage_selection_token(), selection);
+    assert_eq!(ui.get_timeline_revision(), revision);
+    assert!(ui.get_stored_messages() == model);
+    assert_eq!(ui.get_stored_draft(), draft);
+    assert_eq!(ui.get_timeline_anchor_key(), anchor);
+    assert_eq!(ui.get_timeline_anchor_offset(), offset);
+    assert_eq!(ui.get_timeline_viewport_y(), viewport);
+}
 fn snapshot(ui: &AppWindow, native: bool, name: &str) {
     if !native {
         return;
@@ -186,11 +208,21 @@ fn fixture(native: bool) {
             9 if !ui.get_conversation_loading()
                 && ui.get_selected_conversation() == chat.to_string() =>
             {
-                assert_eq!(ui.get_section(), "Chats");
+                assert_eq!(ui.get_section(), "Contacts");
+                assert!(ui.get_conversation_can_compose());
                 assert_eq!(ui.get_conversation_title(), "Maya Chen");
                 assert_eq!(ui.get_stored_draft(), "Unsent draft kept");
                 assert_eq!(ui.get_stored_messages().row_count(), 2);
-                ui.set_section("Contacts".into());
+                assert_eq!(
+                    ui.get_stored_chats().row_data(0).unwrap().id,
+                    other.to_string()
+                );
+                assert_eq!(ui.get_conversation_peer_id(), "123");
+                assert_eq!(
+                    control(&ui, "Contact Maya Chen").accessible_item_selected(),
+                    Some(true)
+                );
+                assert_reuses_view(&ui, || click(&ui, "Open chat with Maya Chen"));
                 seen.set(10);
             }
             10 => {
@@ -207,15 +239,84 @@ fn fixture(native: bool) {
                 seen.set(13);
             }
             13 if !ui.get_contact_save_busy() && ui.get_conversation_title() == "Maya Local" => {
-                ui.set_section("Chats".into());
+                assert_eq!(ui.get_section(), "Contacts");
                 ui.window().set_size(slint::PhysicalSize::new(1080, 680));
                 seen.set(14);
             }
             14 => {
                 assert_eq!(ui.get_stored_draft(), "Unsent draft kept");
                 assert_eq!(ui.get_stored_messages().row_count(), 2);
-                snapshot(&ui, native, "05-associated-chat");
+                snapshot(&ui, native, "05-conversation-in-contacts");
+                click(&ui, "Send");
                 seen.set(15);
+            }
+            15 if !ui.get_send_busy() && ui.get_stored_messages().row_count() == 3 => {
+                assert_eq!(ui.get_section(), "Contacts");
+                assert!(ui.get_conversation_can_compose());
+                assert_eq!(ui.get_selected_conversation(), chat.to_string());
+                assert!(ui.get_stored_draft().is_empty());
+                assert_eq!(
+                    ui.get_stored_chats().row_data(0).unwrap().id,
+                    chat.to_string()
+                );
+                assert_eq!(ui.get_stored_chats().row_count(), 2);
+                snapshot(&ui, native, "06-contact-after-send");
+                ui.set_section("Chats".into());
+                seen.set(16);
+            }
+            16 => {
+                assert_eq!(ui.get_selected_conversation(), chat.to_string());
+                assert_eq!(ui.get_stored_messages().row_count(), 3);
+                assert!(ui.get_conversation_can_compose());
+                assert_reuses_view(&ui, || {
+                    ui.invoke_select_stored_conversation(chat.to_string().into())
+                });
+                ui.set_section("Contacts".into());
+                seen.set(17);
+            }
+            17 => {
+                assert_eq!(ui.get_selected_conversation(), chat.to_string());
+                assert_eq!(ui.get_stored_messages().row_count(), 3);
+                assert!(
+                    ui.get_conversation_can_compose(),
+                    "Switching sections must keep the conversation visible"
+                );
+                assert!(ui.get_stored_draft().is_empty());
+                assert!(
+                    ElementHandle::find_by_element_type_name(&ui, "ContactRow")
+                        .all(|row| row.accessible_item_selected() == Some(false)),
+                    "Entering Contacts must not select a contact"
+                );
+                snapshot(&ui, native, "07-contacts-without-selection");
+                assert_reuses_view(&ui, || click(&ui, "Open chat with Maya Local"));
+                seen.set(18);
+            }
+            18 if !ui.get_conversation_loading() => {
+                assert_eq!(ui.get_section(), "Contacts");
+                assert_eq!(ui.get_selected_conversation(), chat.to_string());
+                assert_eq!(
+                    control(&ui, "Contact Maya Local").accessible_item_selected(),
+                    Some(true)
+                );
+                snapshot(&ui, native, "08-explicit-contact-selection");
+                // A different contact must still load its own existing history.
+                let name = ui
+                    .get_stored_contacts()
+                    .iter()
+                    .find(|c| c.void_id == "456")
+                    .unwrap()
+                    .title;
+                click(&ui, &format!("Open chat with {name}"));
+                seen.set(19);
+            }
+            19 if !ui.get_conversation_loading()
+                && ui.get_selected_conversation() == other.to_string() =>
+            {
+                assert_eq!(ui.get_section(), "Contacts");
+                assert_eq!(ui.get_conversation_peer_id(), "456");
+                assert_eq!(ui.get_stored_messages().row_count(), 2);
+                assert!(ui.get_stored_draft().is_empty());
+                seen.set(20);
                 ui.hide().unwrap();
                 slint::quit_event_loop().unwrap();
             }
@@ -225,7 +326,7 @@ fn fixture(native: bool) {
     slint::run_event_loop().unwrap();
     timer.stop();
     worker.finish();
-    assert_eq!(phase.get(), 15);
+    assert_eq!(phase.get(), 20);
     let db = Database::open(&root.0, owner).unwrap();
     assert_eq!(db.contacts().unwrap().len(), 2);
     assert_eq!(
@@ -236,9 +337,9 @@ fn fixture(native: bool) {
         db.conversation(chat).unwrap().display_name.as_deref(),
         Some("Maya Local")
     );
-    assert_eq!(
-        db.draft(chat).unwrap().as_deref(),
-        Some("Unsent draft kept")
-    );
-    assert_eq!(db.conversation_timeline(chat).unwrap().len(), 2);
+    assert!(db.draft(chat).unwrap().is_none());
+    let messages = db.conversation_timeline(chat).unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.last().unwrap().body, "Unsent draft kept");
+    assert_eq!(db.conversations(false).unwrap()[0].id, chat);
 }

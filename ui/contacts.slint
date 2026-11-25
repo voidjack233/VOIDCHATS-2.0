@@ -5,11 +5,16 @@ import { Action, Clickable, WrappingText } from "controls.slint";
 export component ContactRow inherits Rectangle {
     in property <string> name;
     in property <bool> enabled: true;
+    in property <bool> selected;
     callback open();
     callback options(length, length);
+    accessible-role: list-item;
+    accessible-label: "Contact " + root.name;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
     height: 56px;
     border-radius: 10px;
-    background: open-button.hovered || menu-button.hovered ? Theme.elevated : transparent;
+    background: root.selected ? Theme.selected : open-button.hovered || menu-button.hovered ? Theme.elevated : transparent;
     HorizontalLayout {
         padding: 6px; spacing: 4px;
         open-button := Clickable {
